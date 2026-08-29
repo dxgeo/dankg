@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "nodes": [
+    {"id": "notes/ideas#ideas", "title": "Ideas", "file": "notes/ideas.md", "line": 4, "end_line": 8, "level": 1, "parent": null, "tags": [], "external": [], "resolved": true},
+    {"id": "notes/ideas#future", "title": "Future", "file": "notes/ideas.md", "line": 8, "end_line": 8, "level": 2, "parent": "notes/ideas#ideas", "tags": [], "external": [], "resolved": true},
+    {"id": "nowhere#lost", "title": "lost", "file": "nowhere.md", "line": 0, "end_line": 0, "level": 0, "parent": null, "tags": [], "external": [], "resolved": false},
+    {"id": "orphan#orphan", "title": "orphan", "file": "orphan.md", "line": 1, "end_line": 1, "level": 0, "parent": null, "tags": [], "external": [], "resolved": true},
+    {"id": "project#overview", "title": "Overview", "file": "project.md", "line": 5, "end_line": 13, "level": 1, "parent": null, "tags": ["rust", "graphs"], "external": ["https://example.com"], "resolved": true},
+    {"id": "project#constraints", "title": "Constraints", "file": "project.md", "line": 10, "end_line": 13, "level": 2, "parent": "project#overview", "tags": ["rust", "graphs"], "external": [], "resolved": true},
+    {"id": "project#code-eval", "title": "Code Eval", "file": "project.md", "line": 14, "end_line": 18, "level": 1, "parent": null, "tags": ["rust", "graphs"], "external": [], "resolved": true}
+  ],
+  "edges": [
+    {"from": "notes/ideas#ideas", "to": "notes/ideas#future", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "notes/ideas#ideas", "to": "project#overview", "kind": "link", "line": 6, "reciprocated": true},
+    {"from": "project#code-eval", "to": "nowhere#lost", "kind": "link", "line": 16, "reciprocated": false},
+    {"from": "project#constraints", "to": "project#overview", "kind": "link", "line": 12, "reciprocated": true},
+    {"from": "project#overview", "to": "notes/ideas#future", "kind": "link", "line": 8, "reciprocated": false},
+    {"from": "project#overview", "to": "notes/ideas#ideas", "kind": "link", "line": 7, "reciprocated": true},
+    {"from": "project#overview", "to": "project#constraints", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "project#overview", "to": "project#constraints", "kind": "link", "line": 7, "reciprocated": true}
+  ]
+}

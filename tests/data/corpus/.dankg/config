@@ -1,0 +1,9 @@
+# This file is what makes tests/data/corpus a root: discovery walks up looking
+# for the .dankg/ directory, not for this file's contents.
+
+[graph]
+depth = 2
+
+[lang.sh]
+command = sh {file}
+ext     = sh

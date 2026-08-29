@@ -1,0 +1,699 @@
+//! Inline parsing: code spans, links, wikilinks, emphasis, breaks.
+//!
+//! Emphasis follows CommonMark's delimiter-stack algorithm, including the
+//! left/right-flanking rules and the "rule of three". Links are resolved on the
+//! closing bracket so that emphasis inside link text nests correctly.
+//!
+//! Outside the subset and therefore left as literal text: images, autolinks,
+//! raw HTML, entity references, and link reference definitions.
+
+use super::Inline;
+
+/// Transient node. Emphasis and bracket markers survive only until they are
+/// matched; unmatched ones degrade to literal text.
+#[derive(Debug, Clone, PartialEq)]
+enum Node {
+    Text(String),
+    Code(String),
+    Emph(char, Vec<Node>),
+    Strong(char, Vec<Node>),
+    Link { dest: String, title: Option<String>, children: Vec<Node> },
+    WikiLink { target: String, label: Option<String> },
+    SoftBreak,
+    HardBreak,
+    /// A run of `*` or `_` not yet known to be emphasis.
+    DelimRun(char, usize),
+    /// An unmatched `[`.
+    BracketOpen,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Delim {
+    ch: char,
+    idx: usize,
+    count: usize,
+    orig: usize,
+    can_open: bool,
+    can_close: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Bracket {
+    idx: usize,
+    active: bool,
+}
+
+pub fn parse(text: &str) -> Vec<Inline> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut p = Parser {
+        chars: &chars,
+        pos: 0,
+        nodes: Vec::new(),
+        delims: Vec::new(),
+        brackets: Vec::new(),
+    };
+    p.run();
+    let mut nodes = p.nodes;
+    let mut delims = p.delims;
+    process_emphasis(&mut nodes, &mut delims, 0);
+    to_inlines(nodes)
+}
+
+struct Parser<'a> {
+    chars: &'a [char],
+    pos: usize,
+    nodes: Vec<Node>,
+    delims: Vec<Delim>,
+    brackets: Vec<Bracket>,
+}
+
+impl<'a> Parser<'a> {
+    fn run(&mut self) {
+        while self.pos < self.chars.len() {
+            let c = self.chars[self.pos];
+            match c {
+                '\\' => self.backslash(),
+                '`' => self.code_span(),
+                '\n' => self.line_break(),
+                '[' => self.open_bracket(),
+                ']' => self.close_bracket(),
+                '*' | '_' => self.delim_run(c),
+                _ => {
+                    self.push_text(c);
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    fn push_text(&mut self, c: char) {
+        match self.nodes.last_mut() {
+            Some(Node::Text(s)) => s.push(c),
+            _ => self.nodes.push(Node::Text(c.to_string())),
+        }
+    }
+
+    fn push_str(&mut self, s: &str) {
+        match self.nodes.last_mut() {
+            Some(Node::Text(t)) => t.push_str(s),
+            _ => self.nodes.push(Node::Text(s.to_string())),
+        }
+    }
+
+    fn backslash(&mut self) {
+        match self.chars.get(self.pos + 1) {
+            Some('\n') => {
+                self.nodes.push(Node::HardBreak);
+                self.pos += 2;
+            }
+            Some(&c) if c.is_ascii_punctuation() => {
+                self.push_text(c);
+                self.pos += 2;
+            }
+            _ => {
+                self.push_text('\\');
+                self.pos += 1;
+            }
+        }
+    }
+
+    fn code_span(&mut self) {
+        let open = run_length(self.chars, self.pos, '`');
+        let after = self.pos + open;
+        let mut scan = after;
+        while scan < self.chars.len() {
+            if self.chars[scan] == '`' {
+                let close = run_length(self.chars, scan, '`');
+                if close == open {
+                    let content: String = self.chars[after..scan].iter().collect();
+                    self.nodes.push(Node::Code(strip_code_padding(&content)));
+                    self.pos = scan + close;
+                    return;
+                }
+                scan += close;
+            } else {
+                scan += 1;
+            }
+        }
+        // No matching run: the backticks are literal.
+        let literal: String = self.chars[self.pos..after].iter().collect();
+        self.push_str(&literal);
+        self.pos = after;
+    }
+
+    fn line_break(&mut self) {
+        let mut hard = false;
+        if let Some(Node::Text(s)) = self.nodes.last_mut() {
+            let trimmed = s.trim_end_matches(' ');
+            hard = s.len() - trimmed.len() >= 2;
+            s.truncate(trimmed.len());
+            if s.is_empty() {
+                self.nodes.pop();
+            }
+        }
+        self.nodes.push(if hard { Node::HardBreak } else { Node::SoftBreak });
+        self.pos += 1;
+        // Leading whitespace on the next line is not content.
+        while matches!(self.chars.get(self.pos), Some(' ') | Some('\t')) {
+            self.pos += 1;
+        }
+    }
+
+    fn open_bracket(&mut self) {
+        if self.chars.get(self.pos + 1) == Some(&'[') {
+            if self.wiki_link() {
+                return;
+            }
+        }
+        self.nodes.push(Node::BracketOpen);
+        self.brackets.push(Bracket { idx: self.nodes.len() - 1, active: true });
+        self.pos += 1;
+    }
+
+    /// `[[target]]` or `[[target|label]]`. Returns false if unterminated, in
+    /// which case the brackets are handled as ordinary markdown.
+    fn wiki_link(&mut self) -> bool {
+        let start = self.pos + 2;
+        let mut scan = start;
+        while scan + 1 < self.chars.len() {
+            if self.chars[scan] == ']' && self.chars[scan + 1] == ']' {
+                let inner: String = self.chars[start..scan].iter().collect();
+                if inner.is_empty() || inner.contains('\n') {
+                    return false;
+                }
+                let (target, label) = match inner.split_once('|') {
+                    Some((t, l)) => (t.trim().to_string(), Some(l.trim().to_string())),
+                    None => (inner.trim().to_string(), None),
+                };
+                self.nodes.push(Node::WikiLink { target, label });
+                self.pos = scan + 2;
+                return true;
+            }
+            scan += 1;
+        }
+        false
+    }
+
+    fn close_bracket(&mut self) {
+        let Some(bracket) = self.brackets.pop() else {
+            self.push_text(']');
+            self.pos += 1;
+            return;
+        };
+
+        if !bracket.active {
+            self.nodes[bracket.idx] = Node::Text("[".into());
+            self.push_text(']');
+            self.pos += 1;
+            return;
+        }
+
+        let Some((dest, title, end)) = self.link_destination(self.pos + 1) else {
+            // Not a link after all; the bracket becomes literal text.
+            self.nodes[bracket.idx] = Node::Text("[".into());
+            self.push_text(']');
+            self.pos += 1;
+            return;
+        };
+
+        // Emphasis inside the link text resolves before the link is formed.
+        let bottom = self.delims.iter().position(|d| d.idx > bracket.idx).unwrap_or(self.delims.len());
+        process_emphasis(&mut self.nodes, &mut self.delims, bottom);
+        self.delims.retain(|d| d.idx < bracket.idx);
+
+        let children: Vec<Node> = self.nodes.drain(bracket.idx + 1..).collect();
+        self.nodes[bracket.idx] = Node::Link { dest, title, children };
+
+        // Links do not nest, so any enclosing bracket can no longer open one.
+        for b in &mut self.brackets {
+            b.active = false;
+        }
+        self.pos = end;
+    }
+
+    /// Parse `(dest "title")` immediately following a `]`, with balanced
+    /// parentheses and optional `<...>` wrapping.
+    fn link_destination(&self, at: usize) -> Option<(String, Option<String>, usize)> {
+        if self.chars.get(at) != Some(&'(') {
+            return None;
+        }
+        let mut i = at + 1;
+        i = self.skip_ascii_space(i);
+
+        let mut dest = String::new();
+        if self.chars.get(i) == Some(&'<') {
+            i += 1;
+            while let Some(&c) = self.chars.get(i) {
+                match c {
+                    '>' => {
+                        i += 1;
+                        break;
+                    }
+                    '\n' => return None,
+                    '\\' if self.chars.get(i + 1).is_some_and(|n| n.is_ascii_punctuation()) => {
+                        dest.push(self.chars[i + 1]);
+                        i += 2;
+                    }
+                    _ => {
+                        dest.push(c);
+                        i += 1;
+                    }
+                }
+            }
+        } else {
+            let mut depth = 0i32;
+            while let Some(&c) = self.chars.get(i) {
+                match c {
+                    '\\' if self.chars.get(i + 1).is_some_and(|n| n.is_ascii_punctuation()) => {
+                        dest.push(self.chars[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    '(' => depth += 1,
+                    ')' => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    c if c.is_ascii_whitespace() => break,
+                    _ => {}
+                }
+                dest.push(c);
+                i += 1;
+            }
+        }
+
+        // DanKG makes no use of link titles, but the parser keeps them: an AST
+        // that discards input it has already read cannot be rendered faithfully.
+        let before_title = i;
+        i = self.skip_ascii_space(i);
+        let mut title = None;
+        if i > before_title || self.chars.get(before_title) == Some(&'(') {
+            if let Some((text, next)) = self.link_title(i) {
+                title = Some(text);
+                i = self.skip_ascii_space(next);
+            }
+        }
+
+        if self.chars.get(i) != Some(&')') {
+            return None;
+        }
+        Some((dest, title, i + 1))
+    }
+
+    fn skip_ascii_space(&self, mut i: usize) -> usize {
+        while self.chars.get(i).is_some_and(|c| c.is_ascii_whitespace()) {
+            i += 1;
+        }
+        i
+    }
+
+    /// A `"..."`, `'...'`, or `(...)` title. Backslash escapes are honoured, so
+    /// an escaped quote does not end the title early.
+    fn link_title(&self, at: usize) -> Option<(String, usize)> {
+        let open = *self.chars.get(at)?;
+        let close = match open {
+            '"' => '"',
+            '\'' => '\'',
+            '(' => ')',
+            _ => return None,
+        };
+        let mut i = at + 1;
+        let mut text = String::new();
+        while let Some(&c) = self.chars.get(i) {
+            if c == '\\' && self.chars.get(i + 1).is_some_and(|n| n.is_ascii_punctuation()) {
+                text.push(self.chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == close {
+                return Some((text, i + 1));
+            }
+            text.push(c);
+            i += 1;
+        }
+        None
+    }
+
+    fn delim_run(&mut self, ch: char) {
+        let count = run_length(self.chars, self.pos, ch);
+        let before = if self.pos == 0 { ' ' } else { self.chars[self.pos - 1] };
+        let after = self.chars.get(self.pos + count).copied().unwrap_or(' ');
+
+        let (can_open, can_close) = can_open_close(ch, before, after);
+
+        self.nodes.push(Node::DelimRun(ch, count));
+        self.delims.push(Delim {
+            ch,
+            idx: self.nodes.len() - 1,
+            count,
+            orig: count,
+            can_open,
+            can_close,
+        });
+        self.pos += count;
+    }
+}
+
+fn run_length(chars: &[char], start: usize, ch: char) -> usize {
+    let mut n = 0;
+    while chars.get(start + n) == Some(&ch) {
+        n += 1;
+    }
+    n
+}
+
+pub(crate) fn is_punct(c: char) -> bool {
+    // std exposes no Unicode punctuation category, so this covers ASCII plus
+    // the general-punctuation block, which is what real documents use.
+    c.is_ascii_punctuation() || ('\u{2010}'..='\u{2027}').contains(&c) || ('\u{2030}'..='\u{205E}').contains(&c)
+}
+
+/// Whether a `*` or `_` run between these two characters may open or close
+/// emphasis.
+///
+/// Shared with the formatter, which has to escape exactly the delimiters this
+/// says are live. Two copies of this rule would drift, and the drift would show
+/// up as emphasis appearing or vanishing on `dankg fmt`.
+pub(crate) fn can_open_close(ch: char, before: char, after: char) -> (bool, bool) {
+    let (left, right) = flanking(before, after);
+    if ch == '*' {
+        (left, right)
+    } else {
+        // `_` cannot open or close inside a word, so that snake_case_names
+        // survive intact.
+        (left && (!right || is_punct(before)), right && (!left || is_punct(after)))
+    }
+}
+
+/// CommonMark's left- and right-flanking tests for a delimiter run.
+fn flanking(before: char, after: char) -> (bool, bool) {
+    let before_ws = before.is_whitespace();
+    let after_ws = after.is_whitespace();
+    let before_punct = is_punct(before);
+    let after_punct = is_punct(after);
+
+    let left = !after_ws && (!after_punct || before_ws || before_punct);
+    let right = !before_ws && (!before_punct || after_ws || after_punct);
+    (left, right)
+}
+
+/// Strip one space from each end of a code span when both are present and the
+/// content is not entirely spaces.
+fn strip_code_padding(content: &str) -> String {
+    let normalized = content.replace('\n', " ");
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0] == b' '
+        && bytes[bytes.len() - 1] == b' '
+        && normalized.bytes().any(|b| b != b' ')
+    {
+        return normalized[1..normalized.len() - 1].to_string();
+    }
+    normalized
+}
+
+/// CommonMark's `process emphasis` procedure, adapted to an index-based node
+/// list. Splicing shifts later indices, so delimiter positions are fixed up
+/// after every match.
+fn process_emphasis(nodes: &mut Vec<Node>, delims: &mut Vec<Delim>, stack_bottom: usize) {
+    // Lowest opener index worth revisiting, keyed by closer shape. The key is
+    // (delimiter char, original length mod 3, whether the closer can also open).
+    let mut openers_bottom: Vec<((char, usize, bool), usize)> = Vec::new();
+
+    let mut closer_idx = stack_bottom;
+    while closer_idx < delims.len() {
+        if !delims[closer_idx].can_close || delims[closer_idx].count == 0 {
+            closer_idx += 1;
+            continue;
+        }
+
+        let closer = delims[closer_idx];
+        let key = (closer.ch, closer.orig % 3, closer.can_open);
+        let bottom = openers_bottom
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .unwrap_or(stack_bottom);
+
+        let mut opener_idx = None;
+        let mut i = closer_idx;
+        while i > bottom {
+            i -= 1;
+            let d = delims[i];
+            if d.ch != closer.ch || !d.can_open || d.count == 0 {
+                continue;
+            }
+            // Rule of three: when either delimiter can both open and close, a
+            // combined length divisible by three is not a match, unless both
+            // lengths are themselves divisible by three.
+            if (closer.can_open || d.can_close)
+                && (d.orig + closer.orig) % 3 == 0
+                && !(d.orig % 3 == 0 && closer.orig % 3 == 0)
+            {
+                continue;
+            }
+            opener_idx = Some(i);
+            break;
+        }
+
+        let Some(opener_idx) = opener_idx else {
+            openers_bottom.retain(|(k, _)| *k != key);
+            openers_bottom.push((key, closer_idx.saturating_sub(1)));
+            if !delims[closer_idx].can_open {
+                delims[closer_idx].count = 0;
+            }
+            closer_idx += 1;
+            continue;
+        };
+
+        let strong = delims[opener_idx].count >= 2 && delims[closer_idx].count >= 2;
+        let used = if strong { 2 } else { 1 };
+
+        let oi = delims[opener_idx].idx;
+        let ci = delims[closer_idx].idx;
+
+        delims[opener_idx].count -= used;
+        delims[closer_idx].count -= used;
+        set_run_len(&mut nodes[oi], delims[opener_idx].count);
+        set_run_len(&mut nodes[ci], delims[closer_idx].count);
+
+        // Delimiters strictly between the pair can never match anything now.
+        for d in &mut delims[opener_idx + 1..closer_idx] {
+            d.count = 0;
+        }
+
+        let children: Vec<Node> = nodes.drain(oi + 1..ci).collect();
+        let wrapped = if strong {
+            Node::Strong(closer.ch, children)
+        } else {
+            Node::Emph(closer.ch, children)
+        };
+        nodes.insert(oi + 1, wrapped);
+
+        // The drain removed (ci - oi - 1) nodes and the insert added one.
+        let removed = ci - oi - 1;
+        let delta = removed as isize - 1;
+        for d in delims.iter_mut() {
+            if d.idx > oi {
+                d.idx = (d.idx as isize - delta) as usize;
+            }
+        }
+
+        // Drop exhausted delimiters and their now-empty text nodes.
+        if delims[closer_idx].count == 0 {
+            let idx = delims[closer_idx].idx;
+            nodes.remove(idx);
+            shift_after(delims, idx);
+        }
+        if delims[opener_idx].count == 0 {
+            let idx = delims[opener_idx].idx;
+            nodes.remove(idx);
+            shift_after(delims, idx);
+        }
+
+        if delims[closer_idx].count == 0 {
+            closer_idx += 1;
+        }
+    }
+}
+
+fn set_run_len(node: &mut Node, count: usize) {
+    if let Node::DelimRun(_, n) = node {
+        *n = count;
+    }
+}
+
+fn shift_after(delims: &mut [Delim], removed: usize) {
+    for d in delims.iter_mut() {
+        if d.idx > removed {
+            d.idx -= 1;
+        }
+    }
+}
+
+fn to_inlines(nodes: Vec<Node>) -> Vec<Inline> {
+    let mut out: Vec<Inline> = Vec::new();
+    for node in nodes {
+        let inline = match node {
+            Node::Text(s) => Inline::Text(s),
+            Node::Code(s) => Inline::Code(s),
+            Node::Emph(delim, c) => Inline::Emph { delim, inner: to_inlines(c) },
+            Node::Strong(delim, c) => Inline::Strong { delim, inner: to_inlines(c) },
+            Node::Link { dest, title, children } => {
+                Inline::Link { dest, title, text: to_inlines(children) }
+            }
+            Node::WikiLink { target, label } => Inline::WikiLink { target, label },
+            Node::SoftBreak => Inline::SoftBreak,
+            Node::HardBreak => Inline::HardBreak,
+            Node::DelimRun(ch, n) => {
+                if n == 0 {
+                    continue;
+                }
+                Inline::Text(std::iter::repeat(ch).take(n).collect())
+            }
+            Node::BracketOpen => Inline::Text("[".into()),
+        };
+        // Merge adjacent text so downstream consumers see one run per span.
+        match (out.last_mut(), &inline) {
+            (Some(Inline::Text(a)), Inline::Text(b)) => a.push_str(b),
+            _ => out.push(inline),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(s: &str) -> Inline {
+        Inline::Text(s.into())
+    }
+
+    #[test]
+    fn plain_text() {
+        assert_eq!(parse("hello"), vec![t("hello")]);
+    }
+
+    fn emph(inner: Vec<Inline>) -> Inline {
+        Inline::Emph { delim: '*', inner }
+    }
+
+    fn strong(inner: Vec<Inline>) -> Inline {
+        Inline::Strong { delim: '*', inner }
+    }
+
+    #[test]
+    fn emphasis_and_strong() {
+        assert_eq!(parse("*a*"), vec![emph(vec![t("a")])]);
+        assert_eq!(parse("**a**"), vec![strong(vec![t("a")])]);
+        assert_eq!(parse("***a***"), vec![emph(vec![strong(vec![t("a")])])]);
+    }
+
+    #[test]
+    fn emphasis_records_its_delimiter() {
+        assert_eq!(parse("_a_"), vec![Inline::Emph { delim: '_', inner: vec![t("a")] }]);
+    }
+
+    #[test]
+    fn underscore_does_not_split_words() {
+        assert_eq!(parse("snake_case_name"), vec![t("snake_case_name")]);
+    }
+
+    #[test]
+    fn unmatched_delimiters_stay_literal() {
+        assert_eq!(parse("a * b"), vec![t("a * b")]);
+        assert_eq!(parse("**a"), vec![t("**a")]);
+    }
+
+    #[test]
+    fn code_span_beats_emphasis() {
+        assert_eq!(parse("`*a*`"), vec![Inline::Code("*a*".into())]);
+    }
+
+    #[test]
+    fn code_span_strips_one_pad_space() {
+        assert_eq!(parse("` a `"), vec![Inline::Code("a".into())]);
+        assert_eq!(parse("`  `"), vec![Inline::Code("  ".into())]);
+    }
+
+    #[test]
+    fn inline_link() {
+        assert_eq!(
+            parse("[t](f.md#h)"),
+            vec![Inline::Link { dest: "f.md#h".into(), title: None, text: vec![t("t")] }]
+        );
+    }
+
+    #[test]
+    fn link_with_emphasis_in_text() {
+        assert_eq!(
+            parse("[*a*](x)"),
+            vec![Inline::Link { dest: "x".into(), title: None, text: vec![emph(vec![t("a")])] }]
+        );
+    }
+
+    #[test]
+    fn link_title_is_kept() {
+        assert_eq!(
+            parse("[t](f.md \"Title\")"),
+            vec![Inline::Link {
+                dest: "f.md".into(),
+                title: Some("Title".into()),
+                text: vec![t("t")]
+            }]
+        );
+    }
+
+    #[test]
+    fn escaped_quote_does_not_end_title() {
+        assert_eq!(
+            parse("[t](/u \"a \\\"b\")"),
+            vec![Inline::Link {
+                dest: "/u".into(),
+                title: Some("a \"b".into()),
+                text: vec![t("t")]
+            }]
+        );
+    }
+
+    #[test]
+    fn non_breaking_space_stays_in_destination() {
+        let Inline::Link { dest, .. } = &parse("[t](/url\u{a0}x)")[0] else { panic!() };
+        assert_eq!(dest, "/url\u{a0}x");
+    }
+
+    #[test]
+    fn bracket_without_destination_is_literal() {
+        assert_eq!(parse("[not a link]"), vec![t("[not a link]")]);
+    }
+
+    #[test]
+    fn wikilink_forms() {
+        assert_eq!(
+            parse("[[Overview]]"),
+            vec![Inline::WikiLink { target: "Overview".into(), label: None }]
+        );
+        assert_eq!(
+            parse("[[project#Constraints|see here]]"),
+            vec![Inline::WikiLink {
+                target: "project#Constraints".into(),
+                label: Some("see here".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn backslash_escape() {
+        assert_eq!(parse("\\*not emph\\*"), vec![t("*not emph*")]);
+    }
+
+    #[test]
+    fn hard_and_soft_breaks() {
+        assert_eq!(parse("a  \nb"), vec![t("a"), Inline::HardBreak, t("b")]);
+        assert_eq!(parse("a\nb"), vec![t("a"), Inline::SoftBreak, t("b")]);
+        assert_eq!(parse("a\\\nb"), vec![t("a"), Inline::HardBreak, t("b")]);
+    }
+}

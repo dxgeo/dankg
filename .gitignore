@@ -1,0 +1,7 @@
+/target
+.DS_Store
+
+# Cache entries are derived data, never committed. The leading `**/` matters:
+# a pattern with a slash in the middle anchors to this file's directory, so a
+# bare `.dankg/cache/` would miss the one under tests/data/corpus/.
+**/.dankg/cache/

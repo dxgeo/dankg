@@ -1,0 +1,902 @@
+#+TITLE: DanKG Architecture
+#+AUTHOR: Daniel J. Okuniewicz
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+This document records /how/ DanKG is built. [[file:project.org][project.org]] records /what/ it is
+and why. Where the two disagree, project.org wins and this file is wrong.
+
+* Decisions
+
+Each row is settled. The rationale column is the reason to revisit it, not a
+defence of it.
+
+|  # | Decision           | Choice                                      | Rationale                                                         |
+|----+--------------------+---------------------------------------------+-------------------------------------------------------------------|
+|  1 | Dependency policy  | Zero crates, std only, forever              | Project constraint. Output HTML may carry hand-written JS.        |
+|  2 | Layout             | Sugiyama layered, computed in Rust          | Deterministic and diffable; every format gets coordinates.        |
+|  3 | Markdown scope     | Documented subset; spec suite vendored      | Ships now, measures honestly, closes gaps opportunistically.      |
+|  4 | Link syntax        | =[t](f.md#h)= canonical, =[[f#h]]= also read    | Files stay portable; wikilinks stay fast to type.                 |
+|  5 | Node identity      | Every heading, any depth                    | Containment and link edges are distinct edge kinds.               |
+|  6 | Index scope        | Whole root, always                          | Forced: bidirectional links need the full corpus.                 |
+|  7 | View scope         | Entry + 2 hops, expandable in the browser   | Readable at any size; index is embedded so expansion is free.     |
+|  8 | Unresolved links   | Placeholder node + stderr warning           | Dangling links are signal. Nothing drops silently.                |
+|  9 | Eval trigger       | =dankg eval= only; serve mode deferred        | project.org:34 -- never automatic. Static output stays static.    |
+| 10 | Block dependencies | =name= and =deps= in the fence info string      | Explicit DAG; info strings are ignored by other renderers.        |
+| 11 | Execution model    | Deps prepended into one process             | No PTY, no per-language state protocol, works for compiled langs. |
+| 12 | Results            | Written back into the markdown, hash-tagged | File stays the source of truth; results survive in git.           |
+| 13 | CLI shape          | =dankg graph --format=<fmt>=                  | JSON is a first-class, testable surface from day one.             |
+| 14 | Frontmatter        | Flat =key: value= subset only                 | ~80 lines; covers real usage; warns rather than guessing.         |
+| 15 | Format safety      | Re-parse and compare before writing         | =fmt= writes in place; a round-trip bug must not reach a note.     |
+| 16 | Database engine    | DuckDB, spawned as a configured command     | Single file, no server; decision 1 holds because nothing links.   |
+
+* Terminology
+
+- root :: The directory defining one knowledge base. Everything under it is in
+  the corpus; everything outside is not. Never called a "vault".
+- node :: One heading, at any depth, in one file.
+- containment edge :: Parent heading to child heading. Derived from document
+  structure, not written by hand.
+- link edge :: An explicit reference written by the author.
+- entry :: The file or node named on the command line. Sets the view, never the
+  index.
+- block :: A fenced code block carrying a =name= in its info string.
+
+* Data model
+
+#+BEGIN_SRC rust
+struct Root { path: PathBuf, config: Config }
+
+struct NodeId { file: String, slug: String }   // displays as "file#slug"
+
+struct Node {
+    id: NodeId,
+    title: String,          // heading text, inline markup stripped
+    file: String,           // relative to root
+    line: u32,              // the heading's own line
+    end_line: u32,          // last line before the next same-or-higher heading
+    level: u8,              // 1..=6, or 0 for a synthetic file-level node
+    parent: Option<NodeId>,
+    tags: Vec<String>,      // from frontmatter, carried onto every node
+    external: Vec<String>,  // absolute URLs: recorded, never graphed
+    resolved: bool,         // false => placeholder from a dangling link
+}
+
+enum EdgeKind { Contains, Link }
+
+struct Edge {
+    from: NodeId,
+    to: NodeId,
+    kind: EdgeKind,
+    line: u32,           // where the link was written
+    reciprocated: bool,  // computed; drives arrowhead rendering
+}
+#+END_SRC
+
+Extent is a line range rather than a byte range: the parser carries line numbers
+throughout, and a line range is what diagnostics and editors both want.
+
+A file with no headings, or with links written above its first heading, gets a
+synthetic level-0 node named from its frontmatter title or file name, so that
+=[text](file.md)= always has something to land on.
+
+Edges are stored directed. =reciprocated= is filled in after the whole corpus is
+indexed: if =a -> b= and =b -> a= both exist, both are marked, and the renderer
+draws one undirected edge instead of two arrows. This is the mechanism behind
+"the link goes both ways but displays as unidirectional unless linked back".
+
+* Pipeline
+
+#+BEGIN_EXAMPLE
+  dankg graph notes/project.md
+        |
+        v
+  1. discover root      walk up for .dankg/ ; else the file's own directory
+  2. walk corpus        every *.md under root, honouring .dankgignore
+  3. parse              frontmatter -> blocks -> inline  (per file, cacheable)
+  4. index              headings -> nodes, structure -> containment edges
+  5. resolve            link targets -> NodeId, or placeholder + warning
+  6. reciprocate        mark mutual link edges
+        |
+        +--> full graph (this is what --format=json emits, schema version 1)
+        |
+  7. select view        entry + N hops, both edge kinds
+  8. layout             Sugiyama over the selected subgraph
+  9. render             html | json | dot | mermaid
+#+END_EXAMPLE
+
+Steps 1-6 are the index and never depend on the entry file. Steps 7-9 are the
+view and are cheap to recompute.
+
+* Module layout
+
+#+BEGIN_EXAMPLE
+src/
+  main.rs            dispatch
+  cli.rs             hand-rolled arg parsing
+  config.rs          .dankg/config reader
+  diag.rs            stderr diagnostics, counted and summarised
+  hash.rs            FNV-1a, for cache keys and the config stamp
+  md/
+    mod.rs           Document = frontmatter + blocks + inlines
+    frontmatter.rs   flat key: value subset
+    block.rs         headings, fences, lists, paragraphs
+    inline.rs        links, wikilinks, emphasis, code spans
+    fmt.rs           AST -> normal-form markdown, and the write guard
+  graph/
+    slug.rs          heading -> anchor, collision suffixes
+    model.rs         Node, Edge, Graph
+    build.rs         document -> nodes, containment edges, raw links
+    index.rs         root discovery, corpus walk, orchestration
+    ignore.rs        .dankgignore matching
+    cache.rs         per-file index cache
+    resolve.rs       link resolution, reciprocation
+    view.rs          entry + N hops -> the subgraph to draw
+  layout/
+    mod.rs           Sugiyama driver
+    acyclic.rs       cycle breaking (DFS back-edge reversal)
+    rank.rs          longest-path layering + virtual nodes
+    order.rs         crossing reduction (median heuristic, 4 sweeps)
+    coord.rs         x-assignment (priority method), edge splines
+  render/
+    json.rs          canonical graph dump
+    dot.rs           graphviz
+    mermaid.rs       flowchart
+    html.rs          single self-contained file
+    assets.rs        CSS + JS as const &str, inlined at build
+  eval/
+    plan.rs          dep DAG, topological order, "what will run" report
+    run.rs           process spawn, timeout, output capture
+    result.rs        hashing, write-back, staleness detection
+#+END_EXAMPLE
+
+* Markdown subset
+
+Implemented: ATX headings, fenced code with info strings, inline and reference
+links, wikilinks, unordered and ordered lists including nesting, emphasis and
+strong, code spans, paragraphs, thematic breaks, hard breaks.
+
+Passed through as literal text: setext headings, HTML blocks, tables, block
+quotes, indented code blocks, entity references, autolinks, images, and link
+reference definitions.
+
+Link titles are parsed and kept even though DanKG has no use for them. An AST
+that discards input it has already read cannot be rendered faithfully, and the
+field costs nothing.
+
+The vendored CommonMark =spec.json= lives at =tests/data/commonmark/spec.json=.
+It is test /data/, not a dependency. Scoring it requires rendering the AST to
+HTML, so =tests/support/html.rs= implements a CommonMark HTML renderer used
+/only/ as a conformance oracle -- DanKG itself never renders markdown to HTML,
+it renders a graph.
+
+The harness is a regression gate: unimplemented sections never fail a build, but
+a section that loses ground does.
+
+#+BEGIN_EXAMPLE
+cargo test --test commonmark -- --nocapture   # full per-section table
+DANKG_SHOW=Links cargo test --test commonmark -- --nocapture
+DANKG_BLESS=1 cargo test --test commonmark    # re-record the baseline
+#+END_EXAMPLE
+
+Current conformance is 368/652 (56%). The implemented sections score as
+intended -- emphasis 94%, ATX headings 94%, code spans 90%, fenced code 89% --
+and nearly all remaining failures are constructs deliberately outside the
+subset. Notably, most list failures are not list bugs: the list structure is
+correct and the case fails only because it also contains an indented code block
+or a block quote.
+
+** Fence info strings
+
+#+BEGIN_EXAMPLE
+```python name=index deps=setup,fetch timeout=30
+```
+#+END_EXAMPLE
+
+The first word is the language. Remaining =key=value= pairs are DanKG metadata.
+Every other markdown renderer ignores everything after the language, so files
+stay portable. Unknown keys warn and are ignored.
+
+* Slugs and node identity
+
+GitHub-compatible: lowercase via =char::to_lowercase=, drop anything that is not
+=char::is_alphanumeric= or =-= or =_=, collapse whitespace runs to a single =-=.
+std is Unicode-aware for both, so non-ASCII headings work without tables.
+
+Collisions within one file take a =-1=, =-2= suffix in document order, matching
+GitHub. =NodeId= is =<file path relative to root, extension stripped>#<slug>=.
+
+* Root discovery and the corpus walk
+
+The root is the single most load-bearing value in the program. Node identity is
+taken relative to it, so output is the same wherever the binary was run from,
+and the resolver refuses any link that climbs above it.
+
+Discovery walks up from the named path looking for a =.dankg/= directory; the
+directory containing it is the root. Failing that the root is the common
+ancestor of the paths given, which for a single file is its own directory. A
+=.dankg/= is never created: a directory the user did not mark is not a root, it
+is just where a file happens to live.
+
+Naming a second path in a different root is refused. Cross-root graphs would
+need a second boundary, and one boundary is the point.
+
+The walk covers the whole root, always (decision 6), and yields root-relative
+=/=-separated paths in sorted order -- filesystem order is not deterministic and
+would leak into the output. Three exclusions are structural rather than
+configured:
+
+- Dot-entries are skipped outright, which is what keeps =.dankg/= and =.git/=
+  out of the corpus without anyone writing a pattern for them.
+- Symlinks are never followed. They are the one way a walk could leave the
+  root, and the root is a hard boundary. Every skipped link is reported.
+- Paths are resolved lexically, never with =canonicalize=, for the same reason:
+  resolving a link before the boundary check is what would defeat it.
+
+A path named on the command line is always indexed, even when =.dankgignore=
+excludes it, with a warning saying so. Naming a file is an explicit request,
+and it should not fail silently -- but neither should the override be invisible.
+
+** .dankgignore
+
+One pattern per line; =#= comments; =!= un-ignores; a leading =/= anchors to the
+root; a trailing =/= matches directories only; =*= and =?= stay within one path
+segment and =**= crosses them. Later rules win, so an exception can follow the
+rule it excepts. A pattern with no =/= applies at every depth.
+
+Deliberately a subset of gitignore rather than a clone of it. The whole point
+of a root is that its contents are predictable, and a matcher nobody can
+predict would undo that.
+
+* Link resolution
+
+| Form                        | Resolution                                              |
+|-----------------------------+---------------------------------------------------------|
+| =[t](#heading)=             | Slug within the current file.                           |
+| =[t](other.md#heading)=     | Path relative to the current file, then slug.           |
+| =[t](other.md)=             | That file's first heading; else a file-level node.      |
+| =[[Heading]]=               | Slug search across the root; ambiguity warns and picks the lexicographically first path. |
+| =[[other#Heading]]=         | Filename stem search across the root, then slug.        |
+| =[t](https://...)=          | External. Recorded on the node, never a graph node.     |
+| Anything escaping the root  | Refused, with a warning. The root is a hard boundary.   |
+
+The escape rule matters because "an LLM can run it for you" means the markdown
+being graphed is frequently untrusted input.
+
+* View selection
+
+Step 7, and the first thing in the pipeline that depends on the entry. The
+index is the whole root; the view is what a reader can take in.
+
+Hops are counted in *both* directions. A link pointing at the entry is as much
+a neighbour as one the entry points at -- which is the entire reason the index
+is built over the corpus rather than over the one file. Containment counts as a
+hop too, which is the open question below: it can make depth 2 feel shallow in
+a deeply nested file, and =--all= is the answer until something better is
+decided.
+
+The result is the /induced/ subgraph, not a spanning tree: an edge between two
+nodes that both made it in survives even when it was not the edge that brought
+either of them there. Dropping it would draw a graph missing structure it can
+plainly see.
+
+Naming a file selects every heading in it, not just the first. Naming a
+directory leaves no entry to start from, and the only sensible reading of
+"graph this corpus" is all of it, so that is what it does.
+
+* Layout
+
+Standard four-phase Sugiyama over the selected subgraph.
+
+1. *Acyclic* -- DFS, reverse back edges, remember them so arrowheads still point
+   the original way. Nothing is dropped: a self-link is marked instead, since
+   it cannot be layered, and is drawn as a loop.
+2. *Rank* -- longest-path layering. Edges spanning more than one layer are split
+   into one-layer segments joined by virtual nodes, which become the bend
+   points of the drawn polyline.
+3. *Order* -- median heuristic, four alternating sweeps, keeping the best
+   ordering seen. Ties broken by NodeId so the result is deterministic.
+4. *Coordinate* -- priority method for x, fixed layer height for y. Edges through
+   virtual nodes become polylines.
+
+Containment edges carry weight 2 and link edges weight 1. The weight is what
+the /ordering and coordinate/ phases read, not the ranking: longest-path
+layering already puts a child one layer below its parent, and what weight 2
+buys is horizontal -- a parent is pulled into line with its children rather
+than with whatever else happens to link to it. That is the sense in which a
+heading sits directly above them.
+
+Priority in phase 4 goes to the virtual nodes, ahead of every real one. A long
+edge that zigzags is far harder to follow than a box sitting slightly
+off-centre, so the bend points get the position they ask for and the real nodes
+move aside. Ordering is never changed here -- a node may slide within its layer
+but can never overtake a neighbour, so phase 3's crossing count survives.
+
+Coordinates are integers. Whole pixels have no float formatting to disagree
+about, and the output is meant to be committed.
+
+Determinism is a hard requirement, not a nicety: it is what lets a rendered
+graph be committed and diffed. Nothing here iterates a hash map, the starting
+order comes from a depth-first walk in index order rather than from whatever
+the graph handed over, and there are tests asserting byte-identical output
+across repeated runs and across the order the corpus was read in.
+
+* Drawn formats
+
+Both take the same =Layout=; what they can do with it differs, and pretending
+otherwise would be the dishonest part.
+
+- *dot* -- node positions are emitted as pinned =pos= attributes, so
+  =neato -n -Tsvg= reproduces DanKG's layout exactly. Plain =dot -Tsvg= throws
+  them away and re-lays the graph out, but the =rank=same= groups and
+  =weight=2= on containment mean it still agrees about which node belongs on
+  which layer. Edge geometry is deliberately /not/ emitted: graphviz wants
+  B-spline control points, DanKG has polylines, and converting between them to
+  satisfy a flag most people will not pass is not worth a bug in the
+  arithmetic.
+- *mermaid* -- runs its own layout and will not take coordinates at all. What
+  it takes is the ordering: nodes are emitted rank by rank, left to right, and
+  edge direction is DanKG's, including which edge of a cycle was turned around.
+  Identifiers are =n0=, =n1=, ... because mermaid's identifier grammar does not
+  admit =#= or =/=.
+
+A reciprocated pair is one undirected line in both, and the half that gets
+drawn is the one the layout ran /down/ the page -- so a renderer doing its own
+layering ends up agreeing with DanKG about which node sits above which.
+Unresolved nodes are dashed and muted in both.
+
+* HTML renderer
+
+One file. CSS and JS are =const &str= in =assets.rs=, inlined at render time. No
+network requests, no build step, no server. The only URL in the page is the SVG
+namespace, which is an identifier rather than an address, and a test asserts
+there is never a second one.
+
+The Rust side emits final SVG coordinates. The JS does three things only: pan
+and zoom, click a node to expand its hidden neighbours, and click through to
+the source file. Expansion is instant because the full index ships in the page
+as a JSON blob alongside the visible subgraph -- and it is the canonical
+=--format json= dump rather than a bespoke shape, so the page and the
+scriptable surface cannot disagree about what the graph is.
+
+Unresolved nodes render dashed and muted. Reciprocated edges render as a single
+line with no arrowhead. Stale results render with a warning badge.
+
+** Expansion is a placement, not a second layout
+
+Clicking a node reveals its hidden neighbours from the blob. They are dropped
+into the nearest free slot on the rank the edge puts them, on the same grid
+=layout/= already fixed -- not laid out again. Running Sugiyama in the browser
+would move every box on screen, which is exactly what a reader tracing one link
+does not want, and it would need a second layout engine in a second language.
+
+The price is that the expanded drawing is not the drawing =--depth N+1= would
+produce, so grown boxes are drawn as provisional rather than passed off as
+authoritative. Re-running DanKG is how you get the real layout of the larger
+graph, and =reset= returns the page to exactly what Rust drew.
+
+** One click never means two things
+
+The box is the expand toggle, so opening the source file needs its own target:
+a small badge on the box's top-right corner, in the gap the layout already
+leaves between boxes, costing the label no characters.
+
+The =href= is the root-relative path, which means the page works where it is
+meant to live -- at the root. An absolute path would work from anywhere and
+could not be committed, and committing the output is the point.
+
+** What the script is told rather than trusted to know
+
+Anything both halves need is sent in the meta blob: the box metrics
+(=CHAR_WIDTH= and friends, so an expanded box is sized the way the layout sized
+the drawn ones) and the edge-key separator. The rule is that a value used by
+both languages lives in Rust and travels, because nothing type-checks the two
+against each other. See the implementation note below for what it cost to learn
+that.
+
+* Code evaluation
+
+Never automatic. =dankg graph= only ever /displays/ stored results; it cannot
+execute anything.
+
+#+BEGIN_EXAMPLE
+$ dankg eval notes.md --block index
+  will run (2 blocks, in order):
+    setup [python] notes.md:71   via: uv run python
+    index [python] notes.md:88   via: uv run python
+  proceed? [y/N]
+#+END_EXAMPLE
+
+The plan is always printed before anything runs. =--yes= skips the prompt for
+scripted use; it never becomes the default.
+
+** Execution
+
+=plan.rs= topologically sorts the target block's transitive =deps=, then =run.rs=
+concatenates those sources in order ahead of the target, writes one temporary
+file, and spawns the configured command once. Consequences worth stating plainly:
+dependency side effects re-run on every eval, and there is no persistent state
+between separate =dankg eval= invocations. Both are the price of not writing a
+PTY session manager, and both keep evaluation reproducible.
+
+Timeout defaults to 30s, overridable per block. stdout and stderr are captured
+separately; stderr is shown but not stored. Output is truncated at 64 KiB with a
+warning. A non-zero exit stores the output and marks the result failed.
+
+** Results
+
+#+BEGIN_EXAMPLE
+```python name=index deps=setup
+print(count())
+```
+
+<!-- dankg:result name=index hash=a3f9c1 -->
+```
+312
+```
+#+END_EXAMPLE
+
+=hash= covers the target block source, its transitive dependency sources, and
+the resolved command. On any mismatch the result is stale: it still renders, but
+badged, and =dankg check= reports it. Write-back replaces the existing result
+block for that name or appends one immediately after the code block.
+
+* Literate database management
+
+Milestone 8. Literate programming put the prose and the code that implements it
+in one file; this does the same for data. The markdown file holds the
+explanation, the ETL that produces a table, and a link from the table back to
+both -- so "where did this number come from" is a graph query rather than an
+archaeology project.
+
+The pieces are already here. A =sql= block is a code block, so it has a =name=
+and =deps= and takes part in the same DAG. =dankg eval= already prints a plan,
+spawns a configured command, and writes results back into the file. What
+milestone 8 adds is a database as the thing being written to, and the relations
+in it as graph nodes.
+
+** DuckDB, and why the dependency policy survives
+
+DuckDB is a single-file embedded database that reads CSV, Parquet and JSON in
+place and ships as one static CLI binary. That is close to the same set of
+constraints DanKG holds itself to.
+
+DanKG does not link it. There is no crate, no FFI, no bindings -- decision 1 is
+unchanged. =duckdb= is spawned exactly like =python= or =sh=, configured in the
+same file, and subject to the same allowlist rule: a =sql= block with no
+configured command is reported and never run.
+
+#+BEGIN_EXAMPLE
+# .dankg/config
+[db.warehouse]
+command = duckdb -csv {db} < {file}
+path    = data/warehouse.duckdb
+#+END_EXAMPLE
+
+A =[db.*]= section names one database. Other engines fit the same shape; DuckDB
+is the first implementation, not a special case in the code.
+
+** Blocks
+
+#+BEGIN_EXAMPLE
+```sql db=warehouse name=load_orders deps=schema
+CREATE OR REPLACE TABLE orders AS
+SELECT * FROM read_parquet('raw/orders/*.parquet');
+```
+#+END_EXAMPLE
+
+=db= names the target database and is the only new attribute. Everything else --
+=name=, =deps=, =timeout=, the plan-then-prompt, the hash-tagged result block,
+the stale badge -- works as it already does for code.
+
+** Provenance without a driver
+
+The point of this milestone is the edges, not the execution.
+
+DanKG snapshots =duckdb_tables()= and =duckdb_views()= before a block runs and
+again afterwards, and diffs the two. Relations that appeared or changed are the
+block's outputs; relations the block's SQL names but did not create are its
+inputs. Both are ordinary command output, parsed the same way any other block's
+stdout is -- no bindings, no catalog format to track.
+
+Each relation becomes a node with id =<db>::<schema>.<table>=, and two new edge
+kinds join =Contains= and =Link=:
+
+#+BEGIN_SRC rust
+enum EdgeKind { Contains, Link, Produces, Reads }
+#+END_SRC
+
+=Produces= runs from the block's node to the relation; =Reads= runs from the
+relation to the block that consumed it. A table therefore edges back to the
+prose section that explains it, and forward to everything downstream of it.
+Lineage is just a traversal, and it renders in the same graph as everything
+else.
+
+** What this buys an agent
+
+project.org's third key feature is that an LLM can run DanKG because it only
+touches plaintext. That claim gets much stronger with a database behind it: an
+agent reading the corpus sees what each table means, which block builds it,
+what that block depends on, and whether the stored result is stale -- without a
+connection, credentials, or a schema dump. Answering "what breaks if I change
+=orders=" becomes reading a file.
+
+** Open questions for this milestone
+
+- Does =dankg graph= ever touch the database? It must not execute, but reading
+  the catalog to show relations that no block produced is tempting. Currently
+  no: =graph= displays stored results only, and an unknown relation is an
+  unresolved node like any other dangling link.
+- Are relation nodes counted against =--depth=, or are they always shown with
+  their producing block? Probably the latter; a table one hop from its ETL is
+  not really a hop.
+- Write-back for a =SELECT=: the result block holds the query output as a
+  markdown table, truncated at the same 64 KiB. Whether the row count belongs
+  in the hash -- so that new data marks the result stale -- is undecided, and
+  the answer differs for a snapshot than for a running pipeline.
+
+* Config
+
+No serde, so the format is a minimal INI. Sections, =key = value=, =#= comments,
+no nesting, no arrays.
+
+#+BEGIN_EXAMPLE
+# .dankg/config
+[graph]
+depth = 2
+
+[lang.python]
+command = uv run python {file}
+ext     = py
+
+[lang.sh]
+command = sh {file}
+ext     = sh
+#+END_EXAMPLE
+
+A =[lang.*]= section is also the allowlist: a fenced block in a language with no
+configured command is never executed, only reported. Per-file overrides go in
+frontmatter under =dankg.*= keys and may narrow but never widen what the root
+config permits.
+
+A =#= or =;= starts a comment only as the first non-blank character of a line.
+A =command= value legitimately contains a =#=, and a value is not a place to
+start guessing. Quotes wrapping a whole value are stripped, so a command with
+significant trailing space can be written down.
+
+Unknown sections and unknown keys warn with a line number and are dropped, on
+the same principle as frontmatter: a config half-understood is worse than one
+refused. =[db.*]= is parsed today even though milestone 8 implements it, so a
+config written ahead of the code does not warn.
+
+* CLI
+
+#+BEGIN_EXAMPLE
+dankg graph <path> [--format html|json|dot|mermaid] [--depth N] [--all] [-o FILE]
+dankg eval  <path> [--block NAME | --all] [--yes] [--no-write]
+dankg fmt   <path>... [--check]   rewrite to normal form; --check only reports
+dankg check <path>            exit non-zero on unresolved links or stale results
+dankg index [<path>]          corpus statistics, cache state
+
+=--format json= always emits the whole index, which is what makes it the
+scriptable surface: a consumer that asked for the graph should not silently get
+a fragment of it. =--depth= and =--all= shape the drawn formats only, and
+passing =--depth= alongside =json= warns rather than being quietly ignored.
+
+=--no-cache= applies to =graph= and =index=. =index= defaults to the working
+directory, because "tell me about the corpus I am standing in" is the common
+case. It is the command to run when the graph is not what you expected, since
+that produces exactly two questions -- which root am I in, and which files did
+it decide were mine.
+#+END_EXAMPLE
+
+=check= is the CI gate. It is deliberately separate from =graph= so that drafting
+a half-written note never fails.
+
+* Formatting
+
+=dankg fmt= rewrites markdown into a normal form, so that a knowledge base stays
+diffable and a graph never changes because someone indented a list differently.
+
+#+BEGIN_EXAMPLE
+dankg fmt notes/*.md           rewrite in place
+dankg fmt --check notes/*.md   name the files that would change; write nothing
+#+END_EXAMPLE
+
+=--check= prints the offending paths on stdout and exits non-zero, which makes
+it the second CI gate alongside =dankg check=.
+
+** Losslessness is the whole problem
+
+The formatter is a pure AST-to-text function, so anything the AST does not
+record cannot be reproduced. Two consequences:
+
+- Passthrough blocks are re-emitted byte for byte. The formatter never
+  reformats a construct it does not model, which keeps block quotes and HTML
+  safe while they remain outside the subset. The frontmatter block is treated
+  the same way and for the same reason: =Frontmatter.entries= is a lossy view
+  that has already dropped quoting, comments and every unsupported line, so
+  =Frontmatter.raw= is what gets written back.
+- The AST records the authorial choices the formatter would otherwise silently
+  erase: =List.marker= (bullet character, or the =.= / =)= of an ordered list),
+  =Inline::Emph{delim}= and =Inline::Strong{delim}= (=*= versus =_=), and
+  =Block::Code{fence}= (backtick versus tilde). Fence /length/ is not recorded,
+  because it is normalized: three characters, or the shortest run that clears
+  the body. =InfoString.unknown= keeps the words the parser warned about and
+  ignored, so an attribute DanKG does not understand survives a rewrite.
+
+** Text is escaped on the way out, not copied
+
+An =Inline::Text= node holds the character the author meant, not the bytes they
+typed, so anything that would be re-read as markup has to be escaped back.
+=\=, =`=, =[= and =]= are always escaped; =#=, =>=, =-=, =+=, =*=, =~=, =<= and
+a leading =1.= are escaped at the start of a line, where they would open a
+block; =*= and =_= are escaped only where they could actually open or close
+emphasis, which is what keeps =snake_case_name= intact.
+
+=]= is escaped even though a bare one is inert, because a real link writes an
+unescaped =[= and a stray =]= inside its text would close it early.
+
+Thematic breaks are written =***=, never =---=. A leading =---= would be read
+back as frontmatter, and =- ---= inside a list item is a thematic break rather
+than a bullet.
+
+** Round-tripping is the strongest parser test available
+
+Two properties, both checked over the fixture corpus and every markdown input
+in the vendored spec:
+
+- /Idempotence/ -- formatting twice equals formatting once.
+- /Fixed point/ -- already-formatted input is returned unchanged.
+
+Together these exercise the parser far harder than the conformance suite does,
+because every construct must survive a full parse-print cycle rather than
+merely producing the right HTML. Writing them found four real bugs: emphasis
+delimiters escaped against the wrong neighbour, unescaped =]= truncating link
+text, an info string rebuilt in the wrong order, and a leading blank line
+inside a list item wrongly making the whole list loose.
+
+648 of the spec's 652 markdown inputs round-trip. The four that do not are one
+shape: an indented block that the parser keeps as =Passthrough= sitting next to
+a list whose items were indented more deeply than normal form allows.
+Normalizing the list narrows its content column, and the indented block -- which
+the formatter is obliged to re-emit byte for byte -- is then deep enough to be
+swallowed as a continuation line. Implementing indented code blocks closes all
+four. They are listed by example number in =tests/fmt.rs= rather than counted,
+so fixing one fails the test and prompts its removal.
+
+** Nothing unverified reaches the disk
+
+=fmt= re-parses its own output before writing and compares the two documents,
+ignoring source line numbers -- the one thing formatting is expected to change.
+If they differ, or if a second pass is not byte-identical, the file is left
+alone and the reason goes to stderr. The four spec cases above take this path.
+
+The guard exists because =fmt= is the only command that writes to a user's
+notes. A conformance regression costs a number in a table; a formatter
+regression costs the note.
+
+** What it does and does not normalize
+
+Normalized: heading style, bullet and delimiter consistency, ordered-list
+renumbering from the first item's start, fence length, info-string attribute
+order, list indentation, blank-line discipline, trailing whitespace, a single
+trailing newline, and hard breaks (a trailing backslash, never two spaces --
+trailing whitespace is exactly what normalizing removes).
+
+Not normalized: paragraph line breaks. Reflowing prose to a column limit turns
+a one-word edit into a rewritten paragraph in every diff, and where an author
+breaks a line is authorial. Soft breaks are preserved exactly.
+
+* Cache
+
+=.dankg/cache/= holds one entry per source file, keyed on =(mtime, len)= and
+verified by an FNV-1a content hash. The pair is the cheap rejection; the hash
+closes the window where a file is rewritten inside one filesystem timestamp
+tick. The config hash is stamped into every entry, so changing =.dankg/config=
+invalidates all of them at once. Entries are named by a hash of the path, so a
+nested source file needs no nested cache directory.
+
+What is stored is a file's /index contribution/ -- its nodes, containment
+edges, raw links and aliases -- rather than the markdown AST. That is exactly
+what pipeline steps 4-6 consume and a far smaller thing to write a codec for.
+=dankg fmt=, which needs the whole AST, does not use the cache and does not want
+to: it reads every file it is given anyway.
+
+An entry also stores the diagnostics the parse raised, and a hit replays them.
+Without that, "deleting the cache changes nothing but runtime" would be false
+in the one way a user would actually notice -- warnings vanishing on the second
+run. The claim is tested rather than asserted: =--no-cache= exists so that a
+cached run and a cold one can be compared byte for byte, and =tests/index.rs=
+does exactly that for both the graph and the diagnostics.
+
+Nothing in the cache is load-bearing. A missing, truncated, corrupt, or
+older-version entry is a miss, not an error; a write failure is counted and
+ignored. Writes go to a temporary file and are renamed into place, so a
+half-written entry is never readable as a whole one and two concurrent runs do
+not interleave. No cache is opened at all for a root with no =.dankg/=.
+
+* Diagnostics
+
+Every dropped, skipped, or unresolved thing warns on stderr with =file:line=, and
+runs end with a one-line summary (=2 unresolved of 31 edges=). stdout carries
+only the requested output, so =--format=json= stays pipeable.
+
+Diagnostics are sorted by =(file, line)= before they are emitted, stably, so
+that the same corpus reports the same things in the same order however the walk
+or the resolver happened to reach them. Determinism is a hard requirement for
+output; there is no reason for it to stop at stderr.
+
+* Implementation notes
+
+Two invariants that are easy to break and whose failure modes do not point at
+their cause.
+
+** List item content is sliced by byte offset, never stripped as indentation
+
+=Marker= carries both =content= (a column, used to decide which continuation
+lines belong to the item) and =content_byte= (a byte offset into the marker
+line). The item's /first/ line must be sliced at =content_byte=, because the
+marker itself is not whitespace: =strip_indent= stops at the =-= and returns the
+line unchanged, =parse_lines= rediscovers the same list in the recursive call,
+and the parser recurses until the stack is exhausted. The symptom is a stack
+overflow in an unrelated-looking test, not a parse error.
+
+Continuation lines /are/ genuinely whitespace-indented, and do use
+=strip_indent=.
+
+** Columns and byte offsets are not interchangeable
+
+=indent_info= returns both because a tab advances the column to the next
+multiple of four while consuming a single byte. Slicing a line by a column count
+silently corrupts the slice on any tab-indented line. Rule: anything compared
+against the four-column block rules uses columns; anything used to slice uses
+bytes. The original code used =&text[indent..]= throughout, which is correct
+only for space-indented input -- so it passed every test until a tab appeared.
+
+** The root boundary is only as strong as the root
+
+=join_normalize= refuses a link that climbs above the root, but "the root" has to
+be a real value. It now comes from =.dankg/=, falling back to the common
+ancestor of the paths named on the command line, and every =NodeId= is taken
+relative to it.
+
+Having a real one matters for more than tidiness. With no root, the boundary
+silently becomes the working directory, so whether =../../etc/passwd.md= is
+refused depends on how deep the path you happened to type was. The unit tests
+all passed against fixtures at depth zero, where climbing out is impossible; the
+leak only appeared when the binary was run against the real corpus. Any change
+to path handling needs an end-to-end test, not just a unit test -- both
+=tests/graph.rs= and =tests/index.rs= have a =binary= module for exactly this.
+
+The same reasoning is why discovery lives in =index.rs= rather than in
+=resolve.rs= as first sketched: deciding where the boundary is belongs with the
+code that touches the filesystem, and =resolve.rs= stays a pure function of
+already-parsed input.
+
+Making ids root-relative has a second benefit: output is identical no matter
+which directory DanKG was invoked from, which is a precondition for committing
+it.
+
+** The escaper and the parser must agree about flanking
+
+=fmt= decides whether a literal =*= or =_= needs a backslash by asking whether
+it could open or close emphasis. That question already has an answer in
+=inline.rs=, so =can_open_close= is shared rather than reimplemented. Two copies
+would drift, and the drift shows up as emphasis silently appearing or vanishing
+on the first =dankg fmt= -- in a file the user has already committed.
+
+The same rule forces the formatter to track the /semantic/ previous and next
+character, not the previous output byte. Emphasis is decided by neighbours, so
+a child inline has to be told what its parent is about to write on either side
+of it: =Writer::run= takes the trailing character for exactly this reason. The
+symptom of getting it wrong is =foo _\__= formatting to =foo ___=.
+
+** The renderer and its script cannot be type-checked against each other
+
+=html.rs= stamps =data-key= on every line it draws; =assets.rs= recomputes that
+key for lines it adds, and skips any key already present. If the two spellings
+differ, nothing fails -- the script simply draws a second copy of every edge
+Rust already drew, on top of the first, the moment a reader expands anything.
+
+They did differ. The first =assets.rs= carried literal NUL bytes where the
+separator should have been: invisible in the editor, invisible in the diff, and
+invisible in every Rust test, because a test comparing =edge_key= to itself
+agrees with itself no matter what the JS says. It surfaced only by running the
+shipped script against the shipped page.
+
+Two things came out of it. The separator now lives in Rust and is sent in the
+meta blob, so there is one spelling rather than two; and =assets::CSS= and
+=assets::JS= are asserted to contain no control characters, because a
+hand-written asset has no compiler looking at it and an invisible byte in one is
+otherwise found by nobody.
+
+The general rule for this file: a constant both languages depend on is Rust's,
+and travels. A constant duplicated in the JS is a bug waiting for a reader.
+
+** Most list conformance failures are not list failures
+
+When triaging the conformance table, check what else is in the failing case
+before touching =gather_list=. Nearly every failure in "List items" and "Lists"
+has correct list structure and fails only because the case also contains an
+indented code block or a block quote, both of which are outside the subset and
+render as passthrough. Implementing indented code blocks would lift three
+sections at once; changing the list code would lift none.
+
+* Testing
+
+- CommonMark conformance table against the vendored spec, baseline-gated,
+  scored through the test-only HTML oracle.
+- Format round-tripping: idempotence and fixed point over the fixture corpus
+  and every markdown input in the vendored spec, with the known-unformattable
+  examples listed by number rather than counted.
+- =dankg fmt= against the real binary: in-place rewriting, the =--check= exit
+  code, and the refusal to write a file that does not verify.
+- Golden =--format=json= dumps over a fixture corpus in =tests/data/corpus/=.
+- Root discovery, the walk and =.dankgignore= against the real fixture root,
+  which carries a =.dankg/= and an ignore file so discovery has something to
+  find. An ignored file links back into the corpus, so its absence from the
+  graph proves exclusion rather than merely being asserted.
+- Cache equivalence, over corpora built in =CARGO_TARGET_TMPDIR=: a warm run,
+  a cold run and a =--no-cache= run must agree on both the JSON and the
+  diagnostics, and a corrupted or config-invalidated cache must change neither.
+- Golden =--format=dot= and =--format=mermaid= dumps over the same fixture
+  corpus. Layout determinism is checked three ways: repeated runs of the
+  library, repeated runs of the binary, and the same corpus read in the
+  opposite order.
+- Layout invariants that a reader notices the moment they break -- no two boxes
+  in a layer overlap, nothing starts left of the margin, every polyline begins
+  at its source and ends at its target, and no bend point escapes the ranks its
+  edge spans.
+- The drawn formats are checked structurally rather than by shelling out to
+  graphviz, which is not installed everywhere: braces balance, and every
+  identifier an edge references was declared as a node.
+- Golden =--format=html= over the same fixture corpus, which pins the markup,
+  the stylesheet and the script in one file -- the only honest way to review a
+  format whose three halves are maintained by hand. Structurally: tags balance,
+  every edge endpoint was declared as a box, every marker an edge points at is
+  defined, and every element id the script asks for is one the renderer emits.
+  That last one is the check that the two hand-written halves still agree.
+- The page is asserted to be self-contained (no URL but the SVG namespace) and
+  to ship the whole index however little it draws, since a blob missing a node
+  is a node that can never be expanded into.
+- Link resolution table tests, including root-escape refusal.
+- Eval tests use =sh= only, never the network.
+
+* Milestones
+
+1. [DONE] =md/= subset + frontmatter + conformance harness. 368/652 (56%).
+2. [DONE] =graph/= model, slugs, resolution, =--format=json=. The graph is fully
+   testable here, before anything is drawn: =tests/data/corpus.golden.json=.
+3. [DONE] =dankg fmt=. Placed here deliberately: the round-trip properties
+   harden the parser before the graph work starts depending on it, and the AST
+   additions it needs were cheapest to make then. 648/652 spec inputs round-trip;
+   the four that do not are documented above and are refused rather than
+   mangled.
+4. [DONE] Root discovery, corpus walk, cache, diagnostics. =.dankg/= marks a
+   root; the walk covers all of it and honours =.dankgignore=; the cache stores
+   each file's index contribution and its diagnostics, so =--no-cache= is
+   byte-identical. =dankg index= reports what the walk found.
+5. [DONE] =layout/= Sugiyama, =--format=dot|mermaid=. Pipeline step 7 came with
+   it, since layout is defined over the selected subgraph: =graph/view.rs=,
+   =--depth= and =--all=. Golden dot and mermaid dumps sit alongside the golden
+   JSON.
+6. [DONE] =render/html.rs= + =render/assets.rs= and the JS interaction layer.
+   One self-contained file: Rust emits the coordinates, the script pans, zooms,
+   expands from the embedded index, and opens source files. Expansion is a
+   placement on the existing rank grid rather than a second layout engine, and
+   says so on screen. =tests/data/corpus.golden.html= sits alongside the other
+   goldens.
+7. =eval/= plan, run, write-back, =dankg check=.
+8. Literate database management, over DuckDB. Depends on 7: it is the same
+   plan-run-write-back machinery pointed at a database instead of a process.
+9. =dankg serve= -- deferred, opt-in, only if the static path proves insufficient.
+
+* Open questions
+
+- Do frontmatter tags become graph nodes, or stay node attributes used for
+  filtering? Currently attributes.
+- Do containment edges count against =--depth=, or only link edges? Currently
+  both, which may make depth 2 feel shallow in deeply nested files.
+- What does =dankg eval --all= mean for ordering across files? Currently
+  undefined; probably should be refused.
+- Cross-root links: refused today. Is a multi-root mode ever wanted?

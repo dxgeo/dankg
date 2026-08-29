@@ -1,0 +1,167 @@
+//! View selection: the entry, plus everything within N hops of it.
+//!
+//! Steps 1-6 of the pipeline build the index and never depend on the entry.
+//! This is step 7, the first thing that does. The index is always the whole
+//! root, because backlinks are only honest when every file has been seen; the
+//! view is what a reader can actually take in.
+//!
+//! Hops are counted in both directions. A link that points at the entry is as
+//! much a neighbour as one the entry points at -- that is the whole reason the
+//! index is built over the corpus rather than over the file. Containment
+//! counts too, which is the open question in architecture.org: it can make
+//! depth 2 feel shallow in a deeply nested file, and `--all` is the answer
+//! until something better is decided.
+
+use super::build::strip_extension;
+use super::model::{Graph, NodeId};
+
+/// Every node belonging to one of the named files. A file names all of its
+/// headings, not just the first: "graph this file and what it touches" is the
+/// question being asked.
+pub fn entry_nodes(graph: &Graph, files: &[String]) -> Vec<NodeId> {
+    let keys: Vec<String> = files.iter().map(|f| strip_extension(f)).collect();
+    graph
+        .nodes
+        .iter()
+        .filter(|n| keys.contains(&n.id.file))
+        .map(|n| n.id.clone())
+        .collect()
+}
+
+/// The subgraph induced by the entry and everything within `depth` hops.
+///
+/// Induced, not spanning: an edge between two nodes that both made it in is
+/// kept even when it was not the edge that brought either of them there.
+/// Dropping it would draw a graph that is missing structure it can see.
+pub fn select(graph: &Graph, entries: &[NodeId], depth: u32) -> Graph {
+    let mut frontier: Vec<NodeId> = Vec::new();
+    let mut chosen: Vec<NodeId> = Vec::new();
+
+    for id in entries {
+        if graph.contains(id) && !chosen.contains(id) {
+            chosen.push(id.clone());
+            frontier.push(id.clone());
+        }
+    }
+
+    for _ in 0..depth {
+        let mut next: Vec<NodeId> = Vec::new();
+        for edge in &graph.edges {
+            for (near, far) in [(&edge.from, &edge.to), (&edge.to, &edge.from)] {
+                if frontier.contains(near) && !chosen.contains(far) && !next.contains(far) {
+                    next.push(far.clone());
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        chosen.extend(next.iter().cloned());
+        frontier = next;
+    }
+
+    Graph {
+        nodes: graph.nodes.iter().filter(|n| chosen.contains(&n.id)).cloned().collect(),
+        edges: graph
+            .edges
+            .iter()
+            .filter(|e| chosen.contains(&e.from) && chosen.contains(&e.to))
+            .cloned()
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{graph_of, EdgeKind};
+
+    /// a -> b -> c -> d, one link per hop, each in its own file.
+    fn chain() -> Graph {
+        graph_of(&[
+            ("a.md", "# A\n\n[to b](b.md#b)\n"),
+            ("b.md", "# B\n\n[to c](c.md#c)\n"),
+            ("c.md", "# C\n\n[to d](d.md#d)\n"),
+            ("d.md", "# D\n"),
+        ])
+    }
+
+    fn ids(graph: &Graph) -> Vec<String> {
+        let mut out: Vec<String> = graph.nodes.iter().map(|n| n.id.to_string()).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn depth_counts_hops_from_the_entry() {
+        let g = chain();
+        let entry = vec![NodeId::new("a", "a")];
+        assert_eq!(ids(&select(&g, &entry, 0)), vec!["a#a"]);
+        assert_eq!(ids(&select(&g, &entry, 1)), vec!["a#a", "b#b"]);
+        assert_eq!(ids(&select(&g, &entry, 2)), vec!["a#a", "b#b", "c#c"]);
+    }
+
+    #[test]
+    fn hops_are_counted_in_both_directions() {
+        let g = chain();
+        // `d` links to nothing; everything reaches it. One hop back finds `c`.
+        let selected = select(&g, &[NodeId::new("d", "d")], 1);
+        assert_eq!(ids(&selected), vec!["c#c", "d#d"]);
+    }
+
+    #[test]
+    fn naming_a_file_selects_every_heading_in_it() {
+        let g = graph_of(&[("a.md", "# One\n\n## Two\n\n### Three\n")]);
+        let entries = entry_nodes(&g, &["a.md".to_string()]);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(ids(&select(&g, &entries, 0)), vec!["a#one", "a#three", "a#two"]);
+    }
+
+    #[test]
+    fn the_subgraph_is_induced_not_spanning() {
+        // b and c both arrive at depth 1, from a. The b--c edge is between two
+        // selected nodes and has to survive.
+        let g = graph_of(&[
+            ("a.md", "# A\n\n[b](b.md#b) and [c](c.md#c)\n"),
+            ("b.md", "# B\n\n[c](c.md#c)\n"),
+            ("c.md", "# C\n"),
+        ]);
+        let selected = select(&g, &[NodeId::new("a", "a")], 1);
+        assert!(
+            selected
+                .edges
+                .iter()
+                .any(|e| e.from.to_string() == "b#b" && e.to.to_string() == "c#c"),
+            "an edge between two selected nodes is kept"
+        );
+    }
+
+    #[test]
+    fn containment_is_a_hop_like_any_other() {
+        let g = graph_of(&[("a.md", "# One\n\n## Two\n")]);
+        let selected = select(&g, &[NodeId::new("a", "one")], 1);
+        assert_eq!(ids(&selected), vec!["a#one", "a#two"]);
+        assert_eq!(selected.edges[0].kind, EdgeKind::Contains);
+    }
+
+    #[test]
+    fn an_unreachable_island_is_left_out() {
+        let g = graph_of(&[("a.md", "# A\n"), ("z.md", "# Z\n")]);
+        assert_eq!(ids(&select(&g, &[NodeId::new("a", "a")], 9)), vec!["a#a"]);
+    }
+
+    #[test]
+    fn an_entry_that_is_not_in_the_graph_selects_nothing() {
+        let g = chain();
+        assert!(select(&g, &[NodeId::new("gone", "gone")], 2).nodes.is_empty());
+        assert!(select(&g, &[], 2).nodes.is_empty());
+    }
+
+    #[test]
+    fn selection_preserves_the_index_order() {
+        let g = chain();
+        let selected = select(&g, &[NodeId::new("a", "a")], 3);
+        assert_eq!(selected.nodes.len(), g.nodes.len());
+        assert_eq!(selected, g, "selecting everything is the identity");
+    }
+}
