@@ -5,6 +5,7 @@ use dankg::graph::{resolve, view, EdgeKind, Graph};
 use dankg::layout;
 use dankg::md::{fmt, Document};
 use dankg::render::{dot, html, json, mermaid};
+use dankg::tui;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -35,6 +36,7 @@ fn main() -> ExitCode {
             report(graph(&paths, format, output.as_deref(), cache, depth, all))
         }
         Command::Index { paths, cache } => report(index_report(&paths, cache)),
+        Command::Tui { paths, cache, depth, all } => report(tui::run(&paths, cache, depth, all)),
         Command::Fmt { paths, check } => match format_files(&paths, check) {
             Ok(true) => ExitCode::SUCCESS,
             // `--check` is a gate: "some file is not in normal form" is a
@@ -122,7 +124,12 @@ fn graph(
 
     // JSON is the index, not a view of it: it is the scriptable surface, and a
     // consumer that asked for the graph should not get a fragment of it.
-    let view = if format == Format::Json { None } else { Some(select(&corpus, &index, depth, all, &mut diags)) };
+    let view = if format == Format::Json {
+        None
+    } else {
+        let default_depth = corpus.config.depth(&mut diags);
+        Some(view::select_view(&index, &corpus.entries, depth, all, default_depth))
+    };
     let drawn = view.as_ref().unwrap_or(&index);
 
     let rendered = match format {
@@ -163,25 +170,6 @@ fn graph(
     diags.emit();
     summarize(&corpus, &index, view.as_ref(), &diags);
     Ok(())
-}
-
-/// The subgraph to draw: the entry plus `depth` hops, or everything.
-///
-/// Naming a directory rather than a file leaves no entry to start from, and
-/// the only sensible reading of "graph this corpus" is all of it.
-fn select(
-    corpus: &Corpus,
-    index: &Graph,
-    depth: Option<u32>,
-    all: bool,
-    diags: &mut Diags,
-) -> Graph {
-    if all || corpus.entries.is_empty() {
-        return index.clone();
-    }
-    let hops = depth.unwrap_or_else(|| corpus.config.depth(diags));
-    let entries = view::entry_nodes(index, &corpus.entries);
-    view::select(index, &entries, hops)
 }
 
 /// One line each to stderr, so stdout stays a clean pipe.

@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dankg: example</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa;
+  --panel: #f2f2ef;
+  --fg: #1c1c1b;
+  --muted: #8c8c86;
+  --rule: #dcdcd6;
+  --node-bg: #ffffff;
+  --node-line: #3c3c3c;
+  --edge: #8f8f8f;
+  --contains: #c4c4be;
+  --accent: #2f6f4f;
+  --accent-soft: #d9e8df;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a;
+    --panel: #1f2124;
+    --fg: #e6e6e2;
+    --muted: #7e8188;
+    --rule: #303338;
+    --node-bg: #24262a;
+    --node-line: #9aa0a8;
+    --edge: #6d727a;
+    --contains: #3c4046;
+    --accent: #74c39a;
+    --accent-soft: #24382e;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 18px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+}
+
+header .root {
+  font-weight: 600;
+}
+
+header .counts,
+header .legend {
+  color: var(--muted);
+}
+
+header .legend {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+header .legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+header .legend i {
+  width: 22px;
+  height: 0;
+  border-top: 2px solid var(--edge);
+}
+
+header .legend i.contains { border-top-color: var(--contains); border-top-width: 3px; }
+header .legend i.dangling { border-top-style: dashed; border-top-color: var(--muted); }
+
+header .controls {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+
+button:hover { border-color: var(--accent); }
+button:active { background: var(--accent-soft); }
+
+main {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+svg.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+svg.canvas.panning { cursor: grabbing; }
+
+.edge {
+  fill: none;
+  stroke: var(--edge);
+  stroke-width: 1.4;
+}
+
+.edge.contains {
+  stroke: var(--contains);
+  stroke-width: 2.2;
+}
+
+.edge.dangling { stroke-dasharray: 4 3; }
+
+/* Arrowheads are filled, not stroked, and a presentation attribute cannot
+   resolve a custom property -- so the colour has to be matched here. */
+#tip path { fill: var(--edge); }
+#tip-contains path { fill: var(--contains); }
+
+.node .box {
+  fill: var(--node-bg);
+  stroke: var(--node-line);
+  stroke-width: 1.2;
+  rx: 6;
+}
+
+.node .label {
+  fill: var(--fg);
+  font-size: 12px;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+.node.unresolved .box {
+  stroke: var(--muted);
+  stroke-dasharray: 5 3;
+}
+
+.node.unresolved .label { fill: var(--muted); }
+
+.node.entry .box {
+  stroke: var(--accent);
+  stroke-width: 2.2;
+}
+
+.node.expandable .box { cursor: pointer; }
+.node.expandable:hover .box { stroke: var(--accent); }
+
+.node[data-expanded="true"] .box { fill: var(--accent-soft); }
+
+/* Grown by the script rather than served by Rust, so it reads as provisional:
+   this is a local placement, not a re-run of the layout. Nothing here touches
+   the dashes -- an expanded placeholder is still a placeholder. */
+.node.grown .label { font-style: italic; }
+
+.src circle {
+  fill: var(--panel);
+  stroke: var(--rule);
+}
+
+.src text {
+  fill: var(--muted);
+  font-size: 10px;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.src {
+  opacity: 0;
+  transition: opacity 90ms linear;
+}
+
+.node:hover .src,
+.src:focus-visible {
+  opacity: 1;
+}
+
+.src:hover circle { stroke: var(--accent); }
+.src:hover text { fill: var(--accent); }
+
+footer {
+  padding: 6px 14px;
+  border-top: 1px solid var(--rule);
+  background: var(--panel);
+  color: var(--muted);
+}
+
+footer b { font-weight: 600; color: var(--fg); }
+</style>
+</head>
+<body>
+<header>
+<span class="root">example</span>
+<span class="counts">14 of 14 node(s) drawn, 1 unresolved</span>
+<span class="legend"><span><i class="contains"></i>contains</span><span><i></i>link</span><span><i class="dangling"></i>unresolved</span></span>
+<span class="controls"><button id="fit" type="button">fit</button><button id="reset" type="button">reset</button></span>
+</header>
+<main>
+<svg id="graph" class="canvas" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 621 684" preserveAspectRatio="xMidYMid meet" tabindex="0">
+<defs>
+<marker id="tip" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="tip-contains" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker>
+</defs>
+<g id="scene">
+<g id="edges">
+<path class="edge link" data-key="index#about-this-graph index#about-this-graph link" data-from="index#about-this-graph" data-to="index#about-this-graph" d="M131,160 L237,160 L237,124 L131,124" marker-end="url(#tip)"/>
+<path class="edge link" data-key="index#about-this-graph projects/garden#garden link" data-from="index#about-this-graph" data-to="projects/garden#garden" d="M131,160 L135,224"/>
+<path class="edge contains" data-key="index#knowledge-base-index index#about-this-graph contains" data-from="index#knowledge-base-index" data-to="index#about-this-graph" d="M363,60 L131,124" marker-end="url(#tip-contains)"/>
+<path class="edge link" data-key="index#knowledge-base-index notes/daily-log#2026-08-28 link" data-from="index#knowledge-base-index" data-to="notes/daily-log#2026-08-28" d="M363,60 L291,124" marker-end="url(#tip)"/>
+<path class="edge link" data-key="index#knowledge-base-index notes/reading-list#reading-list link" data-from="index#knowledge-base-index" data-to="notes/reading-list#reading-list" d="M363,60 L435,124" marker-end="url(#tip)"/>
+<path class="edge link" data-key="index#knowledge-base-index projects/dankg#dankg link" data-from="index#knowledge-base-index" data-to="projects/dankg#dankg" d="M363,60 L625,142 L625,242 L400,342 L177,424" marker-end="url(#tip)"/>
+<path class="edge link dangling" data-key="index#knowledge-base-index scratch/draft#draft link" data-from="index#knowledge-base-index" data-to="scratch/draft#draft" d="M363,60 L561,124" marker-end="url(#tip)"/>
+<path class="edge link" data-key="notes/daily-log#2026-08-27 projects/dankg#open-threads link" data-from="notes/daily-log#2026-08-27" data-to="projects/dankg#open-threads" d="M287,260 L252,342 L252,442 L252,524" marker-end="url(#tip)"/>
+<path class="edge link" data-key="notes/daily-log#2026-08-28 notes/daily-log#2026-08-27 link" data-from="notes/daily-log#2026-08-28" data-to="notes/daily-log#2026-08-27" d="M291,160 L287,224" marker-end="url(#tip)"/>
+<path class="edge contains" data-key="notes/reading-list#reading-list notes/reading-list#graph-drawing contains" data-from="notes/reading-list#reading-list" data-to="notes/reading-list#graph-drawing" d="M435,160 L569,242 L344,342 L343,442 L342,542 L341,624" marker-end="url(#tip-contains)"/>
+<path class="edge contains" data-key="notes/reading-list#reading-list notes/reading-list#markdown-parsing contains" data-from="notes/reading-list#reading-list" data-to="notes/reading-list#markdown-parsing" d="M435,160 L455,224" marker-end="url(#tip-contains)"/>
+<path class="edge link" data-key="notes/reading-list#reading-list projects/dankg#dankg link" data-from="notes/reading-list#reading-list" data-to="projects/dankg#dankg" d="M435,160 L597,242 L372,342 L177,424" marker-end="url(#tip)"/>
+<path class="edge link" data-key="notes/reading-list#graph-drawing projects/dankg#architecture link" data-from="projects/dankg#architecture" data-to="notes/reading-list#graph-drawing" d="M100,560 L341,624"/>
+<path class="edge contains" data-key="projects/dankg#architecture projects/dankg#evaluation-model contains" data-from="projects/dankg#architecture" data-to="projects/dankg#evaluation-model" d="M100,560 L102,624" marker-end="url(#tip-contains)"/>
+<path class="edge link" data-key="projects/dankg#dankg index#about-this-graph link" data-from="projects/dankg#dankg" data-to="index#about-this-graph" d="M177,424 L205,342 L205,242 L131,160" marker-end="url(#tip)"/>
+<path class="edge contains" data-key="projects/dankg#dankg projects/dankg#architecture contains" data-from="projects/dankg#dankg" data-to="projects/dankg#architecture" d="M177,460 L100,524" marker-end="url(#tip-contains)"/>
+<path class="edge contains" data-key="projects/dankg#dankg projects/dankg#open-threads contains" data-from="projects/dankg#dankg" data-to="projects/dankg#open-threads" d="M177,460 L252,524" marker-end="url(#tip-contains)"/>
+<path class="edge link" data-key="projects/dankg#dankg projects/garden#garden link" data-from="projects/dankg#dankg" data-to="projects/garden#garden" d="M177,424 L177,342 L135,260" marker-end="url(#tip)"/>
+<path class="edge contains" data-key="projects/garden#garden projects/garden#todo contains" data-from="projects/garden#garden" data-to="projects/garden#todo" d="M135,260 L113,324" marker-end="url(#tip-contains)"/>
+<path class="edge link" data-key="projects/garden#todo projects/dankg#dankg link" data-from="projects/garden#todo" data-to="projects/dankg#dankg" d="M113,360 L177,424" marker-end="url(#tip)"/>
+</g>
+<g id="nodes">
+<g class="node" data-id="index#knowledge-base-index" data-rank="0" data-x="363" data-y="42" data-w="188"><title>index.md:5</title><rect class="box" x="269" y="24" width="188" height="36"/><text class="label" x="363" y="42">Knowledge Base Index</text><a class="src" href="index.md" target="_blank" rel="noopener"><title>open index.md:5</title><circle cx="457" cy="24" r="7"/><text x="457" y="24">↗</text></a></g>
+<g class="node" data-id="index#about-this-graph" data-rank="1" data-x="131" data-y="142" data-w="156"><title>index.md:18</title><rect class="box" x="53" y="124" width="156" height="36"/><text class="label" x="131" y="142">About this graph</text><a class="src" href="index.md" target="_blank" rel="noopener"><title>open index.md:18</title><circle cx="209" cy="124" r="7"/><text x="209" y="124">↗</text></a></g>
+<g class="node" data-id="notes/daily-log#2026-08-28" data-rank="1" data-x="291" data-y="142" data-w="108"><title>notes/daily-log.md:10</title><rect class="box" x="237" y="124" width="108" height="36"/><text class="label" x="291" y="142">2026-08-28</text><a class="src" href="notes/daily-log.md" target="_blank" rel="noopener"><title>open notes/daily-log.md:10</title><circle cx="345" cy="124" r="7"/><text x="345" y="124">↗</text></a></g>
+<g class="node" data-id="notes/reading-list#reading-list" data-rank="1" data-x="435" data-y="142" data-w="124"><title>notes/reading-list.md:5</title><rect class="box" x="373" y="124" width="124" height="36"/><text class="label" x="435" y="142">Reading List</text><a class="src" href="notes/reading-list.md" target="_blank" rel="noopener"><title>open notes/reading-list.md:5</title><circle cx="497" cy="124" r="7"/><text x="497" y="124">↗</text></a></g>
+<g class="node unresolved" data-id="scratch/draft#draft" data-rank="1" data-x="561" data-y="142" data-w="72"><title>scratch/draft#draft (unresolved)</title><rect class="box" x="525" y="124" width="72" height="36"/><text class="label" x="561" y="142">draft</text></g>
+<g class="node" data-id="projects/garden#garden" data-rank="2" data-x="135" data-y="242" data-w="76"><title>projects/garden.md:5</title><rect class="box" x="97" y="224" width="76" height="36"/><text class="label" x="135" y="242">Garden</text><a class="src" href="projects/garden.md" target="_blank" rel="noopener"><title>open projects/garden.md:5</title><circle cx="173" cy="224" r="7"/><text x="173" y="224">↗</text></a></g>
+<g class="node" data-id="notes/daily-log#2026-08-27" data-rank="2" data-x="287" data-y="242" data-w="108"><title>notes/daily-log.md:5</title><rect class="box" x="233" y="224" width="108" height="36"/><text class="label" x="287" y="242">2026-08-27</text><a class="src" href="notes/daily-log.md" target="_blank" rel="noopener"><title>open notes/daily-log.md:5</title><circle cx="341" cy="224" r="7"/><text x="341" y="224">↗</text></a></g>
+<g class="node" data-id="notes/reading-list#markdown-parsing" data-rank="2" data-x="455" data-y="242" data-w="172"><title>notes/reading-list.md:16</title><rect class="box" x="369" y="224" width="172" height="36"/><text class="label" x="455" y="242">Markdown &amp; parsing</text><a class="src" href="notes/reading-list.md" target="_blank" rel="noopener"><title>open notes/reading-list.md:16</title><circle cx="541" cy="224" r="7"/><text x="541" y="224">↗</text></a></g>
+<g class="node" data-id="projects/garden#todo" data-rank="3" data-x="113" data-y="342" data-w="72"><title>projects/garden.md:11</title><rect class="box" x="77" y="324" width="72" height="36"/><text class="label" x="113" y="342">Todo</text><a class="src" href="projects/garden.md" target="_blank" rel="noopener"><title>open projects/garden.md:11</title><circle cx="149" cy="324" r="7"/><text x="149" y="324">↗</text></a></g>
+<g class="node" data-id="projects/dankg#dankg" data-rank="4" data-x="177" data-y="442" data-w="72"><title>projects/dankg.md:5</title><rect class="box" x="141" y="424" width="72" height="36"/><text class="label" x="177" y="442">DanKG</text><a class="src" href="projects/dankg.md" target="_blank" rel="noopener"><title>open projects/dankg.md:5</title><circle cx="213" cy="424" r="7"/><text x="213" y="424">↗</text></a></g>
+<g class="node" data-id="projects/dankg#architecture" data-rank="5" data-x="100" data-y="542" data-w="124"><title>projects/dankg.md:10</title><rect class="box" x="38" y="524" width="124" height="36"/><text class="label" x="100" y="542">Architecture</text><a class="src" href="projects/dankg.md" target="_blank" rel="noopener"><title>open projects/dankg.md:10</title><circle cx="162" cy="524" r="7"/><text x="162" y="524">↗</text></a></g>
+<g class="node" data-id="projects/dankg#open-threads" data-rank="5" data-x="252" data-y="542" data-w="124"><title>projects/dankg.md:30</title><rect class="box" x="190" y="524" width="124" height="36"/><text class="label" x="252" y="542">Open threads</text><a class="src" href="projects/dankg.md" target="_blank" rel="noopener"><title>open projects/dankg.md:30</title><circle cx="314" cy="524" r="7"/><text x="314" y="524">↗</text></a></g>
+<g class="node" data-id="projects/dankg#evaluation-model" data-rank="6" data-x="102" data-y="642" data-w="156"><title>projects/dankg.md:16</title><rect class="box" x="24" y="624" width="156" height="36"/><text class="label" x="102" y="642">Evaluation model</text><a class="src" href="projects/dankg.md" target="_blank" rel="noopener"><title>open projects/dankg.md:16</title><circle cx="180" cy="624" r="7"/><text x="180" y="624">↗</text></a></g>
+<g class="node" data-id="notes/reading-list#graph-drawing" data-rank="6" data-x="341" data-y="642" data-w="132"><title>notes/reading-list.md:9</title><rect class="box" x="275" y="624" width="132" height="36"/><text class="label" x="341" y="642">Graph drawing</text><a class="src" href="notes/reading-list.md" target="_blank" rel="noopener"><title>open notes/reading-list.md:9</title><circle cx="407" cy="624" r="7"/><text x="407" y="624">↗</text></a></g>
+</g>
+</g>
+</svg>
+</main>
+<footer><span id="status"></span> — drag to pan, scroll to zoom, click a node to expand its neighbours, ↗ opens the source.</footer>
+<script type="application/json" id="dankg-meta">{"width": 621, "height": 684, "root": "example", "edgeKeySep": " ", "geometry": {"nodeHeight": 36, "rankSep": 64, "nodeSep": 28, "margin": 24, "charWidth": 8, "labelPad": 28, "minWidth": 72, "maxWidth": 264}}
+</script>
+<script type="application/json" id="dankg-index">{
+  "version": 1,
+  "nodes": [
+    {"id": "index#knowledge-base-index", "title": "Knowledge Base Index", "file": "index.md", "line": 5, "end_line": 24, "level": 1, "parent": null, "tags": ["index", "meta"], "external": ["https://github.com/example/dankg"], "resolved": true},
+    {"id": "index#about-this-graph", "title": "About this graph", "file": "index.md", "line": 18, "end_line": 24, "level": 2, "parent": "index#knowledge-base-index", "tags": ["index", "meta"], "external": [], "resolved": true},
+    {"id": "notes/daily-log#2026-08-27", "title": "2026-08-27", "file": "notes/daily-log.md", "line": 5, "end_line": 9, "level": 1, "parent": null, "tags": ["journal"], "external": [], "resolved": true},
+    {"id": "notes/daily-log#2026-08-28", "title": "2026-08-28", "file": "notes/daily-log.md", "line": 10, "end_line": 14, "level": 1, "parent": null, "tags": ["journal"], "external": [], "resolved": true},
+    {"id": "notes/reading-list#reading-list", "title": "Reading List", "file": "notes/reading-list.md", "line": 5, "end_line": 20, "level": 1, "parent": null, "tags": ["notes"], "external": [], "resolved": true},
+    {"id": "notes/reading-list#graph-drawing", "title": "Graph drawing", "file": "notes/reading-list.md", "line": 9, "end_line": 15, "level": 2, "parent": "notes/reading-list#reading-list", "tags": ["notes"], "external": [], "resolved": true},
+    {"id": "notes/reading-list#markdown-parsing", "title": "Markdown & parsing", "file": "notes/reading-list.md", "line": 16, "end_line": 20, "level": 2, "parent": "notes/reading-list#reading-list", "tags": ["notes"], "external": [], "resolved": true},
+    {"id": "projects/dankg#dankg", "title": "DanKG", "file": "projects/dankg.md", "line": 5, "end_line": 32, "level": 1, "parent": null, "tags": ["project", "rust"], "external": [], "resolved": true},
+    {"id": "projects/dankg#architecture", "title": "Architecture", "file": "projects/dankg.md", "line": 10, "end_line": 29, "level": 2, "parent": "projects/dankg#dankg", "tags": ["project", "rust"], "external": [], "resolved": true},
+    {"id": "projects/dankg#evaluation-model", "title": "Evaluation model", "file": "projects/dankg.md", "line": 16, "end_line": 29, "level": 3, "parent": "projects/dankg#architecture", "tags": ["project", "rust"], "external": [], "resolved": true},
+    {"id": "projects/dankg#open-threads", "title": "Open threads", "file": "projects/dankg.md", "line": 30, "end_line": 32, "level": 2, "parent": "projects/dankg#dankg", "tags": ["project", "rust"], "external": [], "resolved": true},
+    {"id": "projects/garden#garden", "title": "Garden", "file": "projects/garden.md", "line": 5, "end_line": 14, "level": 1, "parent": null, "tags": ["project"], "external": [], "resolved": true},
+    {"id": "projects/garden#todo", "title": "Todo", "file": "projects/garden.md", "line": 11, "end_line": 14, "level": 2, "parent": "projects/garden#garden", "tags": ["project"], "external": [], "resolved": true},
+    {"id": "scratch/draft#draft", "title": "draft", "file": "scratch/draft.md", "line": 0, "end_line": 0, "level": 0, "parent": null, "tags": [], "external": [], "resolved": false}
+  ],
+  "edges": [
+    {"from": "index#about-this-graph", "to": "index#about-this-graph", "kind": "link", "line": 23, "reciprocated": true},
+    {"from": "index#about-this-graph", "to": "projects/garden#garden", "kind": "link", "line": 20, "reciprocated": true},
+    {"from": "index#knowledge-base-index", "to": "index#about-this-graph", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "index#knowledge-base-index", "to": "notes/daily-log#2026-08-28", "kind": "link", "line": 9, "reciprocated": false},
+    {"from": "index#knowledge-base-index", "to": "notes/reading-list#reading-list", "kind": "link", "line": 8, "reciprocated": false},
+    {"from": "index#knowledge-base-index", "to": "projects/dankg#dankg", "kind": "link", "line": 7, "reciprocated": false},
+    {"from": "index#knowledge-base-index", "to": "scratch/draft#draft", "kind": "link", "line": 16, "reciprocated": false},
+    {"from": "notes/daily-log#2026-08-27", "to": "projects/dankg#open-threads", "kind": "link", "line": 7, "reciprocated": false},
+    {"from": "notes/daily-log#2026-08-28", "to": "notes/daily-log#2026-08-27", "kind": "link", "line": 13, "reciprocated": false},
+    {"from": "notes/reading-list#graph-drawing", "to": "projects/dankg#architecture", "kind": "link", "line": 13, "reciprocated": true},
+    {"from": "notes/reading-list#reading-list", "to": "notes/reading-list#graph-drawing", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "notes/reading-list#reading-list", "to": "notes/reading-list#markdown-parsing", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "notes/reading-list#reading-list", "to": "projects/dankg#dankg", "kind": "link", "line": 7, "reciprocated": false},
+    {"from": "projects/dankg#architecture", "to": "notes/reading-list#graph-drawing", "kind": "link", "line": 13, "reciprocated": true},
+    {"from": "projects/dankg#architecture", "to": "projects/dankg#evaluation-model", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "projects/dankg#dankg", "to": "index#about-this-graph", "kind": "link", "line": 7, "reciprocated": false},
+    {"from": "projects/dankg#dankg", "to": "projects/dankg#architecture", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "projects/dankg#dankg", "to": "projects/dankg#open-threads", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "projects/dankg#dankg", "to": "projects/garden#garden", "kind": "link", "line": 8, "reciprocated": false},
+    {"from": "projects/garden#garden", "to": "index#about-this-graph", "kind": "link", "line": 9, "reciprocated": true},
+    {"from": "projects/garden#garden", "to": "projects/garden#todo", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "projects/garden#todo", "to": "projects/dankg#dankg", "kind": "link", "line": 14, "reciprocated": false}
+  ]
+}
+</script>
+<script>
+(function () {
+  "use strict";
+
+  var svg = document.getElementById("graph");
+  var scene = document.getElementById("scene");
+  var edgeLayer = document.getElementById("edges");
+  var nodeLayer = document.getElementById("nodes");
+  var status = document.getElementById("status");
+
+  var meta = JSON.parse(document.getElementById("dankg-meta").textContent);
+  var index = JSON.parse(document.getElementById("dankg-index").textContent);
+  var G = meta.geometry;
+  var SVGNS = "http://www.w3.org/2000/svg";
+
+  // ---- the index, in the shapes this file actually asks questions in -------
+
+  var byId = new Map();
+  index.nodes.forEach(function (n) { byId.set(n.id, n); });
+
+  // id -> neighbours, each carrying which way the author wrote the edge.
+  var around = new Map();
+  function adjoin(id, entry) {
+    var list = around.get(id);
+    if (!list) { around.set(id, [entry]); } else { list.push(entry); }
+  }
+  index.edges.forEach(function (e) {
+    adjoin(e.from, { other: e.to, out: true, edge: e });
+    if (e.to !== e.from) { adjoin(e.to, { other: e.from, out: false, edge: e }); }
+  });
+
+  // A reciprocated pair is one line, so both halves have to agree on a key or
+  // the second would be drawn over the first -- and so must this file and the
+  // renderer, which stamps `data-key` on every line it draws. The separator
+  // comes from the page rather than being written down again here: the two
+  // halves are in different languages and nothing else would catch the drift.
+  var SEP = meta.edgeKeySep;
+  function edgeKey(e) {
+    if (e.kind === "link" && e.reciprocated && e.from !== e.to) {
+      return (e.from < e.to ? e.from + SEP + e.to : e.to + SEP + e.from) + SEP + "link";
+    }
+    return e.from + SEP + e.to + SEP + e.kind;
+  }
+
+  // ---- what is on screen ---------------------------------------------------
+
+  var visible = new Map();   // id -> {el, rank, x, y, w, owner}
+  var expanded = new Set();
+  var drawnEdges = new Map();  // key -> element
+
+  Array.prototype.forEach.call(nodeLayer.querySelectorAll(".node"), function (el) {
+    visible.set(el.dataset.id, {
+      el: el,
+      rank: +el.dataset.rank,
+      x: +el.dataset.x,
+      y: +el.dataset.y,
+      w: +el.dataset.w,
+      owner: null
+    });
+  });
+  Array.prototype.forEach.call(edgeLayer.querySelectorAll(".edge"), function (el) {
+    drawnEdges.set(el.dataset.key, el);
+  });
+
+  function hiddenNeighbours(id) {
+    return (around.get(id) || []).filter(function (n) {
+      return !visible.has(n.other) && byId.has(n.other);
+    });
+  }
+
+  function markExpandable() {
+    visible.forEach(function (v, id) {
+      v.el.classList.toggle("expandable", hiddenNeighbours(id).length > 0 || expanded.has(id));
+    });
+  }
+
+  function report() {
+    status.innerHTML = "<b>" + visible.size + "</b> of " + index.nodes.length +
+      " node(s) shown, <b>" + drawnEdges.size + "</b> of " + index.edges.length + " edge(s)";
+  }
+
+  // ---- placing a node the reader asked for --------------------------------
+  //
+  // Not a re-run of the layout: the ranks Rust computed are kept as a grid, and
+  // a revealed node is dropped into the nearest free slot on the rank its edge
+  // puts it. Sugiyama over the expanded set would move every box on screen,
+  // which is exactly what a reader tracing a link does not want. `--depth N+1`
+  // is how you get the real layout of the larger graph.
+
+  function widthOf(title) {
+    var estimate = Array.from(title).length * G.charWidth + G.labelPad;
+    return Math.min(Math.max(estimate, G.minWidth), G.maxWidth);
+  }
+
+  function fitLabel(title, width) {
+    var chars = Array.from(title);
+    var capacity = Math.max(1, Math.floor((width - G.labelPad) / G.charWidth));
+    if (chars.length <= capacity) { return title; }
+    if (capacity <= 1) { return "…"; }
+    return chars.slice(0, capacity - 1).join("") + "…";
+  }
+
+  function yOfRank(rank) {
+    return G.margin + rank * (G.nodeHeight + G.rankSep) + G.nodeHeight / 2;
+  }
+
+  function freeSlot(rank, width, prefer) {
+    var boxes = [];
+    visible.forEach(function (v) {
+      if (v.rank === rank) { boxes.push([v.x - v.w / 2, v.x + v.w / 2]); }
+    });
+
+    var fits = function (x) {
+      return boxes.every(function (b) {
+        return x + width / 2 + G.nodeSep <= b[0] || x - width / 2 - G.nodeSep >= b[1];
+      });
+    };
+
+    var tries = [prefer];
+    boxes.forEach(function (b) {
+      tries.push(b[1] + G.nodeSep + width / 2);
+      tries.push(b[0] - G.nodeSep - width / 2);
+    });
+    tries.sort(function (a, b) { return Math.abs(a - prefer) - Math.abs(b - prefer); });
+
+    for (var i = 0; i < tries.length; i++) {
+      var x = Math.round(tries[i]);
+      if (fits(x)) { return x; }
+    }
+    // Nothing between the existing boxes was wide enough; go past all of them.
+    var right = boxes.reduce(function (acc, b) { return Math.max(acc, b[1]); }, G.margin);
+    return Math.round(right + G.nodeSep + width / 2);
+  }
+
+  function el(name, attrs) {
+    var node = document.createElementNS(SVGNS, name);
+    Object.keys(attrs).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    return node;
+  }
+
+  function makeNode(data, rank, x, y, width) {
+    var g = el("g", { class: "node grown" + (data.resolved ? "" : " unresolved") });
+    g.dataset.id = data.id;
+    g.dataset.rank = rank;
+    g.dataset.x = x;
+    g.dataset.y = y;
+    g.dataset.w = width;
+
+    var tip = el("title", {});
+    tip.textContent = data.resolved ? data.file + ":" + data.line : data.id + " (unresolved)";
+    g.appendChild(tip);
+    g.appendChild(el("rect", {
+      class: "box",
+      x: x - width / 2,
+      y: y - G.nodeHeight / 2,
+      width: width,
+      height: G.nodeHeight
+    }));
+
+    var label = el("text", { class: "label", x: x, y: y });
+    label.textContent = fitLabel(data.title, width);
+    g.appendChild(label);
+
+    if (data.resolved) {
+      var link = el("a", { class: "src", href: data.file, target: "_blank", rel: "noopener" });
+      var linkTip = el("title", {});
+      linkTip.textContent = "open " + data.file + ":" + data.line;
+      link.appendChild(linkTip);
+      link.appendChild(el("circle", { cx: x + width / 2, cy: y - G.nodeHeight / 2, r: 7 }));
+      var glyph = el("text", { x: x + width / 2, y: y - G.nodeHeight / 2 });
+      glyph.textContent = "↗";
+      link.appendChild(glyph);
+      g.appendChild(link);
+    }
+    return g;
+  }
+
+  function edgePath(from, to) {
+    var half = G.nodeHeight / 2;
+    if (from === to) {
+      var out = from.x + from.w / 2 + G.nodeSep;
+      return "M" + from.x + "," + (from.y + half) + " L" + out + "," + (from.y + half) +
+        " L" + out + "," + (from.y - half) + " L" + from.x + "," + (from.y - half);
+    }
+    if (to.y === from.y) {
+      // Same rank: leave and enter the sides, so the line is not swallowed.
+      var dir = to.x > from.x ? 1 : -1;
+      return "M" + (from.x + dir * from.w / 2) + "," + from.y +
+        " L" + (to.x - dir * to.w / 2) + "," + to.y;
+    }
+    var down = to.y > from.y;
+    return "M" + from.x + "," + (from.y + (down ? half : -half)) +
+      " L" + to.x + "," + (to.y + (down ? -half : half));
+  }
+
+  function syncEdges() {
+    index.edges.forEach(function (e) {
+      var key = edgeKey(e);
+      if (drawnEdges.has(key)) { return; }
+      var from = visible.get(e.from);
+      var to = visible.get(e.to);
+      if (!from || !to) { return; }
+
+      var classes = ["edge", e.kind];
+      if (!byId.get(e.from).resolved || !byId.get(e.to).resolved) { classes.push("dangling"); }
+      var path = el("path", { class: classes.join(" "), d: edgePath(from, to) });
+      path.dataset.key = key;
+      path.dataset.from = e.from;
+      path.dataset.to = e.to;
+      // Reciprocated means mutual, and a mutual link has no one direction to
+      // point in -- the same rule the static half of the drawing follows.
+      if (!(e.kind === "link" && e.reciprocated && e.from !== e.to)) {
+        path.setAttribute("marker-end", e.kind === "contains" ? "url(#tip-contains)" : "url(#tip)");
+      }
+      edgeLayer.appendChild(path);
+      drawnEdges.set(key, path);
+    });
+  }
+
+  function expand(id) {
+    var anchor = visible.get(id);
+    if (!anchor) { return; }
+    expanded.add(id);
+    anchor.el.dataset.expanded = "true";
+
+    hiddenNeighbours(id).forEach(function (n) {
+      if (visible.has(n.other)) { return; }   // an earlier neighbour brought it
+      var data = byId.get(n.other);
+      var rank = anchor.rank + (n.out ? 1 : -1);
+      var width = widthOf(data.title);
+      var x = freeSlot(rank, width, anchor.x);
+      var y = yOfRank(rank);
+      var node = makeNode(data, rank, x, y, width);
+      nodeLayer.appendChild(node);
+      visible.set(data.id, { el: node, rank: rank, x: x, y: y, w: width, owner: id });
+    });
+    syncEdges();
+  }
+
+  function removeNode(id) {
+    var v = visible.get(id);
+    if (!v) { return; }
+    v.el.remove();
+    visible.delete(id);
+    expanded.delete(id);
+    drawnEdges.forEach(function (path, key) {
+      if (path.dataset.from === id || path.dataset.to === id) {
+        path.remove();
+        drawnEdges.delete(key);
+      }
+    });
+  }
+
+  function collapse(id) {
+    var anchor = visible.get(id);
+    expanded.delete(id);
+    if (anchor) { delete anchor.el.dataset.expanded; }
+
+    Array.from(visible.keys()).forEach(function (other) {
+      var v = visible.get(other);
+      if (!v || v.owner !== id) { return; }
+
+      // Somebody else the reader expanded also reaches it, so it is not this
+      // node's to take away. Hand it over rather than making it vanish.
+      var keeper = null;
+      expanded.forEach(function (e) {
+        if (keeper || e === id) { return; }
+        if ((around.get(e) || []).some(function (n) { return n.other === other; })) { keeper = e; }
+      });
+      if (keeper) { v.owner = keeper; return; }
+
+      if (expanded.has(other)) { collapse(other); }
+      removeNode(other);
+    });
+  }
+
+  function toggle(id) {
+    if (expanded.has(id)) { collapse(id); } else { expand(id); }
+    markExpandable();
+    report();
+  }
+
+  // ---- pan and zoom --------------------------------------------------------
+
+  var view = { k: 1, x: 0, y: 0 };
+
+  function apply() {
+    scene.setAttribute("transform", "translate(" + view.x + " " + view.y + ") scale(" + view.k + ")");
+  }
+
+  /// Client coordinates in the viewBox's units, which is what `view` is in.
+  function inCanvas(event) {
+    var box = svg.getBoundingClientRect();
+    var scale = Math.min(box.width / meta.width, box.height / meta.height);
+    return {
+      x: (event.clientX - box.left - (box.width - meta.width * scale) / 2) / scale,
+      y: (event.clientY - box.top - (box.height - meta.height * scale) / 2) / scale
+    };
+  }
+
+  function zoomTo(k, at) {
+    k = Math.min(Math.max(k, 0.1), 6);
+    view.x = at.x - (at.x - view.x) * (k / view.k);
+    view.y = at.y - (at.y - view.y) * (k / view.k);
+    view.k = k;
+    apply();
+  }
+
+  svg.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    zoomTo(view.k * Math.exp(-e.deltaY * 0.0015), inCanvas(e));
+  }, { passive: false });
+
+  var drag = null;
+
+  svg.addEventListener("pointerdown", function (e) {
+    if (e.button !== 0 || e.target.closest("a")) { return; }
+    drag = { at: inCanvas(e), from: { x: view.x, y: view.y }, moved: false };
+    svg.setPointerCapture(e.pointerId);
+    svg.classList.add("panning");
+  });
+
+  svg.addEventListener("pointermove", function (e) {
+    if (!drag) { return; }
+    var at = inCanvas(e);
+    view.x = drag.from.x + (at.x - drag.at.x) * view.k;
+    view.y = drag.from.y + (at.y - drag.at.y) * view.k;
+    if (Math.abs(at.x - drag.at.x) + Math.abs(at.y - drag.at.y) > 3) { drag.moved = true; }
+    apply();
+  });
+
+  svg.addEventListener("pointerup", function (e) {
+    svg.classList.remove("panning");
+    if (!drag) { return; }
+    var wasDrag = drag.moved;
+    drag = null;
+    if (wasDrag || e.target.closest("a")) { return; }
+    var node = e.target.closest(".node");
+    if (node) { toggle(node.dataset.id); }
+  });
+
+  svg.addEventListener("pointercancel", function () {
+    drag = null;
+    svg.classList.remove("panning");
+  });
+
+  function fit() {
+    var box = scene.getBBox();
+    if (!box.width || !box.height) { return; }
+    var k = Math.min(meta.width / box.width, meta.height / box.height) * 0.94;
+    view.k = Math.min(Math.max(k, 0.1), 6);
+    view.x = meta.width / 2 - view.k * (box.x + box.width / 2);
+    view.y = meta.height / 2 - view.k * (box.y + box.height / 2);
+    apply();
+  }
+
+  function reset() {
+    Array.from(expanded).forEach(collapse);
+    view = { k: 1, x: 0, y: 0 };
+    apply();
+    markExpandable();
+    report();
+  }
+
+  document.getElementById("fit").addEventListener("click", fit);
+  document.getElementById("reset").addEventListener("click", reset);
+
+  document.addEventListener("keydown", function (e) {
+    if (e.target !== document.body && e.target !== svg) { return; }
+    var centre = { x: meta.width / 2, y: meta.height / 2 };
+    if (e.key === "+" || e.key === "=") { zoomTo(view.k * 1.2, centre); }
+    else if (e.key === "-") { zoomTo(view.k / 1.2, centre); }
+    else if (e.key === "0") { fit(); }
+    else if (e.key === "Escape") { reset(); }
+  });
+
+  markExpandable();
+  report();
+})();
+</script>
+</body>
+</html>

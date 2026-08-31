@@ -71,6 +71,25 @@ pub fn select(graph: &Graph, entries: &[NodeId], depth: u32) -> Graph {
     }
 }
 
+/// The subgraph to draw: the named entry files' nodes plus `depth` hops, or
+/// the whole index under `all` (or when there is no entry -- a bare
+/// directory was named, and the only sensible reading of "graph this
+/// corpus" is all of it). Shared by `dankg graph` and the TUI (milestone 7),
+/// since both need the same answer to "which view."
+///
+/// `default_depth` is the caller's job to resolve (typically `[graph]
+/// depth` off the loaded config) so this stays a pure function of its
+/// arguments rather than reaching into a `Corpus` or raising diagnostics
+/// itself.
+pub fn select_view(index: &Graph, entry_files: &[String], depth: Option<u32>, all: bool, default_depth: u32) -> Graph {
+    if all || entry_files.is_empty() {
+        return index.clone();
+    }
+    let hops = depth.unwrap_or(default_depth);
+    let entries = entry_nodes(index, entry_files);
+    select(index, &entries, hops)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +182,22 @@ mod tests {
         let selected = select(&g, &[NodeId::new("a", "a")], 3);
         assert_eq!(selected.nodes.len(), g.nodes.len());
         assert_eq!(selected, g, "selecting everything is the identity");
+    }
+
+    #[test]
+    fn select_view_uses_the_default_depth_when_none_is_given() {
+        let g = chain();
+        let files = vec!["a.md".to_string()];
+        let default = select_view(&g, &files, None, false, 1);
+        assert_eq!(ids(&default), vec!["a#a".to_string(), "b#b".to_string()]);
+        let explicit = select_view(&g, &files, Some(1), false, 99);
+        assert_eq!(default, explicit, "an explicit depth overrides the default");
+    }
+
+    #[test]
+    fn select_view_falls_back_to_the_whole_index() {
+        let g = chain();
+        assert_eq!(select_view(&g, &["a.md".to_string()], None, true, 1), g, "--all");
+        assert_eq!(select_view(&g, &[], None, false, 1), g, "no entry: nothing else to draw");
     }
 }

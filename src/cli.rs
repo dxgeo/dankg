@@ -46,6 +46,7 @@ pub enum Command {
     },
     Index { paths: Vec<String>, cache: bool },
     Fmt { paths: Vec<String>, check: bool },
+    Tui { paths: Vec<String>, cache: bool, depth: Option<u32>, all: bool },
     Help,
     Version,
 }
@@ -57,6 +58,7 @@ usage:
   dankg graph <path>... [--format <fmt>] [--depth N | --all] [-o <file>]
   dankg index [<path>]  [--no-cache]
   dankg fmt   <path>... [--check]
+  dankg tui   <path>... [--depth N | --all] [--no-cache]
   dankg --help
   dankg --version
 
@@ -68,7 +70,12 @@ options:
   --no-cache       ignore .dankg/cache/ and write nothing back to it
   --check          report files not in normal form; write nothing
 
-`graph` and `index` discover the root by walking up for a `.dankg/` directory,
+`tui` needs a real terminal and draws the same view `graph` would, with the
+selected node's source line handed to `[editor] command` on enter (arrows or
+hjkl to move, tab to reveal a node's hidden neighbours, enter to open, r to
+collapse back to the entry view, q to quit).
+
+`graph`, `index`, and `tui` discover the root by walking up for a `.dankg/` directory,
 falling back to the directory the named paths share, and then index every
 markdown file under it. The named paths set the view; the index is always the
 whole root, because backlinks are only honest when every file has been seen.
@@ -105,12 +112,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         "graph" => {}
         "index" => return index(args),
         "fmt" => return fmt(args),
+        "tui" => return tui(args),
         other if other.starts_with('-') => {
             return Err(format!("unknown option `{other}`"));
         }
         other => {
             return Err(format!(
-                "unknown command `{other}` (expected `graph`, `index`, or `fmt`)"
+                "unknown command `{other}` (expected `graph`, `index`, `fmt`, or `tui`)"
             ));
         }
     }
@@ -207,6 +215,40 @@ fn fmt<I: Iterator<Item = String>>(args: I) -> Result<Command, String> {
         return Err("`fmt` needs at least one path".to_string());
     }
     Ok(Command::Fmt { paths, check })
+}
+
+fn tui<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut cache = true;
+    let mut depth = None;
+    let mut all = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--no-cache" => cache = false,
+            "--all" | "-a" => all = true,
+            "--depth" | "-d" => {
+                let value = args.next().ok_or("`--depth` needs a value")?;
+                depth = Some(parse_depth(&value)?);
+            }
+            "-h" | "--help" => return Ok(Command::Help),
+            other if other.starts_with("--depth=") => {
+                depth = Some(parse_depth(&other["--depth=".len()..])?);
+            }
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown option `{other}`"));
+            }
+            other => paths.push(other.to_string()),
+        }
+    }
+
+    if paths.is_empty() {
+        return Err("`tui` needs at least one path".to_string());
+    }
+    if all && depth.is_some() {
+        return Err("`--all` and `--depth` ask for different things".to_string());
+    }
+    Ok(Command::Tui { paths, cache, depth, all })
 }
 
 #[cfg(test)]
@@ -324,5 +366,31 @@ mod tests {
         assert!(parse(args(&["graph", "a.md", "--wat"])).unwrap_err().contains("unknown option"));
         assert!(parse(args(&["fmt"])).unwrap_err().contains("at least one path"));
         assert!(parse(args(&["fmt", "a.md", "--wat"])).unwrap_err().contains("unknown option"));
+    }
+
+    #[test]
+    fn tui_collects_paths_depth_and_cache() {
+        assert_eq!(
+            parse(args(&["tui", "a.md"])).unwrap(),
+            Command::Tui { paths: vec!["a.md".into()], cache: true, depth: None, all: false }
+        );
+        assert_eq!(
+            parse(args(&["tui", "a.md", "--depth", "2", "--no-cache"])).unwrap(),
+            Command::Tui { paths: vec!["a.md".into()], cache: false, depth: Some(2), all: false }
+        );
+        assert_eq!(
+            parse(args(&["tui", "a.md", "--all"])).unwrap(),
+            Command::Tui { paths: vec!["a.md".into()], cache: true, depth: None, all: true }
+        );
+    }
+
+    #[test]
+    fn tui_errors_match_graphs() {
+        assert!(parse(args(&["tui"])).unwrap_err().contains("at least one path"));
+        assert!(parse(args(&["tui", "a.md", "--wat"])).unwrap_err().contains("unknown option"));
+        assert!(parse(args(&["tui", "a.md", "--depth"])).unwrap_err().contains("needs a value"));
+        assert!(parse(args(&["tui", "a.md", "--all", "--depth", "1"]))
+            .unwrap_err()
+            .contains("different things"));
     }
 }

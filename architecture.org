@@ -28,6 +28,7 @@ defence of it.
 | 14 | Frontmatter        | Flat =key: value= subset only                 | ~80 lines; covers real usage; warns rather than guessing.         |
 | 15 | Format safety      | Re-parse and compare before writing         | =fmt= writes in place; a round-trip bug must not reach a note.     |
 | 16 | Database engine    | DuckDB, spawned as a configured command     | Single file, no server; decision 1 holds because nothing links.   |
+| 17 | Editor integration | =[editor] command=, spawned like =[lang.*]=   | No GUI/TUI toolkit; the user's editor is the buffer, always.      |
 
 * Terminology
 
@@ -393,6 +394,134 @@ both languages lives in Rust and travels, because nothing type-checks the two
 against each other. See the implementation note below for what it cost to learn
 that.
 
+* Terminal UI
+
+Milestone 7, placed before eval: it depends only on =graph/= and =layout/=
+(milestones 2 and 5), not on anything eval or the database milestone add, so
+there is no ordering reason to wait.
+
+Selecting a node and handing it to the reader's own editor only works
+unconditionally from inside a terminal. A browser click cannot spawn an
+arbitrary local process, and only editors that register an OS URI scheme
+(=vscode://=) can be reached from HTML at all -- =vim=, =nvim=, and =emacs= are
+structurally unreachable from a page. A TUI lives in the same terminal as the
+editor it hands off to, so any configured =[editor] command= (decision 17)
+reaches it, no scheme required.
+
+** What is reused unchanged
+
+=graph/= and =layout/= do not change. The TUI consumes the same =Layout= the
+HTML renderer does, over the same selected view (decision 7). One piece of the
+existing box-metrics work already speaks the TUI's language: =CHAR_WIDTH= and
+friends are computed in character units so an HTML-expanded box matches the
+layout's sizing -- a terminal cell /is/ that unit, so drawing the same
+Sugiyama output as text needs no rescaling.
+
+** What is new
+
+#+BEGIN_EXAMPLE
+src/tui/
+  term.rs     raw mode, alternate screen, size query; a Drop guard restores
+              the terminal on panic so a crash never leaves a broken shell
+  input.rs    hand-parsed ANSI escape sequences -> key events
+  draw.rs     Layout -> character grid, box-drawing glyphs for nodes and
+              polylines; one buffered write per frame, no diffing
+  app.rs      event loop, selection state, viewport scroll
+  editor.rs   suspend term.rs, spawn [editor] command with {file}/{line},
+              wait, resume, re-index (the file may have just changed)
+  expand.rs   tab-to-expand: hidden-neighbour lookup and nearest-free-slot
+              placement, mirroring the HTML renderer's script
+#+END_EXAMPLE
+
+** Interaction
+
+| Key         | Action                                                          |
+|-------------+------------------------------------------------------------------|
+| arrows/hjkl | move selection; up/down cross ranks, left/right stay in one     |
+| enter       | suspend, spawn the configured editor at the node's line, resume |
+| tab         | expand the selected node's hidden neighbours -- a placement on  |
+|             | the existing grid, not a second layout, same rule as HTML       |
+| /           | jump to a node by title                                         |
+| r           | collapse back to the entry view                                 |
+| q           | quit, restoring the terminal                                    |
+
+Movement follows the rank/order structure =layout/order.rs= already computed,
+so "down" is well-defined without inventing a second notion of adjacency.
+
+** Tab-to-expand
+
+=expand::expand_view= mirrors the HTML renderer's =freeSlot=/=expand=
+(=render/assets.rs=) -- a revealed node drops into the nearest free slot on
+the rank its edge puts it on, never a second Sugiyama pass, the same
+reasoning as "Expansion is a placement, not a second layout" above. It
+cannot reuse that code: one edits a DOM incrementally, this rebuilds the
+whole =Layout= from scratch on every toggle, which the TUI can afford
+because =draw.rs= already redraws the whole grid every frame with no
+diffing (see its own header comment).
+
+Rebuilding from scratch also means collapse needs no ownership
+bookkeeping: an anchor no longer reachable -- because whatever revealed
+it was itself just collapsed -- is silently skipped when =expanded= is
+replayed, so whatever it had revealed folds away too. The HTML renderer's
+=collapse= has to reassign or recursively remove nodes another expansion
+might still reach; here that behaviour falls out of the rebuild for free.
+
+A hidden neighbour can sit above the base view's rank 0 as easily as
+below it -- an anchor's /incoming/ edge from something the view never
+reached. =LaidNode.rank= is unsigned, so revealed nodes are tracked with a
+signed rank internally and the whole set is renumbered from its minimum
+before becoming a =Layout=: every base node shifts down uniformly to make
+room, rather than being re-laid out.
+
+=r= ("collapse back to the entry view") clears every expansion, not just
+the cursor. Returning from the editor (=enter=) clears it too, rather than
+replaying =expanded= against the freshly re-read graph: the edit that
+triggered the reload may have changed the shape of the graph the anchors
+were computed against, and a stale expansion risks a confusing placement
+more than starting clean costs a keypress.
+
+** Scope decisions this would actually need
+
+- *Platform*: raw mode is POSIX termios (=ioctl=, no crate) on Linux/macOS.
+  Windows needs the separate Console API. Shipping Unix-only first and calling
+  Windows a follow-up matches how the markdown subset shipped (decision 3): a
+  documented gap beats a blocked release.
+- *Redraw strategy*: one full buffered redraw per frame, not a diffed one.
+  DanKG's graphs are the size of a knowledge-base neighbourhood, not a video
+  frame; diffing is complexity bought for a problem this doesn't have.
+- *Color*: 16-color ANSI, no truecolor assumption. Unlike the drawn formats,
+  nothing here is committed or diffed, so determinism does not apply, but
+  portability across terminals still does.
+- *Additive, not a replacement.* HTML stays the committable, server-free
+  artifact (decision 9); the TUI is a live session with no output to commit.
+  Losing either would lose what the other is for.
+
+** Scrolling
+
+A drawn grid is almost always bigger than the terminal -- even a modest
+view runs to dozens of rows and a hundred-odd columns, since no box ever
+shrinks to fit. HTML solves this by being a scrollable page; a terminal is
+a fixed grid, so =app.rs='s =render= queries the real size (=term::size=)
+every frame and clips the drawing to it (=draw::window=), scrolling just
+far enough to keep the selection on screen (=draw::scroll_to_show=). "Just
+far enough" rather than centring the selection: the reader's sense of
+where things are on screen should not jump on every keypress that was
+already visible, only on one that would otherwise leave the window.
+
+No explicit pan keys exist, or are needed yet: movement already drives the
+scroll indirectly, since the selection is always what render keeps
+visible. Panning to a point with nothing selected near it -- to survey a
+big graph rather than to follow one path through it -- is not something
+the interaction table offers a way to ask for.
+
+** Open questions
+
+- =/=, "jump to a node by title": in the interaction table, but not yet
+  wired up -- =input.rs= decodes the key, =app.rs= does not bind it.
+- Panning to look at a region of the graph with no selection near it, as
+  distinct from scrolling to follow the selection (see Scrolling above):
+  not offered by any key today.
+
 * Code evaluation
 
 Never automatic. =dankg graph= only ever /displays/ stored results; it cannot
@@ -442,7 +571,7 @@ block for that name or appends one immediately after the code block.
 
 * Literate database management
 
-Milestone 8. Literate programming put the prose and the code that implements it
+Milestone 9. Literate programming put the prose and the code that implements it
 in one file; this does the same for data. The markdown file holds the
 explanation, the ETL that produces a table, and a link from the table back to
 both -- so "where did this number come from" is a graph query rather than an
@@ -451,7 +580,7 @@ archaeology project.
 The pieces are already here. A =sql= block is a code block, so it has a =name=
 and =deps= and takes part in the same DAG. =dankg eval= already prints a plan,
 spawns a configured command, and writes results back into the file. What
-milestone 8 adds is a database as the thing being written to, and the relations
+milestone 9 adds is a database as the thing being written to, and the relations
 in it as graph nodes.
 
 ** DuckDB, and why the dependency policy survives
@@ -551,7 +680,19 @@ ext     = py
 [lang.sh]
 command = sh {file}
 ext     = sh
+
+[editor]
+command = code -g {file}:{line}
 #+END_EXAMPLE
+
+=[editor] command= is the template a future =dankg open <node>= spawns to jump
+to a node's source line, substituting =\{file\}= and =\{line\}= the same way
+=[lang.*]= substitutes =\{file\}=. Unset means unconfigured, not "no editor" --
+falling back to =$EDITOR=/=$VISUAL= is left to whatever spawns the command,
+since that is an environment concern and config.rs only reports what the file
+said. This is the answer to "should DanKG grow a GUI or TUI to edit files":
+it does not. The editor a reader already has is the buffer; DanKG's job stops
+at pointing it at the right line (decision 17).
 
 A =[lang.*]= section is also the allowlist: a fenced block in a language with no
 configured command is never executed, only reported. Per-file overrides go in
@@ -565,7 +706,7 @@ significant trailing space can be written down.
 
 Unknown sections and unknown keys warn with a line number and are dropped, on
 the same principle as frontmatter: a config half-understood is worse than one
-refused. =[db.*]= is parsed today even though milestone 8 implements it, so a
+refused. =[db.*]= is parsed today even though milestone 9 implements it, so a
 config written ahead of the code does not warn.
 
 * CLI
@@ -822,6 +963,39 @@ indented code block or a block quote, both of which are outside the subset and
 render as passthrough. Implementing indented code blocks would lift three
 sections at once; changing the list code would lift none.
 
+** A syscall reporting success is not the same as it reporting something useful
+
+=term::size='s =ioctl(TIOCGWINSZ)= returned =rc == 0= -- success -- while handing
+back an all-zero =Winsize=, observed through a terminal multiplexer that had
+not yet told the kernel a real size. =Result::unwrap_or= only catches an
+=Err=; a "successful" zero sailed straight through it and into =draw::window=,
+which clipped every frame to a =0=x=0= rectangle. The symptom was total: not a
+badly-sized drawing but no drawing at all, on every single frame, which is
+what made it findable -- a partial failure would have been read as more
+scrolling to do, not a bug. =app::term_dimensions= now filters on the value,
+not just the =Result= variant, and is a pure function specifically so this
+case has a unit test rather than depending on catching a multiplexer in the
+act again.
+
+** A placement algorithm inherits no floor it was not given one
+
+=expand::free_slot= (tab-to-expand's nearest-free-slot placement, mirroring
+the HTML renderer's =freeSlot=) has no lower bound: asked to avoid a box to
+its right, "the nearest clear spot" can legally be a negative x. The base
+Sugiyama layout never produces one -- =layout/coord.rs= starts every rank at
+=MARGIN= and there are tests asserting left edges are =>= 0= -- so nothing
+downstream had ever needed to guard against it. =draw.rs='s =put= silently
+drops anything at a negative column rather than erroring, so a crowded
+expansion could make a freshly revealed node disappear with no trace,
+exactly the failure mode "The renderer and its script cannot be
+type-checked against each other" above describes for a different pair of
+files: the bug is invisible until something happens to exercise the exact
+shape that trips it, here five links crowding one anchor from the same
+side. =expand::assemble= now re-establishes the invariant explicitly --
+shifting every node right if the minimum placement went negative -- rather
+than trusting a second, ad hoc placement algorithm to have preserved an
+invariant the first one enforced only by construction.
+
 * Testing
 
 - CommonMark conformance table against the vendored spec, baseline-gated,
@@ -886,10 +1060,21 @@ sections at once; changing the list code would lift none.
    placement on the existing rank grid rather than a second layout engine, and
    says so on screen. =tests/data/corpus.golden.html= sits alongside the other
    goldens.
-7. =eval/= plan, run, write-back, =dankg check=.
-8. Literate database management, over DuckDB. Depends on 7: it is the same
+7. [DONE] Terminal UI: =src/tui/= (term, input, draw, app, editor, expand) over the
+   existing =layout/= output -- no change to =graph/= or =layout/=.
+   Selecting a node hands off to the configured =[editor] command=
+   (decision 17) directly, which a browser click structurally cannot do
+   for a terminal editor; =tab= grows the view onto the existing grid the
+   same way the HTML renderer's script does, without a second layout; the
+   drawn grid scrolls to keep the selection on screen when it outgrows the
+   terminal, which is the common case rather than the exception. See
+   /Terminal UI/ above. Unix termios first, Windows Console API deferred;
+   =/= (jump to a node by title) is the one interaction-table key still
+   unbound.
+8. =eval/= plan, run, write-back, =dankg check=.
+9. Literate database management, over DuckDB. Depends on 8: it is the same
    plan-run-write-back machinery pointed at a database instead of a process.
-9. =dankg serve= -- deferred, opt-in, only if the static path proves insufficient.
+10. =dankg serve= -- deferred, opt-in, only if the static path proves insufficient.
 
 * Open questions
 

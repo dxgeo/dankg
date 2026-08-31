@@ -22,7 +22,7 @@ pub const FILE: &str = "config";
 pub const DEFAULT_DEPTH: u32 = 2;
 
 /// Sections DanKG reads today, with the keys each one accepts.
-const KNOWN: &[(&str, &[&str])] = &[("graph", &["depth"])];
+const KNOWN: &[(&str, &[&str])] = &[("graph", &["depth"]), ("editor", &["command"])];
 
 /// Section families, named `<prefix><name>`. `db.` is reserved for milestone 8
 /// and parsed now so that a config written ahead of it does not warn.
@@ -185,6 +185,14 @@ impl Config {
     pub fn lang(&self, name: &str) -> Option<Lang> {
         self.langs().into_iter().find(|l| l.name == name)
     }
+
+    /// `[editor] command`: the template used to jump to a node's source line,
+    /// with `{file}` and `{line}` substituted. `None` when unconfigured --
+    /// falling back to `$EDITOR`/`$VISUAL` is the caller's decision, not
+    /// this file's, since that is environment rather than config.
+    pub fn editor(&self) -> Option<&str> {
+        self.get("editor", "command")
+    }
 }
 
 fn section_header(
@@ -292,6 +300,16 @@ mod tests {
         let messages: Vec<&str> = d.items().iter().map(|i| i.message.as_str()).collect();
         assert!(messages.iter().any(|m| m.contains("unknown section `[grph]`")));
         assert!(messages.iter().any(|m| m.contains("unknown key `deth`")));
+    }
+
+    #[test]
+    fn editor_command_reads_back() {
+        let (c, d) = parse("[editor]\ncommand = code -g {file}:{line}\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.editor(), Some("code -g {file}:{line}"));
+
+        let (c, _) = parse("");
+        assert_eq!(c.editor(), None);
     }
 
     #[test]

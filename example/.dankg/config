@@ -1,0 +1,24 @@
+# Marks example/ as a DanKG root. Try `dankg index example` from the repo
+# root to see this get discovered.
+
+[graph]
+depth = 2
+
+[lang.python]
+command = uv run python {file}
+ext     = py
+
+[lang.sh]
+command = sh {file}
+ext     = sh
+
+# Not used until milestone 8, but parses cleanly today -- a config written
+# ahead of the code never warns.
+[db.warehouse]
+command = duckdb -csv {db} < {file}
+path    = data/warehouse.duckdb
+
+# Used by `dankg tui`: enter on a selected node spawns this at its source
+# line. +{line} is nvim's (and vim's) own line-jump flag.
+[editor]
+command = nvim +{line} {file}
