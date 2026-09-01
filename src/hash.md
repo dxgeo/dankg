@@ -22,18 +22,23 @@ and how staleness is caught.
 
 Rust's inner-doc-comment (`//!`) has to be the first thing in the file it
 documents, so it gets its own small leading block rather than living
-inside `fnv1a`'s. Everything past this paragraph is content that lands in
-`hash.rs`, in document order, folded together under this section's own
-heading regardless of how deep a block's immediate subheading sits
-([decision 24](../architecture.md#decision-24-tangle-placement): containment
-decides the file, never `deps=`).
+inside `fnv1a`'s. Every block below shares one explicit `path=hash.rs`
+(`src/lib.md` explains the convention) rather than the heading-derived
+default this file used at first -- the default only stays flat once
+`hash.md` is the *only* source file contributing Rust, and stopped being
+true the moment a second module converted: an un-pathed block groups by
+its file-prefixed heading once tangle sees more than one contributor
+([decision 26](../architecture.md#decision-26-tangle-corpus-scope)), which
+would nest this file under `hash/hash.rs` in a corpus-wide run. An
+explicit `path=` sidesteps that decision entirely, landing at exactly
+`hash.rs` regardless of how many other files tangle alongside it.
 
 This is also the file's one deliberately duplicated sentence, not a habit
 to repeat: `//!` is what a `cargo doc` reader sees with no markdown in
 front of them, so it needs *something*, but it stays a pointer rather than
 a second copy of the paragraph above.
 
-```rust name=module_doc
+```rust name=module_doc path=hash.rs
 //! A 64-bit content hash (FNV-1a). See `src/hash.md#the-hash` for why.
 ```
 
@@ -41,7 +46,7 @@ The mix step is the entire algorithm: XOR a byte into the state, then
 multiply by the FNV prime, for every byte in the input. `OFFSET` and
 `PRIME` are FNV-1a's published constants, not tunable.
 
-```rust name=fnv1a
+```rust name=fnv1a path=hash.rs
 pub fn fnv1a(bytes: &[u8]) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -58,7 +63,7 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 Cache file names all need the same shape, so the hex form is fixed-width
 rather than however many digits the value happens to need.
 
-```rust name=hex
+```rust name=hex path=hash.rs
 /// Fixed-width so cache file names all have the same shape.
 pub fn hex(value: u64) -> String {
     format!("{value:016x}")
@@ -69,7 +74,7 @@ The inverse, used to compare a stored hash against a freshly computed one
 without keeping either side's numeric form around longer than it has to
 be.
 
-```rust name=parse_hex
+```rust name=parse_hex path=hash.rs
 pub fn parse_hex(text: &str) -> Option<u64> {
     u64::from_str_radix(text, 16).ok()
 }
@@ -82,7 +87,7 @@ mistake in the constants above cannot pass silently), the hex round-trip
 at its fixed width, and a sanity check that a one-byte change actually
 changes the hash.
 
-```rust name=tests
+```rust name=tests path=hash.rs
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,26 +121,25 @@ see `literate/hash.md` (outside this corpus -- `.dankgignore` excludes
 standalone pilot that proved the mechanics first, on a throwaway crate
 rather than the one `cargo build` actually compiles.
 
-Regenerate `src/hash.rs` after editing this file, from the repo root:
+Regenerate every converted module at once, from the repo root (this file
+included -- there is no narrower single-file command any more, now that
+more than one source contributes; `src/lib.md`, *Literate source*):
 
 ```
-cargo run --bin dankg -- tangle src/hash.md --lang rust -o src
+cargo run --bin dankg -- tangle . --lang rust -o src
 ```
 
-That overwrites `src/hash.rs` in place -- a single file with one top-level
-heading tangles flat, with no per-file subdirectory nesting
-([decision 26](../architecture.md#decision-26-tangle-corpus-scope): nesting
-only triggers once more than one source file contributes to the same
-tree). No `[tangle.rust] glue`/`command` is even configured for `rust` at
-the repo root yet, and tangle never runs on its own regardless
-(architecture.md, *[Trigger](../architecture.md#trigger)*, the same principle
-as [decision 9](../architecture.md#decision-9-eval-trigger)): run `cargo test` yourself afterward to confirm the regenerated file still builds
+That overwrites `src/hash.rs` in place. No `[tangle.rust] glue`/`command`
+is even configured for `rust` at the repo root yet, and tangle never runs
+on its own regardless (architecture.md,
+*[Trigger](../architecture.md#trigger)*, the same principle as
+[decision 9](../architecture.md#decision-9-eval-trigger)): run `cargo test` yourself afterward to confirm the regenerated tree still builds
 before committing it.
 
 **Staleness is a checked property, not an assumption.**
-`tests/literate.rs`'s `hash_rs_matches_its_literate_source` re-tangles
-this file into a scratch directory on every `cargo test` run and diffs the
-result against the committed `src/hash.rs` byte for byte, failing loudly
-the moment they drift -- the generated file is trusted only as far as
-that check, never on its own; the markdown that produced it is what's
-actually trusted ([Trigger](../architecture.md#trigger)).
+`tests/literate.rs` re-tangles the whole corpus into a scratch directory
+on every `cargo test` run and diffs every file it produced against the
+committed one at the same path under `src/`, failing loudly the moment
+any of them drift -- the generated tree is trusted only as far as that
+check, never on its own; the markdown that produced it is what's actually
+trusted ([Trigger](../architecture.md#trigger)).
