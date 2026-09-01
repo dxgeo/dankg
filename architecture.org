@@ -41,6 +41,7 @@ defence of it.
 | 27 | Module glue        | An external, per-language, spawned =[tangle.<lang>] glue= command; never DanKG's own code | Matches the spawned-command pattern (decision 1); lets an extension do things DanKG's own code must not (read a block's source). |
 | 28 | Per-file tangle hints | =dankg.tangle.public= frontmatter, surfaced to =glue= only through a sidecar manifest | Visibility is a per-file authorial call; whether the mechanism runs at all stays root-config only (decision 27). |
 | 29 | Cross-file =deps=  | =deps=other.md#name= reaches another file's top-level block; =--block=/=--all=/=--each=' own targets stay one file (decision 19 unchanged) | Concatenation (decision 11) makes "the chain crosses a file" and "the chain crosses a language" the same *kind* of non-problem; only resolution needed widening, not the execution model. |
+| 30 | Manifest schema v2 | Adds a =blocks= array (name, =line=, =end_line=) per file, straight off the same =BlockRef= fields =result.rs= already tracks | A richer glue script needs block-level source position to compare against, never a paragraph's own text; DanKG hands over structure, judgment stays glue's (decision 27). |
 
 * Terminology
 
@@ -1108,6 +1109,21 @@ already an importable namespace package with nothing to generate; anyone
 wanting Java support writes their own external program -- no change to
 DanKG itself required, ever, to add a language this way.
 
+=glue/rust.py= only ever writes a =mod.rs= where none exists; it never
+touches one that is already there (see the script's own doc comment).
+That backoff means porting an *existing*, hand-written multi-file Rust
+module into literate form never actually exercises the generator: a human
+already wrote that module's =mod.rs= by hand, tangle reproduces it
+verbatim like any other block, and =glue= finds a file already sitting
+where it would have written one and leaves it alone. The mechanism is
+real, but only load-bearing for a module authored *through* dankg from
+the start, with no hand-written =mod.rs= anywhere in its literate source
+-- confirmed by a pilot (=literate/layout-pilot/=) built specifically to
+withhold that hand-authored piece and prove the generator fires without
+it, including a negative control: deleting =glue= from config and
+re-tangling fails the build with rustc's own =E0583=, the same error a
+human would get for forgetting the declaration themselves.
+
 A block wants a path outside the heading-derived tree entirely more often
 than it wants to be reassigned to a different heading's file -- a
 =Cargo.toml=, a =pyproject.toml= -- so the fence info string grows one
@@ -1156,11 +1172,56 @@ per-file visibility reads an optional sidecar,
 =\{dir\}/.dankg-tangle-manifest.json=, written only when =glue= is
 actually configured (a language with none gets no extra file cluttering
 its output) and listing every tangled file's own output path, source
-=.md= path, and =public= flag. Hand-rolled JSON, the same reasoning as
-=render/json.rs=: DanKG takes no crates, and the shape here is small and
-fully under our control -- small enough that the escaper is literally
-shared (=render::json::string=) rather than reimplemented a second time
-for one more, equally small, JSON writer.
+=.md= path, =public= flag, and (version 2) its own contributing blocks.
+Hand-rolled JSON, the same reasoning as =render/json.rs=: DanKG takes no
+crates, and the shape here is small and fully under our control -- small
+enough that the escaper is literally shared (=render::json::string=)
+rather than reimplemented a second time for one more, equally small, JSON
+writer.
+
+*** Manifest version 2: per-block source position
+
+Decision 30, and the first real instance of "a richer glue implementation
+needs more" the schema's own version-1 comment already anticipated. Each
+file's manifest entry gained a =blocks= array -- =name=, =line=,
+=end_line= for every contributing block, in document order -- straight off
+the same =BlockRef= fields =result.rs= already carries for write-back
+positioning (=src/tangle.rs='s =ManifestEntry=/=BlockEntry=). Nothing new
+is computed for the manifest's sake; tangle already has these coordinates
+in hand at the exact point it was building a =ManifestEntry= anyway, so
+this is exposure, not a feature.
+
+What a =line=/=end_line= pair is *for* stays outside DanKG entirely: which
+paragraph of source prose "belongs" to a block, and what counts as a
+suspicious echo of it, is a glue script's own judgment to make, the same
+trust boundary decision 27 already draws -- DanKG hands over structure,
+never meaning. =glue/rust-doclint.py= is the reference consumer: it flags
+a tangled block's own =//!=/=///= comment when it borrows a clause from
+the literate source's prose rather than pointing back to it, windowing its
+comparison to the prose between one block and the previous one rather than
+the whole file, which is exactly what block-level position makes possible
+that file-level position (version 1) could not. A version-1 manifest (no
+=blocks= field, an older =dankg=) still parses correctly -- the field is
+purely additive, and =rust.py='s own =path=/=source=/=public= reads are
+unaffected by its presence or absence.
+
+=glue/rust-doclint.py= has to resolve a manifest entry's =source= back to
+a real file, which =rust.py= never needs to do -- and =source= is not
+consistently resolvable from wherever a glue script happens to run.
+Tangling one named file makes =source= exactly the path given on the
+command line; tangling a corpus makes it root-relative instead, and
+neither =\{dir\}= nor anything else glue is handed carries that root. The
+script takes an optional second argument, =\[source-root\]=, for this
+reason -- found only because a corpus-wide pilot
+(=literate/layout-pilot/=) tangled clean and silent, which looked like a
+passing check until it turned out every =source= lookup was silently
+missing the file. Both reference scripts have their own test suite now
+(=glue/test_glue.py=, stdlib =unittest=, run directly with =python3=),
+covering =rust.py='s generation rules and =rust-doclint.py='s windowing
+and fallback behaviour; chaining the two in one =glue= line (structural
+generation before the doc-comment check, via =sh -c '... && ...'=, the
+same quote-aware split =cmd.rs= already tests) is what surfaced the
+=source-root= gap in the first place.
 
 ** Config
 
@@ -1233,11 +1294,12 @@ would need; only whichever spawned step comes next can still fail.
   =rustc --crate-type= with no output) when no =[tangle.*] command= is
   configured, versus leaving "no command" to mean "materialize only,"
   full stop, as written above.
-- The manifest schema (decision 28) is =version: 1= and has exactly the
-  three fields a Rust =glue= script needs today. Whether a richer glue
-  implementation ever needs more (declaration order across a directory,
-  say, rather than whatever order tangle happened to write files in) is
-  unanswered until one is actually written.
+- The manifest schema (decision 28, widened by decision 30) reached
+  =version: 2= once a richer glue implementation
+  (=glue/rust-doclint.py=) was actually written and needed block-level
+  source position. Declaration order across a directory -- rather than
+  whatever order tangle happened to write files in -- remains
+  unaddressed, since no glue consumer has needed it yet.
 - =dankg.tangle.public= is the one frontmatter hint that exists. Whether
   other purely-authorial, per-file glue preferences ever justify their own
   =dankg.tangle.*= key, versus staying a =glue= script's own problem to

@@ -1,0 +1,8 @@
+# Pilot config for the hash.rs bootstrap experiment (architecture.org,
+# "Is it possible to bootstrap dankg" advisory). Scoped to literate/ as its
+# own root so this never touches the real crate's own corpus.
+
+[tangle.rust]
+glue    = python3 glue/rust-doclint.py {dir}
+ext     = rs
+command = cargo test --manifest-path {dir}/Cargo.toml
