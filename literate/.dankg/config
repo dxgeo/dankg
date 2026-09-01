@@ -3,6 +3,6 @@
 # own root so this never touches the real crate's own corpus.
 
 [tangle.rust]
-glue    = python3 glue/rust-doclint.py {dir}
+glue    = sh -c 'python3 glue/rust-docinject.py {dir} && python3 glue/rust-doclint.py {dir}'
 ext     = rs
-command = cargo test --manifest-path {dir}/Cargo.toml
+command = sh -c 'cargo test --manifest-path {dir}/Cargo.toml && cargo doc --no-deps --manifest-path {dir}/Cargo.toml'
