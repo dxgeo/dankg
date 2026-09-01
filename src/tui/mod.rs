@@ -1,4 +1,4 @@
-//! Terminal UI. See `architecture.org`, "Terminal UI" (milestone 7).
+//! Terminal UI. See `architecture.md`, "Terminal UI" (milestone 7).
 //!
 //! `term` (raw mode, alternate screen, size query), `input` (byte ->
 //! key-event decoding), `draw` (`Layout` -> character grid), `editor`

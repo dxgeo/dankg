@@ -1,0 +1,8 @@
+# DanKG's own root. Marks the whole repository as one corpus, so
+# `dankg check` can verify the design record's own cross-references (and,
+# once `src/` starts converting, links from a decision to the code that
+# implements it) never go stale silently -- the actual payoff behind
+# converting `architecture.org`/`project.org` to `.md` in the first place.
+#
+# `[lang.*]`/`[tangle.*]` sections are added here as `src/` modules
+# actually convert; nothing under docs alone needs either yet.

@@ -13,8 +13,11 @@ into a real, buildable source tree.
   evaluated only when `dankg eval` is invoked, and only after printing the
   plan and asking for confirmation.
 
-See `architecture.org` for the full design record (numbered decisions,
-data model, module layout) and `project.org` for the "what and why."
+See `architecture.md` for the full design record (numbered decisions,
+data model, module layout) and `project.md` for the "what and why." Both
+are themselves a dankg corpus -- `dankg graph architecture.md` renders
+the design record as the same kind of graph this tool draws for anything
+else.
 
 ## Install
 

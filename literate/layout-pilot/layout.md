@@ -1165,7 +1165,7 @@ needs `graph::build`, `graph::resolve`, and `md::` too, none of which
 bear on the question this pilot exists to answer.
 
 **A finding worth keeping, independent of this specific pilot** (now also
-recorded in architecture.org, next to decision 27's own explanation).
+recorded in architecture.md, next to decision 27's own explanation).
 Real, hand-written Rust in this repo's own `src/` will never naturally
 exercise `glue`'s generative path, because a human author already writes
 their own `mod.rs` -- and `glue/rust.py` explicitly never overwrites one

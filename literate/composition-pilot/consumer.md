@@ -42,7 +42,7 @@ is that pilot.
 `layout-pilot` each proved tangle's own loop in isolation. Neither asked
 whether a block written for tangle's real, multi-file crate can *also* be
 the thing `dankg eval` smoke-tests through a cross-file `deps=` chain --
-architecture.org's own *Code evaluation* section already states the
+architecture.md's own *Code evaluation* section already states the
 mechanical reason to expect friction ("For a language with no real
 per-file module system reachable from within one compiled unit ... this
 is enough to write a genuinely multi-file literate program with no
@@ -96,7 +96,7 @@ at all") -- the two promises are compatible only when nothing forces a
 choice between them, which is precisely `same-file.md`'s shape and
 precisely not this one. A real cross-tangle-file dependency needs the
 author to write `use crate::producer::greeting::make_greeting;` by hand
-in the tangled output's own file (architecture.org, *Tangle*: "The author
+in the tangled output's own file (architecture.md, *Tangle*: "The author
 writes those themselves") -- which would in turn break the identical
 block's use as a flat, concatenation-eval'd script, since there is no
 `crate::producer` module for a lone temporary file passed straight to

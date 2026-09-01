@@ -1,5 +1,5 @@
 //! Tab-to-expand: reveal a selected node's hidden neighbours onto the
-//! existing grid, per architecture.org's "Expansion is a placement, not a
+//! existing grid, per architecture.md's "Expansion is a placement, not a
 //! second layout". The HTML renderer's script (`render/assets.rs`) solves
 //! the same problem -- a revealed node dropped into the nearest free slot
 //! on the rank its edge puts it on, not a second Sugiyama pass -- and this

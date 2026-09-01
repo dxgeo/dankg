@@ -17,7 +17,7 @@ pub mod rank;
 use crate::graph::{EdgeKind, Graph, NodeId};
 use acyclic::Role;
 
-/// Fixed layer height, per architecture.org. Everything else is derived.
+/// Fixed layer height, per architecture.md. Everything else is derived.
 pub const NODE_HEIGHT: i32 = 36;
 pub const RANK_SEP: i32 = 64;
 pub const NODE_SEP: i32 = 28;

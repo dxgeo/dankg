@@ -28,7 +28,7 @@ pub fn expected_hash(chain: &[BlockRef], command_template: &str) -> u64 {
 }
 
 /// `failed` marks a non-zero exit or a timeout: the output is still stored
-/// (architecture.org, Execution -- "a non-zero exit stores the output and
+/// (architecture.md, Execution -- "a non-zero exit stores the output and
 /// marks the result failed"), just flagged rather than dropped, so a reader
 /// sees what actually happened last time without `dankg eval` silently
 /// discarding a run that went wrong.

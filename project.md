@@ -1,11 +1,17 @@
-#+TITLE: DanKG Project
-#+AUTHOR: Daniel J. Okuniewicz
-#+DATE: {{{time(%Y-%m-%d)}}}
+---
+title: DanKG Project
+author: Daniel J. Okuniewicz
+---
+This document records *what* DanKG is and *why*. [Architecture](architecture.md)
+records *how* it is built. Where the two disagree, this file wins and
+architecture.md is wrong.
 
-* Overview
+# Overview
+
 DanKG (Dan's Knowledge Grapher) is a vanilla markdown knowledge graphing tool that is not dependent on anything else.
 
-** Key Features
+## Key Features
+
 1. Lightweight
 2. Plaintext-driven (no fancy front-end necessary)
 3. Agent-driven capable
@@ -15,18 +21,21 @@ DanKG (Dan's Knowledge Grapher) is a vanilla markdown knowledge graphing tool th
 6. Interactive visualization capabilities
 7. Literate database management
 
-** Constraints
+## Constraints
+
 1. Pure rust
 2. Dependency-free, built from scratch
 
-** General Functionality
+## General Functionality
+
 You write a markdown file, give it a title, date, author, whatever.
 DanKG can generate a knowledge graph of all the content in that file, plus all the content in any other linked files.
 Example: You link to another top-level heading in the same document.
 Running DanKG on the file shows a flow chart going from that heading to the next one.
 The link automatically goes both ways, but it is displayed as a unidirection unless it is linked back.
 
-** Literate database management
+## Literate database management
+
 Literate programming keeps the prose and the code that implements it in one file.
 DanKG does the same for data.
 A markdown file can hold the explanation of a table, the ETL that builds it, and a link from the table back to both.
@@ -34,7 +43,8 @@ Running DanKG on the file shows the tables and views as nodes in the graph, edge
 "Where did this number come from" becomes a question you answer by following a link.
 DuckDB is the first database supported. It is never linked into DanKG; it is run as a configured command, like any other interpreter.
 
-** Code evaluation
+## Code evaluation
+
 DanKG can evaluate code by using the configured compiler/interpreter in PATH (or in a virtual environment like `uv`)
 The output will be displayed in the knowledge graph.
 Only code that is in view will be executed (example: in the current context) unless it is dependent on code from another context (in that case it pulls only what is needed).

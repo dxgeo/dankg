@@ -2,7 +2,7 @@
 
 The crate root for pilot 2. Two `path=` blocks, exactly like `hash.md`'s
 own scaffold section -- `Cargo.toml` and `lib.rs` land outside the
-heading-derived tree entirely, ignoring `file_prefix` (architecture.org,
+heading-derived tree entirely, ignoring `file_prefix` (architecture.md,
 *Tangle > Placement*), which matters more here than it did for `hash.md`:
 this corpus has two contributing files (this one and `layout.md`), so
 `file_prefix` nesting is genuinely active, and without `path=` these two

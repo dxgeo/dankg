@@ -18,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Captured stdout and stderr are each cut off here, with a note appended --
-/// the same limit and treatment architecture.org specifies for a block's
+/// the same limit and treatment architecture.md specifies for a block's
 /// output.
 pub const OUTPUT_LIMIT: usize = 64 * 1024;
 
@@ -29,7 +29,7 @@ pub struct Output {
     pub stdout: String,
     pub stderr: String,
     /// `false` for a non-zero exit *or* a timeout kill -- either way the
-    /// result is marked failed (architecture.org, Execution).
+    /// result is marked failed (architecture.md, Execution).
     pub success: bool,
     pub timed_out: bool,
 }
@@ -148,7 +148,7 @@ fn read_to_channel(stream: Option<impl Read + Send + 'static>) -> mpsc::Receiver
 /// so this shells out to `kill` rather than inventing a raw syscall wrapper
 /// std does not expose. Not available off Unix; a lone `Child::kill` there
 /// is a documented gap rather than a blocked feature, the same call made
-/// for the TUI's termios (architecture.org, Terminal UI).
+/// for the TUI's termios (architecture.md, Terminal UI).
 fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -180,7 +180,7 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> bool {
 }
 
 /// Cuts `s` to [`OUTPUT_LIMIT`] bytes at a UTF-8 boundary and notes that it
-/// happened, matching architecture.org's "truncated at 64 KiB with a
+/// happened, matching architecture.md's "truncated at 64 KiB with a
 /// warning."
 fn truncate(mut s: String) -> String {
     if s.len() <= OUTPUT_LIMIT {

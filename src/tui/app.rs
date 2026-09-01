@@ -235,7 +235,7 @@ fn block_select_status(sel: &BlockSelect) -> String {
     format!("eval: {}   enter=run esc=cancel", parts.join(" "))
 }
 
-/// Every action bound today, arranged the way `architecture.org`'s
+/// Every action bound today, arranged the way `architecture.md`'s
 /// interaction table is: fixed keys first (never remappable -- arrows,
 /// enter, tab, esc, `?` itself), then the `[keys]`-configurable letters,
 /// read live from `keys` so a remap shows up here too rather than the
@@ -509,7 +509,7 @@ impl App {
 
     /// `esc`, while cycling: cancels back to plain node selection, no run.
     /// Off cycle mode, `esc` remains the documented no-op it always was
-    /// (architecture.org, Terminal UI open questions).
+    /// (architecture.md, Terminal UI open questions).
     fn cancel_block_select(&mut self) {
         if self.block_select.take().is_some() {
             self.status = None;
