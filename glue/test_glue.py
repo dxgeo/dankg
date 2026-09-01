@@ -29,6 +29,7 @@ def _load(name: str, filename: str):
 
 rust = _load("rust_glue", "rust.py")
 doclint = _load("rust_doclint", "rust-doclint.py")
+docinject = _load("rust_docinject", "rust-docinject.py")
 
 
 class ModGeneration(unittest.TestCase):
@@ -239,6 +240,360 @@ class DoclintMain(unittest.TestCase):
             with contextlib.redirect_stderr(captured):
                 doclint.main()
             self.assertIn("borrows a clause", captured.getvalue())
+
+
+class DocinjectBackoff(unittest.TestCase):
+    def test_a_doc_comment_anywhere_in_the_block_counts(self):
+        self.assertTrue(docinject.has_doc_comment("fn a() {}\n/// trailing, not leading\n"))
+
+    def test_no_doc_comment_at_all(self):
+        self.assertFalse(docinject.has_doc_comment("fn a() {}\n"))
+
+    def test_an_inner_doc_comment_also_counts(self):
+        self.assertTrue(docinject.has_doc_comment("//! module doc\nfn a() {}\n"))
+
+
+class DocinjectFormatting(unittest.TestCase):
+    def test_one_paragraph_is_one_line(self):
+        self.assertEqual(docinject.doc_lines(["hello"]), ["/// hello"])
+
+    def test_two_paragraphs_get_a_blank_slash_line_between_them(self):
+        self.assertEqual(
+            docinject.doc_lines(["one", "two"]),
+            ["/// one", "///", "/// two"],
+        )
+
+
+class DocinjectNameTable(unittest.TestCase):
+    def _manifest(self):
+        return {
+            "files": [
+                {
+                    "path": "producer/greeting.rs",
+                    "source": "producer.md",
+                    "blocks": [{"name": "make_greeting", "line": 5, "end_line": 8}],
+                },
+                {
+                    "path": "consumer/caller.rs",
+                    "source": "consumer.md",
+                    "blocks": [{"name": "call_greeting", "line": 5, "end_line": 8}],
+                },
+            ]
+        }
+
+    def test_builds_a_crate_path_per_block(self):
+        table = docinject.build_name_table(self._manifest())
+        self.assertEqual(
+            table["producer.md"]["make_greeting"],
+            "crate::producer::greeting::make_greeting",
+        )
+
+    def test_a_cross_file_link_resolves_through_the_table(self):
+        table = docinject.build_name_table(self._manifest())
+        rewritten = docinject.rewrite_links(
+            "See [it](producer.md#make_greeting) for details.", "consumer.md", table
+        )
+        self.assertEqual(rewritten, "See [it](crate::producer::greeting::make_greeting) for details.")
+
+    def test_a_same_file_link_resolves_against_its_own_source(self):
+        table = docinject.build_name_table(self._manifest())
+        rewritten = docinject.rewrite_links("See [it](#call_greeting).", "consumer.md", table)
+        self.assertEqual(rewritten, "See [it](crate::consumer::caller::call_greeting).")
+
+    def test_an_unresolved_target_is_left_exactly_as_written(self):
+        table = docinject.build_name_table(self._manifest())
+        original = "See [it](nowhere.md#nothing)."
+        self.assertEqual(docinject.rewrite_links(original, "consumer.md", table), original)
+
+
+class DocinjectWindowing(unittest.TestCase):
+    """The regression this pilot's own reasoning caught before ever running
+    it: a source `.md` that contributes more than one output file (`path=`
+    landing one block outside the heading-derived tree, exactly `hash.md`'s
+    own shape) must still window a later block's prose starting from its
+    true document-order predecessor, not from the start of whichever
+    *output file* it happens to land in -- otherwise an earlier, unrelated
+    file's own prose bleeds into a block that never asked for it."""
+
+    def _fixture(self):
+        source = (
+            "# Root\n\n"
+            "Cargo prose here, about the scaffold.\n\n"
+            "```rust name=scaffold path=Cargo.toml\n"
+            "[package]\n"
+            "```\n\n"
+            "Real explanation of the actual function.\n\n"
+            "```rust name=real\n"
+            "fn real() {}\n"
+            "```\n"
+        )
+        return source.splitlines()
+
+    def _manifest(self):
+        return {
+            "files": [
+                {
+                    "path": "scaffold.rs",
+                    "source": "root.md",
+                    "blocks": [{"name": "scaffold", "line": 5, "end_line": 7}],
+                },
+                {
+                    "path": "lib.rs",
+                    "source": "root.md",
+                    "blocks": [{"name": "real", "line": 11, "end_line": 13}],
+                },
+            ]
+        }
+
+    def test_the_later_files_own_block_does_not_inherit_the_earlier_files_prose(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "root.md").write_text("\n".join(self._fixture()) + "\n")
+            manifest = self._manifest()
+            injections = docinject.plan_injections(manifest, root, docinject.build_name_table(manifest))
+            _, comment = injections["lib.rs"][0]
+            self.assertIn("Real explanation of the actual function.", comment)
+            self.assertNotIn("Cargo prose", comment)
+
+    def test_the_earlier_files_own_block_still_gets_its_own_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "root.md").write_text("\n".join(self._fixture()) + "\n")
+            manifest = self._manifest()
+            injections = docinject.plan_injections(manifest, root, docinject.build_name_table(manifest))
+            _, comment = injections["scaffold.rs"][0]
+            self.assertIn("Cargo prose here, about the scaffold.", comment)
+
+
+class DocinjectPlanningBackoff(unittest.TestCase):
+    def test_a_block_with_its_own_doc_comment_is_never_planned(self):
+        source = (
+            "# Test\n\nSome prose that would otherwise be injected.\n\n"
+            "```rust name=one\n//! already documented by hand\nfn one() {}\n```\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "x.md").write_text(source)
+            manifest = {
+                "files": [
+                    {"path": "x.rs", "source": "x.md", "blocks": [{"name": "one", "line": 5, "end_line": 8}]}
+                ]
+            }
+            injections = docinject.plan_injections(manifest, root, {})
+            self.assertNotIn("x.rs", injections)
+
+    def test_a_block_with_no_preceding_prose_is_never_planned(self):
+        source = "# Test\n\n```rust name=one\nfn one() {}\n```\n"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "x.md").write_text(source)
+            manifest = {
+                "files": [
+                    {"path": "x.rs", "source": "x.md", "blocks": [{"name": "one", "line": 3, "end_line": 5}]}
+                ]
+            }
+            injections = docinject.plan_injections(manifest, root, {})
+            self.assertNotIn("x.rs", injections)
+
+
+class DocinjectFrontmatter(unittest.TestCase):
+    """Regression pin for the second bug the `docinject-pilot` run found:
+    a leading frontmatter block is not a paragraph and must never be
+    swept into the first block's own injected doc comment."""
+
+    def test_a_leading_frontmatter_block_is_blanked_not_read_as_prose(self):
+        lines = ["---", "dankg.tangle.public: true", "---", "", "# Caller", "", "Real prose."]
+        stripped = docinject.strip_frontmatter(lines)
+        self.assertEqual(len(stripped), len(lines))  # line numbers must still index correctly
+        self.assertNotIn("dankg.tangle.public: true", stripped)
+        self.assertEqual(stripped[4], "# Caller")
+
+    def test_a_dots_closing_delimiter_is_also_recognised(self):
+        lines = ["---", "k: v", "...", "prose"]
+        stripped = docinject.strip_frontmatter(lines)
+        self.assertEqual(stripped, ["", "", "", "prose"])
+
+    def test_no_opening_delimiter_means_nothing_is_touched(self):
+        lines = ["# Heading", "", "Some prose."]
+        self.assertEqual(docinject.strip_frontmatter(lines), lines)
+
+    def test_an_unclosed_leading_dashes_line_is_left_alone(self):
+        lines = ["---", "# Heading", "", "prose, no closing delimiter anywhere"]
+        self.assertEqual(docinject.strip_frontmatter(lines), lines)
+
+    def test_frontmatter_is_actually_excluded_from_the_first_blocks_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "x.md").write_text(
+                "---\ndankg.tangle.public: true\n---\n\n# Caller\n\nReal prose only.\n\n"
+                "```rust name=one\nfn one() {}\n```\n"
+            )
+            manifest = {
+                "files": [{"path": "x.rs", "source": "x.md", "blocks": [{"name": "one", "line": 9, "end_line": 11}]}]
+            }
+            injections = docinject.plan_injections(manifest, root, {})
+            _, comment = injections["x.rs"][0]
+            self.assertIn("Real prose only.", comment)
+            self.assertNotIn("dankg.tangle.public", comment)
+
+
+class DocinjectSkipsNonRustOutput(unittest.TestCase):
+    """Regression pin for the bug the `hash.md` pilot's own real run found:
+    a `path=Cargo.toml` block is selected by *fence* language, matching
+    `--lang rust`, but its own output is TOML, not Rust -- `///` there is
+    not a comment, it is a parse error. The fix has two halves, both
+    covered here: the non-Rust output must never be written to, and its
+    own prose must still count as spent so a *later* Rust block's window
+    does not silently widen to include it."""
+
+    def _fixture(self):
+        source = (
+            "# Root\n\n"
+            "Cargo prose that must never become a TOML comment.\n\n"
+            "```rust name=scaffold path=Cargo.toml\n"
+            "[package]\n"
+            "```\n\n"
+            "Real explanation of the actual function.\n\n"
+            "```rust name=real\n"
+            "fn real() {}\n"
+            "```\n"
+        )
+        return source.splitlines()
+
+    def _manifest(self):
+        return {
+            "files": [
+                {
+                    "path": "Cargo.toml",
+                    "source": "root.md",
+                    "blocks": [{"name": "scaffold", "line": 5, "end_line": 7}],
+                },
+                {
+                    "path": "lib.rs",
+                    "source": "root.md",
+                    "blocks": [{"name": "real", "line": 11, "end_line": 13}],
+                },
+            ]
+        }
+
+    def test_the_toml_output_is_never_planned_for_injection(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "root.md").write_text("\n".join(self._fixture()) + "\n")
+            manifest = self._manifest()
+            injections = docinject.plan_injections(manifest, root, docinject.build_name_table(manifest))
+            self.assertNotIn("Cargo.toml", injections)
+
+    def test_the_tomls_own_prose_does_not_bleed_into_the_next_rust_blocks_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "root.md").write_text("\n".join(self._fixture()) + "\n")
+            manifest = self._manifest()
+            injections = docinject.plan_injections(manifest, root, docinject.build_name_table(manifest))
+            _, comment = injections["lib.rs"][0]
+            self.assertIn("Real explanation of the actual function.", comment)
+            self.assertNotIn("Cargo prose", comment)
+
+
+class DocinjectLeadingSkip(unittest.TestCase):
+    """Regression pin for the third bug the `docinject-pilot` run found:
+    a block that opens with a `use` (the composition-pilot's own escape
+    hatch for a real cross-tangle-file reference) must have its injected
+    comment attach to the item *after* the `use`, not the `use` itself."""
+
+    def test_a_leading_use_is_skipped(self):
+        content = "use crate::producer::greeting::make_greeting;\n\npub fn shout() {}\n"
+        offset = docinject.leading_skip_offset(content)
+        self.assertEqual(content[offset:], "pub fn shout() {}\n")
+
+    def test_a_leading_attribute_is_also_skipped(self):
+        content = "#[derive(Debug)]\npub struct Thing;\n"
+        offset = docinject.leading_skip_offset(content)
+        self.assertEqual(content[offset:], "pub struct Thing;\n")
+
+    def test_no_leading_use_or_attribute_means_no_skip_at_all(self):
+        content = "pub fn hello() {}\n"
+        self.assertEqual(docinject.leading_skip_offset(content), 0)
+
+    def test_the_injected_comment_lands_on_the_function_not_the_use(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            (out / "x.rs").write_text(
+                "// generated -- do not edit\n\n"
+                "use crate::producer::greeting::make_greeting;\n\n"
+                "pub fn shout() {}\n"
+            )
+            content = "use crate::producer::greeting::make_greeting;\n\npub fn shout() {}\n"
+            ok = docinject.apply_injections(out, "x.rs", [(content, "/// docs for shout\n")])
+            self.assertTrue(ok)
+            text = (out / "x.rs").read_text()
+            self.assertIn("/// docs for shout\npub fn shout() {}\n", text)
+            self.assertNotIn("/// docs for shout\nuse", text)
+
+
+class DocinjectApply(unittest.TestCase):
+    def test_the_comment_lands_directly_above_the_blocks_own_content(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            (out / "x.rs").write_text("// generated -- do not edit\n\nfn one() {}\n")
+            ok = docinject.apply_injections(out, "x.rs", [("fn one() {}", "/// one thing\n")])
+            self.assertTrue(ok)
+            self.assertEqual(
+                (out / "x.rs").read_text(),
+                "// generated -- do not edit\n\n/// one thing\nfn one() {}\n",
+            )
+
+    def test_content_that_cannot_be_found_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            original = "// generated -- do not edit\n\nfn one() {}\n"
+            (out / "x.rs").write_text(original)
+            ok = docinject.apply_injections(out, "x.rs", [("fn missing() {}", "/// nope\n")])
+            self.assertFalse(ok)
+            self.assertEqual((out / "x.rs").read_text(), original)
+
+
+class DocinjectMain(unittest.TestCase):
+    def test_no_manifest_means_silent_no_op(self):
+        with tempfile.TemporaryDirectory() as d:
+            sys.argv = ["docinject", d]
+            docinject.main()  # must not raise
+
+    def test_end_to_end_over_a_real_manifest_and_source(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as base:
+            base = Path(base)
+            root = base / "corpus"
+            root.mkdir()
+            (root / "a.md").write_text(
+                "# Greeting\n\nA short hello, nothing fancy.\n\n"
+                "```rust name=hello\npub fn hello() -> &'static str { \"hi\" }\n```\n"
+            )
+
+            out = base / "out"
+            out.mkdir()
+            (out / "a.rs").write_text('pub fn hello() -> &\'static str { "hi" }\n')
+            manifest = {
+                "version": 2,
+                "files": [
+                    {
+                        "path": "a.rs",
+                        "source": "a.md",
+                        "public": False,
+                        "blocks": [{"name": "hello", "line": 5, "end_line": 7}],
+                    }
+                ],
+            }
+            (out / docinject.MANIFEST_NAME).write_text(json.dumps(manifest))
+
+            sys.argv = ["docinject", str(out), str(root)]
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                docinject.main()
+            self.assertIn("added doc comments to a.rs", captured.getvalue())
+            self.assertIn("/// A short hello, nothing fancy.", (out / "a.rs").read_text())
 
 
 if __name__ == "__main__":

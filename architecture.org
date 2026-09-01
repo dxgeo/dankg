@@ -1284,6 +1284,147 @@ configuring =[lang.*]= is what authorizes =eval= to run anything at all.
 both reported the same way -- tangle already wrote every file either
 would need; only whichever spawned step comes next can still fail.
 
+** Pilots 3 and 4: visibility, and eval/tangle composed over one corpus
+
+Pilots 1 (=literate/hash.md=) and 2 (=literate/layout-pilot/=) each proved
+tangle's own assemble-and-build loop; neither touched =dankg eval= at all,
+and neither ever set =dankg.tangle.public= (decision 28) -- pilot 2's five
+sibling modules only ever reach each other through =super::=, which a
+*private* =mod x;= already permits between siblings under one parent.
+Two more pilots close both gaps.
+
+=literate/visibility-pilot/= is the first real exercise of decision 28
+end to end: =exposed.md= sets =dankg.tangle.public: true= on its one
+heading, and the crate root's =lib.rs= -- not a descendant of =exposed/=,
+so ordinary sibling privacy cannot save it -- calls
+=exposed::greeting::hello()= across that boundary. It only compiles
+because the flag made =glue/rust.py= write =pub mod greeting;= rather than
+=mod greeting;= into the =mod.rs= it generated for =exposed/=, confirmed
+by inspecting both the manifest (=.dankg-tangle-manifest.json='s
+=exposed/greeting.rs= entry: =public: true=) and the generated =mod.rs=
+directly. The negative control -- done by hand, not committed broken, the
+same reason pilot 2's own =glue=-disabled check is prose -- sets the
+frontmatter to =false= and re-tangles: =cargo test= then fails with
+=error[E0603]: module `greeting` is private=, pointing at =lib.rs='s own
+=use= line, proof the flag is load-bearing rather than cosmetic.
+
+=literate/composition-pilot/= asks a question neither earlier pilot could:
+can the same block serve eval's flat, module-free concatenation (decision
+11) and tangle's real multi-file structure at once? Two corpora under one
+root answer it oppositely. =same-file.md= puts a dependency and its
+target under one heading, so tangle's placement (containment only, decision
+24) and eval's own concatenation (=deps=-ordered, decision 11) agree by
+construction -- there is no cross-file boundary for the two mechanisms to
+disagree about, and =dankg eval same-file.md --block quadruple= and
+=dankg tangle same-file.md --lang rust= followed by =rustc --test= on the
+one file it produces both pass, unmodified, on the identical block source.
+=producer.md=/=consumer.md= puts the dependency in a different file, and
+=dankg eval consumer.md --block use_greeting= still passes -- decision
+29's cross-file =deps== had unit coverage (=src/eval/plan.rs=,
+=src/eval/files.rs=) but never a pilot spawning the real binary until this
+one -- while tangling the same two files apart
+(=producer/greeting.rs=, =consumer/use_greeting.rs=) and compiling
+=consumer/use_greeting.rs= alone fails with
+=error[E0425]: cannot find function `make_greeting` in this scope=: its
+=use super::*= reaches =consumer='s own module, not =producer='s, and
+nothing here writes the =use crate::producer::greeting::make_greeting;=
+that would fix it, because writing it would just as surely break the
+identical block's use as a flat, concatenation-eval'd script, which has no
+=crate::producer= to resolve at all. The finding, not a bug in either
+mechanism: a block gets eval-smoke-testing across a file boundary or
+real cross-tangle-file linkage at that same boundary, never both
+unmodified, and the corpus is committed exactly as written -- eval-oriented,
+with no tangle scaffold wired up -- because the tangled pair genuinely
+does not build. For a real self-hosting attempt, the actionable shape is
+=same-file.md='s: a module's internal helpers, smoke-tested and tangled
+together, stay under the module's own heading; a cross-file compile-time
+dependency (=layout-pilot='s own =super::acyclic::Role=) already accepts
+hand-written =use= and should not also be asked to serve one leg of a
+cross-file eval chain.
+
+** Pilots 5 and 6: doc-comment injection and cross-reference rewriting
+
+A gap the visibility/composition pilots' own discussion surfaced: a
+tangled module's =//!=/=///= comments, by convention, point back at the
+literate =.md= (=hash.md='s own =module_doc= block) rather than restating
+it, which is exactly right for a reader with the corpus in hand and
+exactly wrong for a reader of a binary-only build, who cannot open a file
+that was never shipped. =glue/rust-docinject.py= answers it without any
+core DanKG change at all: manifest v2's =line=/=end_line= per block
+already give an external, opt-in program everything needed to compute a
+block's own /owned prose/ -- the paragraphs between the previous block's
+own close and this one's own open -- and write it in as a real =///=,
+backing off exactly the way =rust.py= already backs off an existing
+=mod.rs= (decision 27's own idiom, one level deeper): a block that
+already carries a hand-written =//!=/=///= is left untouched entirely.
+Deliberately =///= only, never a synthesized =//!= -- a file-level module
+doc characterizes the whole file, and nothing here can tell whether a
+given block's own prose was ever meant to carry that weight.
+
+A DanKG link inside the copied prose is rewritten too: =[text](other.md#name)=
+or =[text](#name)= becomes =[text](crate::path::to::name)= when =name=
+names a block the same tangle run produced, resolved through the exact
+same manifest name/path data =glue= already has. A rustdoc /intra-doc
+link/ is not a bare pointer -- =cargo doc= resolves it via the compiler's
+own name resolution and fails the build on one that does not, so a
+=#![deny(rustdoc::broken_intra_doc_links)]= crate attribute turns "the
+rewrite is correct" into a checked build property rather than an
+assertion. =literate/docinject-pilot/= (pilot 6) proves it end to end:
+=producer.md='s =make_greeting= is linked from =consumer.md='s own prose,
+tangled apart into =producer/greeting.rs=/=consumer/caller.rs=, and the
+generated =fn.shout.html= carries a real =<a href="../../producer/greeting/fn.make_greeting.html">=
+-- grepped out of the actual =cargo doc= output, not inferred from the
+build merely succeeding. =literate/hash.md= (pilot 1) gained
+=rust-docinject.py= in its own =glue= chain as pilot 5 -- proof the
+mechanism holds on a purely single-file corpus with no cross-references
+at all, and that =module_doc='s own hand-written =//!= is correctly left
+alone while =fnv1a=/=hex=/=parse_hex=/=tests= each gain a real =///= for
+the first time.
+
+Doc-comment content turns out to be exempt from the composition-pilot's
+own finding, for a reason worth stating plainly: =rustc= strips comments
+before anything resembling name resolution runs, so a =///='s content --
+rewritten link or not -- has zero effect on whether a block compiles
+under =eval='s flat concatenation or =tangle='s real module tree. Only
+=cargo doc= ever looks inside one. Code composing across a tangle-file
+boundary is genuinely constrained (pilot 4); documentation doing the same
+is not, for the exact opposite reason.
+
+Three real bugs, found only by actually running this against real
+corpora, never by reasoning about the design in advance -- the same
+pattern every earlier pilot's own notes already describe:
+
+- A =path=Cargo.toml= block is selected by /fence/ language matching
+  =--lang rust=, but its own output is TOML, not Rust; the first real run
+  against =hash.md= tried to write =///= into it and broke the manifest
+  with =error: key with no value, expected ==. Fixed by skipping
+  injection for any output whose own path does not end =.rs=, while still
+  letting that block's own prose count as spent so a /later/ real =.rs=
+  block's window does not silently widen to include it.
+- A leading YAML-style frontmatter block (=---= ... =---=) is not a
+  paragraph; the crude, independent paragraph splitter every glue script
+  here already has to write for itself (decision 27: no access to
+  =md/=) read it as one and swept =dankg.tangle.public: true= itself into
+  the very first block's own injected comment on =docinject-pilot='s
+  first real run. Fixed by blanking a detected leading frontmatter block
+  in place of its own lines before windowing, preserving every line
+  number so nothing downstream needs to know it happened.
+- A block that opens with a hand-written =use= -- exactly the escape
+  hatch the composition pilot's own finding requires for a real
+  cross-tangle-file reference -- is itself a Rust item, and a doc comment
+  attaches to whatever comes /directly/ after it. Inserting at the very
+  start of a block's content put the synthesized =///= on the =use=
+  itself; =cargo doc= built successfully regardless, and simply rendered
+  no docblock at all on the function it was meant to document, which is
+  what made the bug easy to miss without grepping the actual generated
+  HTML rather than trusting a green build. Fixed by skipping leading
+  blank lines, =use= statements, and attributes before choosing where a
+  synthesized comment actually lands.
+
+All three are pinned in =glue/test_glue.py= (46 tests total across the
+three reference scripts), each named for the run that found it rather
+than the mechanism it now guards.
+
 ** Open questions
 
 - Should a named, eval-able block be excludable from tangle specifically
