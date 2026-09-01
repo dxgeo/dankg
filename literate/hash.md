@@ -15,7 +15,7 @@ this file for how to reproduce that.
 ## Crate scaffold
 
 One block below uses `path=` to land outside the heading-derived tree
-entirely (architecture.org, *Tangle > Placement*): the `Cargo.toml`. It is
+entirely (architecture.md, *Tangle > Placement*): the `Cargo.toml`. It is
 fenced `rust` even though the manifest isn't Rust source -- tangle selects
 blocks by fence language matching `--lang`, never by file extension, so a
 `toml`-language block would simply be invisible to a `--lang rust` run.
@@ -49,7 +49,7 @@ documents, so it gets its own small leading block rather than living inside
 `fnv1a`'s. Everything past this paragraph is content that lands in
 `hash.rs`, in document order, folded together under this section's own
 heading regardless of how deep a block's immediate subheading sits
-(architecture.org, *Tangle > Placement*: containment decides the file,
+(architecture.md, *Tangle > Placement*: containment decides the file,
 never `deps=`).
 
 This is also the file's one deliberately duplicated sentence, not a habit
@@ -136,7 +136,7 @@ mod tests {
 ## Pilot notes
 
 This is the bootstrap pilot for the question "can dankg build itself,
-dankg-style" (see architecture.org's Tangle section and the advisory this
+dankg-style" (see architecture.md's Tangle section and the advisory this
 file grew out of). `literate/.dankg/config` scopes `literate/` as its own
 root with:
 

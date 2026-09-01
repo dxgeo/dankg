@@ -8,7 +8,7 @@
 //!
 //! `plan.rs` itself never touches the filesystem -- it stays a pure
 //! function of an already-built `&[BlockRef]`, the same discipline
-//! `resolve.rs` already follows for links (architecture.org's
+//! `resolve.rs` already follows for links (architecture.md's
 //! "Implementation notes": the boundary check belongs with the code that
 //! touches the filesystem). This module is the impure half: it decides
 //! *which* files that slice needs to include, then hands `plan.rs` a flat,
@@ -139,7 +139,7 @@ impl Files {
     /// Every loaded file's top-level named blocks, tagged with their own
     /// file, sorted by path first so the result -- and everything `plan.rs`
     /// derives from it -- does not depend on `HashMap`'s iteration order
-    /// (architecture.org's blanket determinism requirement). Any one file's
+    /// (architecture.md's blanket determinism requirement). Any one file's
     /// own blocks are already in document order among themselves regardless
     /// of this; sorting is what keeps the *file-to-file* ordering
     /// deterministic too.

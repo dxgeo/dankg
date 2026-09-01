@@ -168,7 +168,7 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Res
 
     for (position, name) in &targets {
         let summary = run_one(path, &config, *position, no_write)?;
-        // stderr is shown but never stored (architecture.org, Execution).
+        // stderr is shown but never stored (architecture.md, Execution).
         if !summary.stderr.is_empty() {
             eprint!("{}", summary.stderr);
         }
@@ -218,7 +218,7 @@ fn list(paths: &[String], cache: bool) -> Result<(), String> {
 fn list_corpus_text(paths: &[String], corpus: &Corpus) -> Option<String> {
     // A directory names a corpus, not a file, so the only sensible reading
     // of "list here" is everything under it -- the same call `graph`/`tui`
-    // make for a named directory (architecture.org, View Selection).
+    // make for a named directory (architecture.md, View Selection).
     let only_files = paths.iter().all(|p| !Path::new(p).is_dir());
     let targets: &[String] = if only_files { &corpus.entries } else { &corpus.paths };
 

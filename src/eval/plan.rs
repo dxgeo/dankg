@@ -15,7 +15,7 @@
 //! A block's name is unique across the whole file, and `deps=` resolves
 //! against the whole file too -- flat, not scoped to a heading. Decision
 //! 22 tried heading-scoped uniqueness with lexical, ancestor-only `deps=`
-//! resolution; it was reverted (see architecture.org) once real use showed
+//! resolution; it was reverted (see architecture.md) once real use showed
 //! it broke the single most natural literate-pipeline shape, a sequence of
 //! sibling sections each depending on the last, which a lexical walk that
 //! only ever looks *upward* cannot reach. Flat resolution is what every
@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(p.last().unwrap().name, "b");
     }
 
-    // -- Cross-file `deps=` (architecture.org, Code evaluation) --------
+    // -- Cross-file `deps=` (architecture.md, Code evaluation) --------
     //
     // `plan.rs` itself never touches the filesystem (`eval::files` does the
     // loading); these tests build the multi-file `blocks` slice by hand,

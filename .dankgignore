@@ -1,0 +1,24 @@
+# The project's own docs corpus (project.md, architecture.md, and any
+# src/*.md as they convert) is what this root is for. Everything below is
+# a *separate* concern that happens to live in the same git repo and must
+# not be swept into it just because this root now sits above them.
+
+# Cargo's build output. Never content, reappears on every build.
+/target/
+
+# The test suite's own fixture corpora -- some deliberately carry broken
+# links and stale eval results, since that is exactly what several tests
+# assert dankg reports. Real content, for a different purpose than this
+# root's.
+/tests/
+
+# Self-contained demo corpora, each already scoped by its own `.dankg/`
+# for exactly this reason -- shown to a *user* getting started with dankg,
+# not part of dankg's own design record.
+/example/
+
+# The self-hosting pilots, each deliberately scoped to its own `.dankg/`
+# root already ("so this never touches the real crate's own corpus" --
+# literate/hash.md's own config comment). Left excluded here for the same
+# reason, now from the other direction.
+/literate/

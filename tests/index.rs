@@ -242,8 +242,14 @@ mod scratch {
 
     #[test]
     fn a_root_without_a_dankg_directory_gets_no_cache() {
-        let root = scratch_root("nodir");
-        fs::remove_dir(root.join(".dankg")).unwrap();
+        // Deliberately not `scratch_root` (`CARGO_TARGET_TMPDIR`, under this
+        // repo's own `target/`): the repo now has its own root-level
+        // `.dankg/` (the design record's own corpus), so an ancestor walk
+        // from anywhere inside it would find that one instead of finding
+        // none at all, which is exactly the case this test means to cover.
+        let root = std::env::temp_dir().join("dankg-test-nodir");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
         write(&root, "a.md", "# One\n");
 
         let (corpus, _, _) = run(&root, true);

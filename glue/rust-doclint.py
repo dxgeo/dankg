@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reference `dankg tangle` glue script: flags a tangled block's rustdoc
 comment (`//!`/`///`) that duplicates the literate source's own prose,
-rather than pointing back to it or adding something new (architecture.org,
+rather than pointing back to it or adding something new (architecture.md,
 Tangle, and the doc-comment-duplication finding from the hash.rs pilot).
 
 Like `glue/rust.py`, this is a plain, standalone, opt-in program -- not
@@ -75,7 +75,7 @@ MIN_CLAUSE_LEN = 30  # shorter fragments are too generic to flag reliably
 # whole-comment-vs-whole-paragraph containment misses it the moment either
 # side adds one clause of its own framing. `--` splits alongside sentence
 # punctuation because that is where this codebase's own prose habitually
-# breaks a clause (see architecture.org throughout).
+# breaks a clause (see architecture.md throughout).
 _CLAUSE_SPLIT = re.compile(r"[.!?]|--")
 
 

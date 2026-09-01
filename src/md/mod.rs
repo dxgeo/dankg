@@ -1,7 +1,7 @@
 //! Markdown parsing.
 //!
 //! DanKG implements a documented subset of CommonMark rather than the whole
-//! spec; see architecture.org. Constructs outside the subset are preserved as
+//! spec; see architecture.md. Constructs outside the subset are preserved as
 //! `Block::Passthrough` so that nothing in a source file is ever silently lost.
 //!
 //! Parsing runs in three passes: frontmatter, then block structure, then

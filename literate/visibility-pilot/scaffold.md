@@ -1,7 +1,7 @@
 # Scaffold
 
 The crate root, exactly the same `path=` shape `hash.md` and
-`layout-pilot/scaffold.md` both already use (architecture.org, *Tangle >
+`layout-pilot/scaffold.md` both already use (architecture.md, *Tangle >
 Placement*): `Cargo.toml` and `lib.rs` land outside the heading-derived
 tree entirely, since neither is content `exposed.md`'s own headings should
 own.
@@ -48,7 +48,7 @@ mod tests {
 
 This is pilot 3 of "can dankg build itself, dankg-style" (see
 `../hash.md` and `../layout-pilot/layout.md` for pilots 1 and 2, and
-architecture.org's *Tangle* section for the question itself). Reproduce
+architecture.md's *Tangle* section for the question itself). Reproduce
 with the repo's own `dankg` binary, from the repo root:
 
 ```

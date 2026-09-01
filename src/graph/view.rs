@@ -8,7 +8,7 @@
 //! Hops are counted in both directions. A link that points at the entry is as
 //! much a neighbour as one the entry points at -- that is the whole reason the
 //! index is built over the corpus rather than over the file. Containment
-//! counts too, which is the open question in architecture.org: it can make
+//! counts too, which is the open question in architecture.md: it can make
 //! depth 2 feel shallow in a deeply nested file, and `--all` is the answer
 //! until something better is decided.
 

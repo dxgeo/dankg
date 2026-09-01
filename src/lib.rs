@@ -1,6 +1,6 @@
 //! DanKG: a plaintext knowledge grapher.
 //!
-//! Standard library only, by design. See architecture.org.
+//! Standard library only, by design. See architecture.md.
 
 pub mod cli;
 pub mod cmd;

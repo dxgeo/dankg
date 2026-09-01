@@ -2,7 +2,7 @@
 """Reference `dankg tangle` glue script: writes a real `///` doc comment
 onto every named block that does not already carry one, and rewrites any
 DanKG cross-reference inside the prose it copies into a rustdoc intra-doc
-link (architecture.org, Tangle, and the "binary-only reader" gap the
+link (architecture.md, Tangle, and the "binary-only reader" gap the
 visibility/composition pilots' own discussion surfaced).
 
 Like `rust.py` and `rust-doclint.py`, this is a plain, standalone, opt-in
@@ -72,7 +72,7 @@ from pathlib import Path
 MANIFEST_NAME = ".dankg-tangle-manifest.json"
 
 # `[text](file.md#name)` or `[text](#name)` -- the two anchored forms
-# DanKG's own link syntax uses (architecture.org, Link resolution). Crude
+# DanKG's own link syntax uses (architecture.md, Link resolution). Crude
 # and independent of dankg's own parser, the same tradeoff every glue
 # script here already makes (decision 27: glue has no access to `md/`) --
 # in particular this does not know about fences or code spans, so a
