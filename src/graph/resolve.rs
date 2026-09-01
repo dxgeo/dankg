@@ -9,7 +9,7 @@
 //! frequently untrusted input.
 
 use super::build::{file_stem, strip_extension, ParsedFile, RawLink, Target};
-use super::model::{Edge, EdgeKind, Graph, Node, NodeId};
+use super::model::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
 use super::slug::slugify;
 use crate::diag::Diags;
 
@@ -266,6 +266,10 @@ fn placeholder(key: &str, slug: &str, path: &str) -> Node {
         tags: Vec::new(),
         external: Vec::new(),
         resolved: false,
+        // A dangling link always points at a heading-shaped target -- a
+        // block is never something `[text](file#name)` can name -- so a
+        // placeholder invented to receive one is a placeholder heading.
+        kind: NodeKind::Heading,
     }
 }
 

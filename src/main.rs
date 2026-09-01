@@ -1,9 +1,10 @@
 use dankg::cli::{self, Command, Format};
 use dankg::diag::{Diags, Level};
+use dankg::eval::{plan, result, run as eval_run, session};
 use dankg::graph::index::{self, Corpus};
 use dankg::graph::{resolve, view, EdgeKind, Graph};
 use dankg::layout;
-use dankg::md::{fmt, Document};
+use dankg::md::{fmt, Block, Document};
 use dankg::render::{dot, html, json, mermaid};
 use dankg::tui;
 use std::fmt::Write as _;
@@ -41,6 +42,17 @@ fn main() -> ExitCode {
             Ok(true) => ExitCode::SUCCESS,
             // `--check` is a gate: "some file is not in normal form" is a
             // non-zero exit, not an error.
+            Ok(false) => ExitCode::from(1),
+            Err(message) => {
+                eprintln!("error: {message}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Eval { paths, target, yes, no_write, cache } => {
+            report(session::run(&paths, &target, yes, no_write, cache))
+        }
+        Command::Check { paths, cache } => match check_cmd(&paths, cache) {
+            Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::from(1),
             Err(message) => {
                 eprintln!("error: {message}");
@@ -108,6 +120,59 @@ fn format_files(paths: &[String], check: bool) -> Result<bool, String> {
         eprintln!("{changed} of {} file(s) reformatted", paths.len());
     }
     Ok(clean)
+}
+
+/// `dankg check [<path>...]`: the CI gate. Unresolved links come from the
+/// same whole-root index `graph`/`index` build; staleness is checked
+/// separately per file, since `eval`'s dependency DAG (decision: scoped to
+/// one file) has nothing to say across files either.
+fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
+    let mut diags = Diags::new("dankg");
+    let corpus = index::load(paths, cache, &mut diags)?;
+    let index_graph = resolve::resolve(&corpus.files, &mut diags);
+    let unresolved = index_graph.nodes.iter().filter(|n| !n.resolved).count();
+
+    let mut stale = 0usize;
+    let mut checked = 0usize;
+    for rel_path in &corpus.paths {
+        let full = corpus.root.join(rel_path);
+        let Ok(source) = fs::read_to_string(&full) else { continue };
+        let mut file_diags = Diags::new(rel_path.as_str());
+        let doc = Document::parse(&source, &mut file_diags);
+        diags.absorb(file_diags);
+        let blocks = plan::top_level_blocks(&doc);
+
+        for b in &blocks {
+            let Some((marker_line, _)) = result::locate_existing(&doc, b.index, b.name) else { continue };
+            let _ = marker_line;
+            let Some(Block::Passthrough { text, .. }) = doc.blocks.get(b.index + 1) else { continue };
+            let Some((_, stored_hash, _)) = text.lines().next().and_then(result::parse_marker) else { continue };
+            checked += 1;
+
+            let Ok(chain) = plan::plan_for(&blocks, b.name) else {
+                stale += 1;
+                eprintln!("stale: {rel_path} `{}` (plan changed since this result was written)", b.name);
+                continue;
+            };
+            // A language dropped from config since the result was written
+            // cannot be re-verified; that is reported by the missing
+            // `[lang.*]` section itself, not double-counted as stale here.
+            let Some(lang) = eval_run::command_for(&corpus.config, &chain) else { continue };
+            if result::expected_hash(&chain, &lang.command) != stored_hash {
+                stale += 1;
+                eprintln!("stale: {rel_path} `{}`", b.name);
+            }
+        }
+    }
+
+    diags.sort();
+    diags.emit();
+    eprintln!("root: {}", corpus.display);
+    if unresolved > 0 {
+        eprintln!("{unresolved} unresolved of {} node(s)", index_graph.nodes.len());
+    }
+    eprintln!("{stale} stale of {checked} eval result(s)");
+    Ok(unresolved == 0 && stale == 0)
 }
 
 fn graph(

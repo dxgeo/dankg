@@ -22,7 +22,11 @@ pub const FILE: &str = "config";
 pub const DEFAULT_DEPTH: u32 = 2;
 
 /// Sections DanKG reads today, with the keys each one accepts.
-const KNOWN: &[(&str, &[&str])] = &[("graph", &["depth"]), ("editor", &["command"])];
+const KNOWN: &[(&str, &[&str])] = &[
+    ("graph", &["depth"]),
+    ("editor", &["command"]),
+    ("keys", &["up", "down", "left", "right", "quit", "reset", "pan", "eval"]),
+];
 
 /// Section families, named `<prefix><name>`. `db.` is reserved for milestone 8
 /// and parsed now so that a config written ahead of it does not warn.
@@ -38,6 +42,48 @@ pub struct Section {
 impl Section {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+}
+
+/// Single-character key bindings for the TUI, read from `[keys]`. Arrow keys
+/// are not represented here: they are physical direction keys rather than
+/// mnemonics, so nothing about them is meaningful to remap, and they always
+/// work alongside whatever a letter is bound to. Enter and Tab are the same
+/// story -- terminal special keys, not letters -- so `[keys]` only ever
+/// touches the seven single-character actions the interaction table already
+/// names by letter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Keymap {
+    pub up: char,
+    pub down: char,
+    pub left: char,
+    pub right: char,
+    pub quit: char,
+    pub reset: char,
+    pub pan: char,
+    /// Cycles through the selected node's named blocks (entering cycle mode
+    /// on the first press), so `enter` can run whichever one is cycled to.
+    pub eval: char,
+}
+
+impl Default for Keymap {
+    fn default() -> Keymap {
+        Keymap { up: 'k', down: 'j', left: 'h', right: 'l', quit: 'q', reset: 'r', pan: 'p', eval: 'e' }
+    }
+}
+
+impl Keymap {
+    fn fields(&self) -> [(&'static str, char); 8] {
+        [
+            ("up", self.up),
+            ("down", self.down),
+            ("left", self.left),
+            ("right", self.right),
+            ("quit", self.quit),
+            ("reset", self.reset),
+            ("pan", self.pan),
+            ("eval", self.eval),
+        ]
     }
 }
 
@@ -193,6 +239,60 @@ impl Config {
     pub fn editor(&self) -> Option<&str> {
         self.get("editor", "command")
     }
+
+    /// `[keys]`, or the defaults. A value that is not exactly one character
+    /// falls back to its default and warns; so does the whole map at once if
+    /// two actions end up bound to the same character, since applying an
+    /// ambiguous binding silently would mean one of the two keys stops
+    /// working with no indication which.
+    pub fn keymap(&self, diags: &mut Diags) -> Keymap {
+        let default = Keymap::default();
+        let Some(section) = self.section("keys") else { return default };
+        let where_ = || self.source.clone().unwrap_or_else(|| DIR.to_string());
+
+        let mut map = default;
+        let mut slots: [(&str, &mut char); 8] = [
+            ("up", &mut map.up),
+            ("down", &mut map.down),
+            ("left", &mut map.left),
+            ("right", &mut map.right),
+            ("quit", &mut map.quit),
+            ("reset", &mut map.reset),
+            ("pan", &mut map.pan),
+            ("eval", &mut map.eval),
+        ];
+        for (name, slot) in &mut slots {
+            let Some(raw) = section.get(name) else { continue };
+            let mut chars = raw.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => **slot = c,
+                _ => diags.warn_in(
+                    where_(),
+                    0,
+                    format!("`{name} = {raw}` in `[keys]` is not a single character; kept as `{}`", **slot),
+                ),
+            }
+        }
+        drop(slots);
+
+        let fields = map.fields();
+        for i in 0..fields.len() {
+            for j in (i + 1)..fields.len() {
+                if fields[i].1 == fields[j].1 {
+                    diags.warn_in(
+                        where_(),
+                        0,
+                        format!(
+                            "`[keys]` binds both `{}` and `{}` to `{}`; using the defaults instead",
+                            fields[i].0, fields[j].0, fields[i].1
+                        ),
+                    );
+                    return default;
+                }
+            }
+        }
+        map
+    }
 }
 
 fn section_header(
@@ -344,6 +444,46 @@ mod tests {
         assert_eq!(c.sections.len(), 1);
         assert_eq!(c.get("graph", "depth"), Some("4"));
         assert!(d.items()[0].message.contains("set twice"));
+    }
+
+    #[test]
+    fn keymap_defaults_with_no_keys_section() {
+        let (c, mut d) = parse("");
+        assert_eq!(c.keymap(&mut d), Keymap::default());
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn keymap_reads_remapped_letters() {
+        let (c, mut d) = parse("[keys]\nup = w\ndown = s\nleft = a\nright = d\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        let km = c.keymap(&mut d);
+        assert_eq!(km.up, 'w');
+        assert_eq!(km.down, 's');
+        assert_eq!(km.left, 'a');
+        assert_eq!(km.right, 'd');
+        assert_eq!(km.quit, 'q', "unmentioned actions keep their default");
+    }
+
+    #[test]
+    fn keymap_remaps_eval_too() {
+        let (c, mut d) = parse("[keys]\neval = x\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.keymap(&mut d).eval, 'x');
+    }
+
+    #[test]
+    fn keymap_rejects_a_multi_character_binding() {
+        let (c, mut d) = parse("[keys]\nup = wa\n");
+        assert_eq!(c.keymap(&mut d).up, 'k', "falls back to the default");
+        assert!(d.items().iter().any(|i| i.message.contains("not a single character")));
+    }
+
+    #[test]
+    fn keymap_falls_back_entirely_on_a_collision() {
+        let (c, mut d) = parse("[keys]\nup = j\n"); // now collides with the default `down`
+        assert_eq!(c.keymap(&mut d), Keymap::default(), "an ambiguous map reverts wholesale");
+        assert!(d.items().iter().any(|i| i.message.contains("binds both")));
     }
 
     #[test]

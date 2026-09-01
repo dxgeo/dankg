@@ -23,6 +23,11 @@ pub const CSS: &str = r##"
   --contains: #c4c4be;
   --accent: #2f6f4f;
   --accent-soft: #d9e8df;
+  /* A named code block's own node -- distinct from an ordinary heading's
+     --node-bg, the same distinction dot.rs draws with fillcolor and
+     tui/draw.rs draws with a different border glyph. */
+  --block-bg: #eef2ff;
+  --block-line: #3c3c5c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -38,6 +43,8 @@ pub const CSS: &str = r##"
     --contains: #3c4046;
     --accent: #74c39a;
     --accent-soft: #24382e;
+    --block-bg: #23263a;
+    --block-line: #9a9ac8;
   }
 }
 
@@ -170,6 +177,13 @@ svg.canvas.panning { cursor: grabbing; }
 }
 
 .node.unresolved .label { fill: var(--muted); }
+
+.node.block .box {
+  fill: var(--block-bg);
+  stroke: var(--block-line);
+}
+
+.node.block .label { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 
 .node.entry .box {
   stroke: var(--accent);
@@ -362,7 +376,8 @@ pub const JS: &str = r##"
   }
 
   function makeNode(data, rank, x, y, width) {
-    var g = el("g", { class: "node grown" + (data.resolved ? "" : " unresolved") });
+    var extra = !data.resolved ? " unresolved" : (data.kind === "block" ? " block" : "");
+    var g = el("g", { class: "node grown" + extra });
     g.dataset.id = data.id;
     g.dataset.rank = rank;
     g.dataset.x = x;

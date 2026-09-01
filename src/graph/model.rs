@@ -45,17 +45,52 @@ impl EdgeKind {
     }
 }
 
+/// What a node stands for. A heading is a section of prose; a block is a
+/// named, top-level, evaluable code block (decision 19's exact scope --
+/// the same one `eval::plan` and `dankg eval --list` use, so "this is a
+/// node you can navigate to" and "this is a node `dankg eval` can run"
+/// never disagree). A block is always a leaf: nothing nests inside one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    Heading,
+    Block,
+}
+
+impl NodeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeKind::Heading => "heading",
+            NodeKind::Block => "block",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<NodeKind> {
+        match text {
+            "heading" => Some(NodeKind::Heading),
+            "block" => Some(NodeKind::Block),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub id: NodeId,
     pub title: String,
     /// Path as it appears on disk, extension included.
     pub file: String,
-    /// Line the heading is on.
+    /// Line the heading (or, for a block node, the code fence) is on.
     pub line: u32,
-    /// Last line belonging to this heading, before the next heading of the same
-    /// or higher level. Equal to `line` for an empty section.
+    /// Last line belonging to this node: for a heading, before the next
+    /// heading of the same or higher level; for a block, its own closing
+    /// fence (`md/block.rs`'s `Block::Code::end_line`), never recomputed
+    /// from sibling structure the way a heading's is. Equal to `line` for
+    /// an empty heading section.
     pub end_line: u32,
+    /// Heading depth (1..=6), or 0 for the synthetic file-level node.
+    /// Meaningless for a block node beyond staying above every real
+    /// heading level, which `graph/build.rs`'s extent computation relies
+    /// on to never mistake a block for a heading's next sibling.
     pub level: u8,
     pub parent: Option<NodeId>,
     /// File-level frontmatter tags, carried on every node in the file.
@@ -63,7 +98,10 @@ pub struct Node {
     /// Absolute URLs referenced from this node. Recorded, never graphed.
     pub external: Vec<String>,
     /// False for placeholder nodes invented to receive a dangling link.
+    /// Always true for a block node -- nothing ever links to one by name
+    /// today, so there is nothing for it to be unresolved against.
     pub resolved: bool,
+    pub kind: NodeKind,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,6 +182,7 @@ mod tests {
             tags: Vec::new(),
             external: Vec::new(),
             resolved: true,
+            kind: NodeKind::Heading,
         }
     }
 
@@ -160,6 +199,14 @@ mod tests {
     #[test]
     fn node_id_displays_as_file_hash_slug() {
         assert_eq!(NodeId::new("notes/project", "overview").to_string(), "notes/project#overview");
+    }
+
+    #[test]
+    fn node_kind_round_trips_through_text() {
+        for kind in [NodeKind::Heading, NodeKind::Block] {
+            assert_eq!(NodeKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(NodeKind::parse("nope"), None);
     }
 
     #[test]

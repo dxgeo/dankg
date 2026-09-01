@@ -70,7 +70,7 @@ fn strip_block(b: &Block) -> Block {
             Block::Heading { level: *level, inlines: inlines.clone(), line: 0 }
         }
         Block::Code { info, text, fence, .. } => {
-            Block::Code { info: info.clone(), text: text.clone(), fence: *fence, line: 0 }
+            Block::Code { info: info.clone(), text: text.clone(), fence: *fence, line: 0, end_line: 0 }
         }
         Block::Paragraph { inlines, .. } => {
             Block::Paragraph { inlines: inlines.clone(), line: 0 }

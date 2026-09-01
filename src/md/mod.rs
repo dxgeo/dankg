@@ -101,8 +101,12 @@ pub enum Block {
     Heading { level: u8, inlines: Vec<Inline>, line: u32 },
     /// `fence` is the `` ` `` or `~` the author opened with. The *length* is
     /// not recorded: it is normalized to the shortest run that clears the
-    /// body, so anything stored would only be thrown away again.
-    Code { info: InfoString, text: String, fence: char, line: u32 },
+    /// body, so anything stored would only be thrown away again. `end_line`
+    /// is the closing fence's own line (or the last line of the file, for
+    /// one the parser never found a close for) -- `eval`'s write-back needs
+    /// to know exactly where a block ends in the source without
+    /// re-deriving fence-matching a second time.
+    Code { info: InfoString, text: String, fence: char, line: u32, end_line: u32 },
     Paragraph { inlines: Vec<Inline>, line: u32 },
     List(List),
     ThematicBreak { line: u32 },

@@ -18,6 +18,11 @@
   --contains: #c4c4be;
   --accent: #2f6f4f;
   --accent-soft: #d9e8df;
+  /* A named code block's own node -- distinct from an ordinary heading's
+     --node-bg, the same distinction dot.rs draws with fillcolor and
+     tui/draw.rs draws with a different border glyph. */
+  --block-bg: #eef2ff;
+  --block-line: #3c3c5c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -33,6 +38,8 @@
     --contains: #3c4046;
     --accent: #74c39a;
     --accent-soft: #24382e;
+    --block-bg: #23263a;
+    --block-line: #9a9ac8;
   }
 }
 
@@ -166,6 +173,13 @@ svg.canvas.panning { cursor: grabbing; }
 
 .node.unresolved .label { fill: var(--muted); }
 
+.node.block .box {
+  fill: var(--block-bg);
+  stroke: var(--block-line);
+}
+
+.node.block .label { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
 .node.entry .box {
   stroke: var(--accent);
   stroke-width: 2.2;
@@ -254,15 +268,15 @@ footer b { font-weight: 600; color: var(--fg); }
 <script type="application/json" id="dankg-meta">{"width": 404, "height": 284, "root": "tests/data/corpus", "edgeKeySep": " ", "geometry": {"nodeHeight": 36, "rankSep": 64, "nodeSep": 28, "margin": 24, "charWidth": 8, "labelPad": 28, "minWidth": 72, "maxWidth": 264}}
 </script>
 <script type="application/json" id="dankg-index">{
-  "version": 1,
+  "version": 2,
   "nodes": [
-    {"id": "notes/ideas#ideas", "title": "Ideas", "file": "notes/ideas.md", "line": 4, "end_line": 8, "level": 1, "parent": null, "tags": [], "external": [], "resolved": true},
-    {"id": "notes/ideas#future", "title": "Future", "file": "notes/ideas.md", "line": 8, "end_line": 8, "level": 2, "parent": "notes/ideas#ideas", "tags": [], "external": [], "resolved": true},
-    {"id": "nowhere#lost", "title": "lost", "file": "nowhere.md", "line": 0, "end_line": 0, "level": 0, "parent": null, "tags": [], "external": [], "resolved": false},
-    {"id": "orphan#orphan", "title": "orphan", "file": "orphan.md", "line": 1, "end_line": 1, "level": 0, "parent": null, "tags": [], "external": [], "resolved": true},
-    {"id": "project#overview", "title": "Overview", "file": "project.md", "line": 5, "end_line": 13, "level": 1, "parent": null, "tags": ["rust", "graphs"], "external": ["https://example.com"], "resolved": true},
-    {"id": "project#constraints", "title": "Constraints", "file": "project.md", "line": 10, "end_line": 13, "level": 2, "parent": "project#overview", "tags": ["rust", "graphs"], "external": [], "resolved": true},
-    {"id": "project#code-eval", "title": "Code Eval", "file": "project.md", "line": 14, "end_line": 18, "level": 1, "parent": null, "tags": ["rust", "graphs"], "external": [], "resolved": true}
+    {"id": "notes/ideas#ideas", "title": "Ideas", "file": "notes/ideas.md", "line": 4, "end_line": 8, "level": 1, "parent": null, "tags": [], "external": [], "resolved": true, "kind": "heading"},
+    {"id": "notes/ideas#future", "title": "Future", "file": "notes/ideas.md", "line": 8, "end_line": 8, "level": 2, "parent": "notes/ideas#ideas", "tags": [], "external": [], "resolved": true, "kind": "heading"},
+    {"id": "nowhere#lost", "title": "lost", "file": "nowhere.md", "line": 0, "end_line": 0, "level": 0, "parent": null, "tags": [], "external": [], "resolved": false, "kind": "heading"},
+    {"id": "orphan#orphan", "title": "orphan", "file": "orphan.md", "line": 1, "end_line": 1, "level": 0, "parent": null, "tags": [], "external": [], "resolved": true, "kind": "heading"},
+    {"id": "project#overview", "title": "Overview", "file": "project.md", "line": 5, "end_line": 13, "level": 1, "parent": null, "tags": ["rust", "graphs"], "external": ["https://example.com"], "resolved": true, "kind": "heading"},
+    {"id": "project#constraints", "title": "Constraints", "file": "project.md", "line": 10, "end_line": 13, "level": 2, "parent": "project#overview", "tags": ["rust", "graphs"], "external": [], "resolved": true, "kind": "heading"},
+    {"id": "project#code-eval", "title": "Code Eval", "file": "project.md", "line": 14, "end_line": 18, "level": 1, "parent": null, "tags": ["rust", "graphs"], "external": [], "resolved": true, "kind": "heading"}
   ],
   "edges": [
     {"from": "notes/ideas#ideas", "to": "notes/ideas#future", "kind": "contains", "line": 0, "reciprocated": false},
@@ -417,7 +431,8 @@ footer b { font-weight: 600; color: var(--fg); }
   }
 
   function makeNode(data, rank, x, y, width) {
-    var g = el("g", { class: "node grown" + (data.resolved ? "" : " unresolved") });
+    var extra = !data.resolved ? " unresolved" : (data.kind === "block" ? " block" : "");
+    var g = el("g", { class: "node grown" + extra });
     g.dataset.id = data.id;
     g.dataset.rank = rank;
     g.dataset.x = x;

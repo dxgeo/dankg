@@ -10,7 +10,7 @@
 //! grammar does not admit `#` or `/`, and quoting them is not portable across
 //! its versions.
 
-use crate::graph::{EdgeKind, Graph, NodeId};
+use crate::graph::{EdgeKind, Graph, NodeId, NodeKind};
 use crate::layout::Layout;
 use std::fmt::Write as _;
 
@@ -23,6 +23,10 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
         return out;
     }
     out.push_str("    classDef dangling stroke-dasharray:4 3,stroke:#a0a0a0,color:#a0a0a0\n");
+    // A named code block reads as code, not prose: a tint distinct from an
+    // ordinary heading's default, the same distinction `dot.rs` draws with
+    // fillcolor and `tui/draw.rs` draws with a different border glyph.
+    out.push_str("    classDef block fill:#eef2ff,stroke:#3c3c3c\n");
 
     // Emitted in layout order, so the identifiers themselves read top to
     // bottom and left to right.
@@ -37,12 +41,15 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
     };
 
     let mut dangling: Vec<&str> = Vec::new();
+    let mut blocks: Vec<&str> = Vec::new();
     for (id, name) in &names {
         let node = graph.node(id);
         let title = node.map(|n| n.title.as_str()).unwrap_or(&id.slug);
         let _ = writeln!(out, "    {name}[\"{}\"]", escape(title));
         if node.is_some_and(|n| !n.resolved) {
             dangling.push(name);
+        } else if node.is_some_and(|n| n.kind == NodeKind::Block) {
+            blocks.push(name);
         }
     }
 
@@ -64,6 +71,9 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
 
     if !dangling.is_empty() {
         let _ = writeln!(out, "    class {} dangling", dangling.join(","));
+    }
+    if !blocks.is_empty() {
+        let _ = writeln!(out, "    class {} block", blocks.join(","));
     }
     out
 }
@@ -143,6 +153,14 @@ mod tests {
         let class = out.lines().find(|l| l.starts_with("    class ")).expect("a class line");
         assert_eq!(class.matches(',').count(), 1, "both placeholders, one line: {class}");
         assert!(out.contains("classDef dangling"));
+    }
+
+    #[test]
+    fn a_block_node_gets_its_own_class() {
+        let out = mermaid(&[("a.md", "# One\n\n```sh name=setup\n:\n```\n")]);
+        assert!(out.contains("classDef block"), "{out}");
+        let class = out.lines().find(|l| l.starts_with("    class ") && l.ends_with(" block")).expect("a block class line");
+        assert_eq!(class.matches(',').count(), 0, "one block node: {class}");
     }
 
     #[test]

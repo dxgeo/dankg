@@ -8,7 +8,7 @@ pub mod slug;
 pub mod view;
 
 pub use index::Corpus;
-pub use model::{Edge, EdgeKind, Graph, Node, NodeId};
+pub use model::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
 
 /// Parse and resolve a corpus held in memory. Test-only, and shared because
 /// the layout and render tests need graphs as much as the graph tests do.

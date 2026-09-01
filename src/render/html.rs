@@ -21,7 +21,7 @@
 
 use super::assets;
 use super::json;
-use crate::graph::{EdgeKind, Graph, Node};
+use crate::graph::{EdgeKind, Graph, Node, NodeKind};
 use crate::layout::{self, Layout, Point};
 use std::fmt::Write as _;
 
@@ -148,6 +148,11 @@ fn node_svg(out: &mut String, laid: &layout::LaidNode, node: Option<&Node>, entr
     let mut classes = String::from("node");
     if !resolved {
         classes.push_str(" unresolved");
+    } else if node.is_some_and(|n| n.kind == NodeKind::Block) {
+        // A named code block reads as code, not prose -- the same
+        // distinction dot.rs draws with fillcolor and tui/draw.rs draws
+        // with a different border glyph.
+        classes.push_str(" block");
     }
     if entry {
         classes.push_str(" entry");
@@ -431,6 +436,12 @@ mod tests {
 
         assert_eq!(out.matches("class=\"node").count(), 1, "one box is drawn");
         assert!(blob(&out, "dankg-index").contains("\"id\": \"b#two\""), "the hidden node is in the blob");
+    }
+
+    #[test]
+    fn a_block_node_gets_its_own_class() {
+        let out = page(&[("a.md", "# One\n\n```sh name=setup\n:\n```\n")], &[]);
+        assert!(out.contains("class=\"node block\""), "{out}");
     }
 
     #[test]

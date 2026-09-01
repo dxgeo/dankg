@@ -1,0 +1,312 @@
+//! Process spawn, timeout, output capture.
+//!
+//! Decision 11: no PTY, no per-language state protocol -- dependencies and
+//! the target are concatenated into one temporary file and handed to the
+//! configured interpreter in a single spawn, which is what makes this work
+//! uniformly for a scripting language and a compiled one alike.
+
+use crate::cmd;
+use crate::config::{Config, Lang};
+use crate::eval::plan::BlockRef;
+use std::fs;
+use std::io::Read;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// Captured stdout and stderr are each cut off here, with a note appended --
+/// the same limit and treatment architecture.org specifies for a block's
+/// output.
+pub const OUTPUT_LIMIT: usize = 64 * 1024;
+
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Output {
+    pub stdout: String,
+    pub stderr: String,
+    /// `false` for a non-zero exit *or* a timeout kill -- either way the
+    /// result is marked failed (architecture.org, Execution).
+    pub success: bool,
+    pub timed_out: bool,
+}
+
+/// Every source in `chain`, concatenated in order -- exactly what one
+/// spawned interpreter sees, dependencies first, `chain`'s last element
+/// (the target) last. Each block's `source` already ends in exactly one
+/// newline (`md/block.rs` guarantees it), so plain concatenation needs no
+/// separator of its own.
+pub fn concatenated_source(chain: &[BlockRef]) -> String {
+    chain.iter().map(|b| b.source).collect()
+}
+
+/// The interpreter `chain`'s target would run through, or `None` when its
+/// language is unconfigured -- the allowlist rule (decision: a `[lang.*]`
+/// section is also the allowlist) applied at the one point that matters,
+/// since `plan::plan_for` already guarantees every block in `chain` shares
+/// one language.
+pub fn command_for(config: &Config, chain: &[BlockRef]) -> Option<Lang> {
+    let lang = chain.last()?.lang?;
+    config.lang(lang)
+}
+
+/// Runs `source` through `lang`'s configured command, honouring `timeout`.
+/// Writes `source` to a fresh temporary file (named for `lang.ext`, if it
+/// has one, since some interpreters dispatch on extension), substitutes it
+/// into `{file}`, spawns, and removes the temp file again -- best-effort,
+/// since a leftover in the OS temp directory costs nothing an editor would
+/// ever see.
+pub fn run(lang: &Lang, source: &str, timeout: Duration) -> Result<Output, String> {
+    let path = temp_path(lang.ext.as_deref());
+    fs::write(&path, source).map_err(|e| format!("could not write a temporary file: {e}"))?;
+    let result = run_at(lang, &path, timeout);
+    let _ = fs::remove_file(&path); // best-effort: nothing downstream depends on this succeeding
+    result
+}
+
+fn temp_path(ext: Option<&str>) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = format!("dankg-eval-{}-{n}", std::process::id());
+    if let Some(ext) = ext {
+        name.push('.');
+        name.push_str(ext);
+    }
+    std::env::temp_dir().join(name)
+}
+
+fn run_at(lang: &Lang, path: &std::path::Path, timeout: Duration) -> Result<Output, String> {
+    let file = path.to_string_lossy();
+    let Some(argv) = cmd::build(&lang.command, &[("file", &file)]) else {
+        return Err(format!("`[lang.{}] command` is empty once substituted", lang.name));
+    };
+
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A fresh process group (pgid == this child's own pid) is what lets a
+    // timeout kill the whole tree it spawned, not just this one process --
+    // see `kill_tree`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|e| format!("could not run `{}`: {e}", argv[0]))?;
+
+    // Piped stdout/stderr fill an OS buffer and block the child once it's
+    // full; a timeout loop that only polls `try_wait` would deadlock a
+    // chatty process instead of ever reaching its deadline. Reading both
+    // streams to completion on their own threads is what lets the main
+    // thread poll for the timeout independently of how much output there is.
+    let stdout = read_to_channel(child.stdout.take());
+    let stderr = read_to_channel(child.stderr.take());
+
+    let timed_out = !wait_with_timeout(&mut child, timeout);
+    if timed_out {
+        kill_tree(&mut child);
+        let _ = child.wait(); // reap, so the streams' EOF actually arrives
+    }
+    let success = !timed_out && child.wait().map(|s| s.success()).unwrap_or(false);
+
+    let stdout = truncate(stdout.recv().unwrap_or_default());
+    let stderr = truncate(stderr.recv().unwrap_or_default());
+    Ok(Output { stdout, stderr, success, timed_out })
+}
+
+/// Spawns a reader thread that sends the stream's full contents once it
+/// closes. `None` (no pipe was requested) sends an empty string straight
+/// away rather than the caller having to special-case it.
+fn read_to_channel(stream: Option<impl Read + Send + 'static>) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    match stream {
+        Some(mut s) => {
+            thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = s.read_to_end(&mut buf);
+                let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+            });
+        }
+        None => {
+            let _ = tx.send(String::new());
+        }
+    }
+    rx
+}
+
+/// Kills `child` and, on Unix, everything it spawned. `Child::kill` alone
+/// only reaches the one process it names -- if that process is a shell
+/// running `sleep 5` as an external command, killing the shell leaves
+/// `sleep` orphaned and still holding the output pipes open, so the reader
+/// threads in `run_at` would block until it exits on its own, silently
+/// defeating the timeout that was supposed to bound this call. Spawning
+/// with `process_group(0)` above made this child the leader of its own
+/// process group (pgid == its own pid), so signalling the negated pid
+/// reaches that whole group in one call -- `Child::kill` has no equivalent,
+/// so this shells out to `kill` rather than inventing a raw syscall wrapper
+/// std does not expose. Not available off Unix; a lone `Child::kill` there
+/// is a documented gap rather than a blocked feature, the same call made
+/// for the TUI's termios (architecture.org, Terminal UI).
+fn kill_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pgid = child.id();
+        let _ = Command::new("kill").arg("-KILL").arg(format!("-{pgid}")).status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+}
+
+/// Polls `try_wait` until the child exits or `timeout` elapses. `true` means
+/// it exited on its own in time.
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> bool {
+    const POLL: Duration = Duration::from_millis(20);
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(_) => return true, // nothing more this loop can do; let the caller's wait() report it
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+/// Cuts `s` to [`OUTPUT_LIMIT`] bytes at a UTF-8 boundary and notes that it
+/// happened, matching architecture.org's "truncated at 64 KiB with a
+/// warning."
+fn truncate(mut s: String) -> String {
+    if s.len() <= OUTPUT_LIMIT {
+        return s;
+    }
+    let mut cut = OUTPUT_LIMIT;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
+    s.push_str("\n... [truncated at 64 KiB]\n");
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::plan::{plan_for, top_level_blocks};
+    use crate::md::Document;
+
+    fn config(text: &str) -> Config {
+        Config::parse(text, &mut crate::diag::Diags::new("t"))
+    }
+
+    #[test]
+    fn concatenated_source_joins_in_plan_order() {
+        let mut d = crate::diag::Diags::new("t.md");
+        let doc = Document::parse(
+            "```sh name=a\necho a\n```\n\n```sh name=b deps=a\necho b\n```\n",
+            &mut d,
+        );
+        let blocks = top_level_blocks(&doc);
+        let chain = plan_for(&blocks, "b").unwrap();
+        assert_eq!(concatenated_source(&chain), "echo a\necho b\n");
+    }
+
+    #[test]
+    fn command_for_resolves_the_targets_language() {
+        let c = config("[lang.sh]\ncommand = sh {file}\n");
+        let mut d = crate::diag::Diags::new("t.md");
+        let doc = Document::parse("```sh name=a\necho a\n```\n", &mut d);
+        let blocks = top_level_blocks(&doc);
+        let chain = plan_for(&blocks, "a").unwrap();
+        let lang = command_for(&c, &chain).unwrap();
+        assert_eq!(lang.command, "sh {file}");
+    }
+
+    #[test]
+    fn command_for_is_none_when_the_language_is_unconfigured() {
+        let c = config("");
+        let mut d = crate::diag::Diags::new("t.md");
+        let doc = Document::parse("```sh name=a\necho a\n```\n", &mut d);
+        let blocks = top_level_blocks(&doc);
+        let chain = plan_for(&blocks, "a").unwrap();
+        assert!(command_for(&c, &chain).is_none());
+    }
+
+    #[test]
+    fn truncate_leaves_short_output_alone() {
+        assert_eq!(truncate("hi".to_string()), "hi");
+    }
+
+    #[test]
+    fn truncate_cuts_long_output_and_says_so() {
+        let long = "x".repeat(OUTPUT_LIMIT + 100);
+        let t = truncate(long);
+        assert!(t.len() < OUTPUT_LIMIT + 100);
+        assert!(t.ends_with("[truncated at 64 KiB]\n"));
+    }
+
+    #[test]
+    fn truncate_does_not_split_a_multibyte_character() {
+        // Pad to one byte short of the limit with ASCII, then a 2-byte
+        // character straddles the cut point.
+        let mut s = "a".repeat(OUTPUT_LIMIT - 1);
+        s.push('é');
+        let t = truncate(s);
+        assert!(t.is_char_boundary(t.len() - "\n... [truncated at 64 KiB]\n".len()));
+    }
+
+    #[test]
+    fn run_captures_stdout_and_exit_status() {
+        let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
+        let out = run(&lang, "echo hi\n", Duration::from_secs(5)).unwrap();
+        assert_eq!(out.stdout, "hi\n");
+        assert!(out.success);
+        assert!(!out.timed_out);
+    }
+
+    #[test]
+    fn run_captures_stderr_separately_and_a_nonzero_exit() {
+        let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
+        let out = run(&lang, "echo oops >&2\nexit 1\n", Duration::from_secs(5)).unwrap();
+        assert_eq!(out.stderr, "oops\n");
+        assert_eq!(out.stdout, "");
+        assert!(!out.success);
+        assert!(!out.timed_out);
+    }
+
+    #[test]
+    fn run_kills_a_process_that_outlives_its_timeout() {
+        let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
+        let out = run(&lang, "sleep 5\n", Duration::from_millis(100)).unwrap();
+        assert!(out.timed_out);
+        assert!(!out.success);
+    }
+
+    #[test]
+    fn a_timeout_kills_a_grandchild_holding_the_pipes_open_too() {
+        // `sleep` here is `sh`'s *child*, not `run`'s direct child -- killing
+        // only the direct process (as a lone `Child::kill` would) leaves
+        // `sleep` orphaned and still holding stdout/stderr open, so the
+        // reader threads in `run_at` block until it exits on its own. This
+        // pins the fix (`kill_tree`, a whole-process-group kill) by bounding
+        // wall-clock time: without it this call takes the full 5 seconds
+        // regardless of the 200ms timeout requested.
+        let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
+        let start = Instant::now();
+        let out = run(&lang, "sleep 5 && echo done\n", Duration::from_millis(200)).unwrap();
+        assert!(out.timed_out);
+        assert!(start.elapsed() < Duration::from_secs(2), "took {:?}, the timeout did not bound wall-clock time", start.elapsed());
+    }
+
+    #[test]
+    fn run_reports_a_program_that_does_not_exist() {
+        let lang = Lang { name: "ghost".into(), command: "dankg-eval-nonexistent-binary {file}".into(), ext: None };
+        assert!(run(&lang, "x\n", Duration::from_secs(5)).is_err());
+    }
+}

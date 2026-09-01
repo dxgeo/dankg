@@ -16,7 +16,7 @@ defence of it.
 |  2 | Layout             | Sugiyama layered, computed in Rust          | Deterministic and diffable; every format gets coordinates.        |
 |  3 | Markdown scope     | Documented subset; spec suite vendored      | Ships now, measures honestly, closes gaps opportunistically.      |
 |  4 | Link syntax        | =[t](f.md#h)= canonical, =[[f#h]]= also read    | Files stay portable; wikilinks stay fast to type.                 |
-|  5 | Node identity      | Every heading, any depth                    | Containment and link edges are distinct edge kinds.               |
+|  5 | Node identity      | Every heading, any depth, plus a top-level named block | Containment and link edges are distinct edge kinds.  |
 |  6 | Index scope        | Whole root, always                          | Forced: bidirectional links need the full corpus.                 |
 |  7 | View scope         | Entry + 2 hops, expandable in the browser   | Readable at any size; index is embedded so expansion is free.     |
 |  8 | Unresolved links   | Placeholder node + stderr warning           | Dangling links are signal. Nothing drops silently.                |
@@ -29,6 +29,9 @@ defence of it.
 | 15 | Format safety      | Re-parse and compare before writing         | =fmt= writes in place; a round-trip bug must not reach a note.     |
 | 16 | Database engine    | DuckDB, spawned as a configured command     | Single file, no server; decision 1 holds because nothing links.   |
 | 17 | Editor integration | =[editor] command=, spawned like =[lang.*]=   | No GUI/TUI toolkit; the user's editor is the buffer, always.      |
+| 18 | Keybindings        | =[keys]= remaps letters only; arrows fixed    | Arrows are positional, not mnemonic; nothing about them to remap. |
+| 19 | Eval scope         | One file; =deps=/=--all= never cross files      | No cross-file DAG to walk; matches =plan.rs=' top-level-only view. |
+| 20 | Block nodes        | Node scope == eval scope, exactly (decision 19) | A selectable node that is not eval-able would be a dead end.      |
 
 * Terminology
 
@@ -49,17 +52,23 @@ struct Root { path: PathBuf, config: Config }
 
 struct NodeId { file: String, slug: String }   // displays as "file#slug"
 
+enum NodeKind { Heading, Block }  // a block is always a leaf; see decision 20
+
 struct Node {
     id: NodeId,
-    title: String,          // heading text, inline markup stripped
+    title: String,          // heading text, or a block's own `name=`
     file: String,           // relative to root
-    line: u32,              // the heading's own line
-    end_line: u32,          // last line before the next same-or-higher heading
-    level: u8,              // 1..=6, or 0 for a synthetic file-level node
+    line: u32,              // the heading's, or the block's fence, own line
+    end_line: u32,          // heading: next same-or-higher heading, minus one;
+                             // block: its own closing fence (md/block.rs)
+    level: u8,              // 1..=6, or 0 for a synthetic file-level node;
+                             // for a block, a sentinel above every real level
     parent: Option<NodeId>,
     tags: Vec<String>,      // from frontmatter, carried onto every node
     external: Vec<String>,  // absolute URLs: recorded, never graphed
-    resolved: bool,         // false => placeholder from a dangling link
+    resolved: bool,         // false => placeholder from a dangling link;
+                             // always true for a block
+    kind: NodeKind,
 }
 
 enum EdgeKind { Contains, Link }
@@ -79,6 +88,40 @@ throughout, and a line range is what diagnostics and editors both want.
 A file with no headings, or with links written above its first heading, gets a
 synthetic level-0 node named from its frontmatter title or file name, so that
 =[text](file.md)= always has something to land on.
+
+** Block nodes
+
+A named, top-level code block is a node too (decision 20), scoped to
+=eval::plan::top_level_blocks='s exact definition (decision 19) rather than to
+"every fenced block" -- a selectable node that =dankg eval= cannot run would be
+a dead end, so "is this a node" and "is this eval-able" are made the same
+question by construction, not by convention. Concretely: not nested in a
+list, and named (=name== present in its info string); an unnamed block, or one
+inside a list item, is invisible to the graph exactly as it already is to
+eval.
+
+=graph/build.rs= builds a block's node in the same single pass as headings and
+paragraphs, attached to whichever heading is =current= at that point in the
+document (or, before the first heading, the lazily-created file-level node --
+the same fallback a pre-heading paragraph already triggers). A block never
+becomes =current= itself: nothing nests inside one, so later content keeps
+attaching to whichever heading was already open. Its slug comes from the same
+per-file =Slugger= a heading's does, so a block named =index= colliding with a
+heading titled "Index" gets the =-1= suffix exactly as two same-titled
+headings would.
+
+=level= carries no heading depth for a block -- there is none -- only a
+sentinel (=BLOCK_LEVEL = 7=) picked to sit above every real heading level
+(1..=6). That single fact is what keeps =set_extents= correct without a
+special case in its search: scanning past a block while looking for a
+heading's own next sibling-or-higher never mistakes one for it, since a
+block's level can never satisfy =<= a real heading's=. Overwriting a block's
+own end_line the way a heading's is computed would be wrong regardless --
+`Block::Code::end_line`, straight from the parser, is already exactly right --
+so =set_extents='s outer loop is scoped to =kind == Heading= nodes, full stop;
+by the time it runs, no block node exists yet to touch anyway, since block
+nodes are appended to the same pass that produces headings, and =set_extents=
+runs once, after.
 
 Edges are stored directed. =reciprocated= is filled in after the whole corpus is
 indexed: if =a -> b= and =b -> a= both exist, both are marked, and the renderer
@@ -343,7 +386,12 @@ otherwise would be the dishonest part.
 A reciprocated pair is one undirected line in both, and the half that gets
 drawn is the one the layout ran /down/ the page -- so a renderer doing its own
 layering ends up agreeing with DanKG about which node sits above which.
-Unresolved nodes are dashed and muted in both.
+Unresolved nodes are dashed and muted in both. A block node (decision 20)
+gets a tint and a monospace label in =dot= (=fillcolor=/=fontname=, since
+=resolved= is always true for one, the two states never fight for the same
+box) and its own =classDef= in =mermaid=, collected into a =class= line the
+same way dangling nodes already are -- distinct from an ordinary heading's,
+never dashed, since a block is never unresolved.
 
 * HTML renderer
 
@@ -359,8 +407,12 @@ as a JSON blob alongside the visible subgraph -- and it is the canonical
 =--format json= dump rather than a bespoke shape, so the page and the
 scriptable surface cannot disagree about what the graph is.
 
-Unresolved nodes render dashed and muted. Reciprocated edges render as a single
-line with no arrowhead. Stale results render with a warning badge.
+Unresolved nodes render dashed and muted. A block node (decision 20) renders
+with a =.node.block= class -- a tint and a monospace label, distinct from an
+ordinary heading's, both server-rendered and script-grown alike, since the
+grown path reads =data.kind= straight out of the same embedded index the
+server-rendered path reads =Node.kind= from. Reciprocated edges render as a
+single line with no arrowhead. Stale results render with a warning badge.
 
 ** Expansion is a placement, not a second layout
 
@@ -426,9 +478,11 @@ src/tui/
   input.rs    hand-parsed ANSI escape sequences -> key events
   draw.rs     Layout -> character grid, box-drawing glyphs for nodes and
               polylines; one buffered write per frame, no diffing
-  app.rs      event loop, selection state, viewport scroll
+  app.rs      event loop, selection state, viewport scroll, status line
   editor.rs   suspend term.rs, spawn [editor] command with {file}/{line},
               wait, resume, re-index (the file may have just changed)
+  eval.rs     find a node's named blocks, run one via eval::session
+              (milestone 8) without leaving the graph view
   expand.rs   tab-to-expand: hidden-neighbour lookup and nearest-free-slot
               placement, mirroring the HTML renderer's script
 #+END_EXAMPLE
@@ -439,14 +493,182 @@ src/tui/
 |-------------+------------------------------------------------------------------|
 | arrows/hjkl | move selection; up/down cross ranks, left/right stay in one     |
 | enter       | suspend, spawn the configured editor at the node's line, resume |
+|             | -- or, while cycling a node's blocks, run the cycled one        |
 | tab         | expand the selected node's hidden neighbours -- a placement on  |
 |             | the existing grid, not a second layout, same rule as HTML       |
 | /           | jump to a node by title                                         |
+| e           | cycle the selected node's named blocks; enter runs the cycled   |
+|             | one, in place, without leaving the graph (see /Eval/ below)     |
+| esc         | cancel an in-progress block cycle; otherwise unbound            |
+| p           | toggle panning: direction keys move the viewport, not selection |
 | r           | collapse back to the entry view                                 |
 | q           | quit, restoring the terminal                                    |
+| ?           | toggle a full-screen keybinding reference                       |
 
 Movement follows the rank/order structure =layout/order.rs= already computed,
 so "down" is well-defined without inventing a second notion of adjacency.
+
+Every letter here but the mode-independent bindings above is remappable in
+=[keys]= (decision 18); arrows, enter, tab, esc and =?= are not, since they
+are not graph-navigation letters to begin with -- =?= specifically because it
+is close to universal for "help" across terminal tools (vim, htop, git) and
+is not itself a graph action.
+
+** Panning
+
+=p= repurposes the direction keys from moving the selection to moving the
+viewport directly (=App::pan=), for surveying a region of the graph with
+nothing selected nearby -- the gap the /Open questions/ below used to name.
+A status line exists now (see /Eval/ below), but panning still says nothing
+in words there -- toggling pan on and off is exactly the kind of thing that
+happens on nearly every keypress while surveying a graph, and a status line
+that changed that often would be more noise than signal. The indicator stays
+visual instead: whichever screen edges still have grid beyond them draw an
+arrow (=draw::overlay_pan_arrows=), stamped onto the already-windowed frame
+after scrolling, not into the full grid before it, so the glyphs sit at the
+real screen edges wherever the viewport currently is. An edge with nothing
+further to pan into simply grows no arrow, which makes the indicator double
+as feedback: panned all the way down, =↓= stops appearing.
+
+=render= stops calling =scroll_to_show= while panning is on, which is what
+lets the viewport actually separate from the selection -- otherwise the very
+next frame would snap the scroll straight back to wherever the (unmoved)
+selection sits. =pan= clamps only the near end, at zero, because that is all
+it can know; the far end -- not scrolling past the last row or column of
+content -- is clamped in =render=, the one place that already has both the
+terminal size and =draw::dimensions='s full-grid extent in hand. Toggling
+panning back off needs no explicit re-clamp of its own: the very next frame
+resumes calling =scroll_to_show=, which snaps the viewport back onto the
+selection the same way any other selection move would.
+
+** Eval in the TUI
+
+Milestone 8 built =eval/= as a library, not a =main.rs= orchestration function
+like =graph=/=fmt=, specifically so this could reuse it: =eval::session::run_one=
+-- rebuild a named block's plan, resolve its language, spawn its chain once,
+write the result back -- is now the one place "run this block" is
+implemented, called both by =dankg eval='s own multi-target loop and by
+=tui::eval::run=. The TUI cannot depend on the =main= binary, so a function
+two different front ends both need has to live in the library either way;
+this is the same reasoning as =cmd.rs= already being shared between the
+editor handoff and =eval='s own command spawning.
+
+=e= (=keys.eval=) looks up the selected node's named blocks -- every
+top-level block whose own line falls in =node.line..=node.end_line=, exactly
+the section =graph/build.rs= already computes that heading to span -- and
+starts cycling on the first one. A second press advances to the next,
+wrapping; =enter= runs whichever is currently cycled, exactly the way =enter=
+already runs the editor, except it never leaves the TUI: =eval::run= spawns
+and captures output through pipes (=eval/run.rs=), not through inherited
+stdio, so nothing about it needs the terminal suspended. No separate confirm
+prompt either -- cycling to a block and pressing =enter= to run it already
+/is/ the confirmation, the same reasoning decision 9's =dankg eval= prompt
+does not apply to =enter='s editor handoff.
+
+A node with no named blocks in its section is a silent no-op on =e=: there is
+nowhere to cycle to, the same "nowhere to report to" call =enter='s
+best-effort editor-spawn failure already makes. Navigating away (any
+direction key, =tab=, =r=) cancels an in-progress cycle -- it was scoped to
+whichever node was selected when it started, and moving off that node makes
+it stale. =esc= cancels it explicitly, without moving anything.
+
+*** The status line
+
+One row, reserved at the bottom of the viewport whenever =app.status= is
+=Some=, so the graph's own content never has to reflow around it -- =render=
+computes =content_rows = term_rows - 1= up front and windows the graph into
+that, the same fixed-upper-bound reasoning as everywhere else column/row
+budgets get clamped in this module. It shows the block-cycle list while
+cycling (=eval: [setup] index   enter=run esc=cancel=, the cycled name
+bracketed) and the last run's outcome afterward (=index: ok=, =index:
+failed=, =index: timed out=, or the error text for something that could not
+even be attempted, such as an unconfigured language). =reload= -- which a
+completed run always triggers, since the file just changed -- leaves
+=status= alone on purpose: the reader just ran the block and reloading is not
+itself a reason to hide what happened.
+
+*** Block nodes and the cycle key, side by side
+
+Decision 20 made a named top-level block a node in its own right, drawn with
+a heavy border (=draw_box='s third glyph set, alongside plain and dashed --
+=┏━┓┃┗━┛=) wherever it already sits in the graph -- reachable by ordinary
+arrow/hjkl navigation, not only by =e=. This was added after =e='s cycle mode
+already existed, deliberately left standing rather than replaced: cycling
+answers "what can I run from here" without moving the selection or the
+viewport at all, which staying on the current node and pressing =e=
+repeatedly still does more directly than navigating to a block node instead.
+Both paths end at the same call (=eval::run=, =run_selected_block=), so they
+cannot disagree about what running a block does -- only about how a reader
+gets there.
+
+*** Discoverability outside the TUI
+
+=dankg eval <path>... --list= (=eval::session::list_blocks=/=list_corpus_text=)
+answers the same question a CI script or a reader without a terminal needs
+answered: every top-level named block, its language, source line, containing
+heading (the nearest heading at or above the block's own line -- a cheap
+approximation of the same containment =graph/build.rs= computes properly for
+the node itself, without needing the whole graph pipeline just to answer
+"what can I run here"), and whether that language is configured at all. It
+runs nothing and needs no confirmation, the same as =--format json= being the
+graph's own pipeable, "requested output" surface (decision 13's reasoning
+applied to eval).
+
+Unlike =--block=/=--all=, scoped to exactly one file because =deps== only
+resolves within one (decision 19), =--list= has no execution to scope: a
+named file lists just its own blocks, a directory (or several paths, or
+nothing -- defaulting to =.=) walks the whole corpus via =index::load= the
+same way =graph=/=index=/=check= already do (decision 6) and lists every
+file's, each line still prefixed by its own root-relative path.
+
+** Help screen
+
+=?= is fixed, not remappable (see /Interaction/ above), and toggles a
+full-screen keybinding reference (=app::help_lines=) that /replaces/ the
+graph rather than overlaying it -- there is no compositing in this module,
+and full-screen takeover is exactly what =enter='s editor handoff already
+does for the same reason. It reads =keys= live, so a remapped letter shows up
+correctly rather than the reference silently going stale next to a config
+that no longer matches it.
+
+Help mode is fully modal in the event loop: every key but the dismissers
+(=?=, esc, =keys.quit=) is swallowed before it reaches the graph's own match
+arms, so nothing about the selection, panning, or an in-progress eval cycle
+can change while help is on screen. =write_frame= -- the buffered-write,
+no-trailing-=\r\n=-on-the-last-line logic decision-critical to not scrolling
+the alternate screen (see the Terminal UI intro) -- is shared between the
+graph frame and the help screen, the only two things this module ever draws;
+it deliberately does not clip columns itself, since a graph line carries
+ANSI dimming codes that count as characters but not screen columns, and
+column-clipping those would cut one off mid-escape-sequence. Plain-text
+callers (the status line, help's own lines) clip themselves before handing
+=write_frame= anything.
+
+*** A byte lost after a standalone Esc
+
+Binding =esc= to something real surfaced a latent bug in =input.rs= that
+nothing had ever exercised: [`decode`] tells a lone Esc apart from
+=ESC [ <letter>= by reading one more byte, and when that byte is not =[=, it
+correctly reports using only 1 of the 2 bytes it looked at -- but
+=read_key='s loop discarded its whole buffer between calls, so that second,
+unused byte -- the start of whatever the reader actually typed /next/ --
+simply vanished. In a debug build this tripped a =debug_assert_eq!= the loop
+carried for exactly this invariant; in a release build there was no assert
+to catch it, so the keystroke right after every standalone Esc was silently
+eaten and the reader had to press it twice. Nothing before this session ever
+bound standalone Esc to anything, so the path was real but unreachable by
+any interaction table entry -- true "documented gap" until eval's cycle mode
+gave Esc a job and made it load-bearing.
+
+The fix threads a small =pending: Vec<u8>= through =read_key= across calls,
+owned by =event_loop=: a byte =decode= reports as unused is carried into the
+next call instead of discarded, decoded first (before any new read, so a
+=pending= buffer that already resolves to a full key never blocks trying to
+read more), and drained back out to whatever is left over each time. Found by
+driving the real binary through a pty, not by the unit tests alone -- the
+existing suite only ever fed =decode= and =read_key= complete, single
+sequences in one shot, never a standalone Esc immediately followed by
+another real keystroke in the same read.
 
 ** Tab-to-expand
 
@@ -508,19 +730,17 @@ far enough" rather than centring the selection: the reader's sense of
 where things are on screen should not jump on every keypress that was
 already visible, only on one that would otherwise leave the window.
 
-No explicit pan keys exist, or are needed yet: movement already drives the
-scroll indirectly, since the selection is always what render keeps
-visible. Panning to a point with nothing selected near it -- to survey a
-big graph rather than to follow one path through it -- is not something
-the interaction table offers a way to ask for.
+Without panning, movement alone drives the scroll: the selection is always
+what render keeps visible, and there was no way to look at a region with
+nothing selected nearby. =p= (see /Panning/ above) is that way now --
+=scroll_row=/=scroll_col= move directly instead of following the selection,
+reusing the same fields and the same terminal-clipped =draw::window=, just
+under different control.
 
 ** Open questions
 
 - =/=, "jump to a node by title": in the interaction table, but not yet
   wired up -- =input.rs= decodes the key, =app.rs= does not bind it.
-- Panning to look at a region of the graph with no selection near it, as
-  distinct from scrolling to follow the selection (see Scrolling above):
-  not offered by any key today.
 
 * Code evaluation
 
@@ -535,8 +755,25 @@ $ dankg eval notes.md --block index
   proceed? [y/N]
 #+END_EXAMPLE
 
-The plan is always printed before anything runs. =--yes= skips the prompt for
-scripted use; it never becomes the default.
+The plan is always printed before anything runs, and every block it names has
+its language resolved *before* the prompt too: one unconfigured =[lang.*]=
+refuses the whole plan rather than running part of what the reader approved
+and silently skipping the rest. =--yes= skips the prompt for scripted use; it
+never becomes the default. =--no-write= runs everything but prints the
+captured output instead of writing it back -- a preview of what would change.
+
+=deps= only resolves within the one file named on the command line
+(decision 19): =plan.rs= walks =doc.blocks= directly rather than the
+recursive walk =Document::named_blocks= uses for the graph, so a named block
+nested inside a list is invisible to eval entirely, and there is no syntax
+for a dependency in another file. Every block reached from one target must
+also share its language -- concatenating a =[sh]= dependency ahead of a
+=[python]= target and running the result through one interpreter is far more
+likely a mistake than an intentional pipeline, so =plan_for= refuses it
+before anything is spawned. =--all= runs every named block in the file, each
+as its own target with its own transitive =deps= re-concatenated from
+scratch, in an order that still respects the DAG: if =b= depends on =a=,
+=a='s own run happens first even though it may be declared later in the file.
 
 ** Execution
 
@@ -547,9 +784,28 @@ dependency side effects re-run on every eval, and there is no persistent state
 between separate =dankg eval= invocations. Both are the price of not writing a
 PTY session manager, and both keep evaluation reproducible.
 
-Timeout defaults to 30s, overridable per block. stdout and stderr are captured
-separately; stderr is shown but not stored. Output is truncated at 64 KiB with a
-warning. A non-zero exit stores the output and marks the result failed.
+Timeout defaults to 30s, overridable per block via =timeout=; the target's own
+value governs the one spawn covering its whole chain. stdout and stderr are
+captured on their own threads, not read after the fact: a piped stream fills
+its OS buffer and blocks the child once it is full, and a timeout loop that
+only polled =try_wait= would deadlock on a chatty process instead of ever
+reaching its deadline. stderr is shown on DanKG's own stderr but never stored;
+stdout is truncated at 64 KiB with a warning and is what gets written back (or,
+under =--no-write=, printed). A non-zero exit stores the output and marks the
+result failed.
+
+A timed-out kill has to reach more than the one process =run.rs= spawned
+directly: a shell script's =sleep= runs as *its* child, and killing only the
+shell leaves =sleep= orphaned and still holding the output pipes open, so the
+reader threads block until it exits on its own regardless of the timeout --
+found by timing the real binary, not by the unit tests alone, and now pinned
+by one that asserts wall-clock time rather than only the =timed_out= flag. The
+fix spawns into a fresh process group (pgid equal to its own pid) and kills
+the negated pid on timeout, reaching the whole group in one signal; std has no
+group-kill of its own, so this shells out to the system =kill= rather than
+hand-rolling the syscall. Unix only, the same kind of documented gap as the
+TUI's termios (decision 3's precedent): off Unix, a lone =Child::kill= is used
+instead, which cannot reach a grandchild.
 
 ** Results
 
@@ -558,16 +814,53 @@ warning. A non-zero exit stores the output and marks the result failed.
 print(count())
 ```
 
-<!-- dankg:result name=index hash=a3f9c1 -->
+<!-- dankg:result name=index hash=0000000000a3f9c1 -->
 ```
 312
 ```
 #+END_EXAMPLE
 
-=hash= covers the target block source, its transitive dependency sources, and
-the resolved command. On any mismatch the result is stale: it still renders, but
-badged, and =dankg check= reports it. Write-back replaces the existing result
-block for that name or appends one immediately after the code block.
+=hash= covers the concatenated source of the target's whole chain and the
+*template* string its language resolved to (=[lang.*] command=, e.g. =uv run
+python {file}=) -- never the fully-substituted argv, which would embed eval's
+own ephemeral temp file path and make every result look stale the instant it
+was checked. Editing =[lang.*] command= is exactly the kind of change that
+should mark a result stale; a different temp path on every run is not a
+change at all. The hash itself is the fixed-width 16 hex digit form
+=hash::hex= uses everywhere else in the codebase (the cache stamp included),
+not the shortened form the pipeline sketch above once implied.
+
+On any mismatch the result is stale: it still renders, but =dankg check=
+reports it. A failed run's marker carries a trailing =failed= word
+(=<!-- dankg:result name=index hash=... failed -->=) rather than a separate
+attribute -- the output is still whatever stdout produced, staleness is still
+just the hash, and =failed= only changes what a reader sees at a glance.
+Write-back is text splicing over the original source, not a second pass
+through =md/fmt.rs=: locating the exact line range to touch -- reusing the
+already-parsed =Document= only to find that range -- and replacing nothing
+else is what keeps every other block in the file untouched by an eval run,
+which a full AST-to-text rewrite could not promise. Blank-line spacing around
+the result is renormalized to exactly one blank line on both sides every
+time, so hand-introduced drift self-heals rather than accumulating.
+
+** =dankg check=
+
+The CI gate (decision 9's flip side: =eval= never runs anything automatically,
+=check= is what confirms nothing needs to). Two independent checks, both
+reported and both able to fail the exit code on their own:
+
+- *Unresolved links*, from the same whole-root index =graph=/=tui= build
+  (decision 6 -- the index is always the whole root, so this needs no
+  separate walk).
+- *Stale results*, per file: every top-level named block with an existing
+  =<!-- dankg:result -->= has its expected hash recomputed from the file's
+  *current* source and config, exactly the way =eval= would, and compared
+  against the stored one. This is necessarily file-scoped, the same as
+  =eval= itself (decision 19) -- there is no cross-file dependency DAG to
+  walk. A block whose language has since been removed from config cannot be
+  re-verified and is not counted stale on that account alone; a plan error
+  (a dependency renamed or removed, a cycle introduced) *is* counted stale,
+  since the result can no longer be reproduced from what the file says now.
 
 * Literate database management
 
@@ -683,7 +976,26 @@ ext     = sh
 
 [editor]
 command = code -g {file}:{line}
+
+[keys]
+up    = k
+down  = j
+left  = h
+right = l
+quit  = q
+reset = r
+pan   = p
 #+END_EXAMPLE
+
+=[keys]= remaps the TUI's letter mnemonics (decision 18); arrows are always
+up/down/left/right regardless of what is written here, since remapping a
+positional key to another position is not a meaningful request. A value that
+is not exactly one character, or that collides with another action's
+binding, warns and the whole map falls back to the defaults above -- a
+config half-remapped would leave one key doing two things with no
+indication which, so this is the same "half-understood is worse than
+refused" principle as frontmatter and section names, not a special case for
+=[keys]=.
 
 =[editor] command= is the template a future =dankg open <node>= spawns to jump
 to a node's source line, substituting =\{file\}= and =\{line\}= the same way
@@ -714,8 +1026,9 @@ config written ahead of the code does not warn.
 #+BEGIN_EXAMPLE
 dankg graph <path> [--format html|json|dot|mermaid] [--depth N] [--all] [-o FILE]
 dankg eval  <path> [--block NAME | --all] [--yes] [--no-write]
+dankg eval  [<path>...] --list [--no-cache]
 dankg fmt   <path>... [--check]   rewrite to normal form; --check only reports
-dankg check <path>            exit non-zero on unresolved links or stale results
+dankg check [<path>...]       exit non-zero on unresolved links or stale results
 dankg index [<path>]          corpus statistics, cache state
 
 =--format json= always emits the whole index, which is what makes it the
@@ -723,11 +1036,24 @@ scriptable surface: a consumer that asked for the graph should not silently get
 a fragment of it. =--depth= and =--all= shape the drawn formats only, and
 passing =--depth= alongside =json= warns rather than being quietly ignored.
 
-=--no-cache= applies to =graph= and =index=. =index= defaults to the working
-directory, because "tell me about the corpus I am standing in" is the common
-case. It is the command to run when the graph is not what you expected, since
-that produces exactly two questions -- which root am I in, and which files did
-it decide were mine.
+=--no-cache= applies to =graph=, =index=, =check=, and =eval --list=. =index=
+and =check= both default to the working directory, because "tell me about the
+corpus I am standing in" is the common case for either. =index= is the
+command to run when the graph is not what you expected, since that produces
+exactly two questions -- which root am I in, and which files did it decide
+were mine.
+
+=--block= and =--all= take exactly one path: =deps== resolves within one file
+only (decision 19), so a second path would have nothing to mean. =--block=,
+=--all= and =--list= are mutually exclusive and one of them is required --
+there is no default target to fall back to, on the same "never automatic"
+principle as decision 9 itself. =--list= is the odd one out in every
+direction at once: it explores rather than runs, needs no confirm prompt,
+prints to stdout as the requested output rather than to stderr the way the
+plan/confirm/result messages of the other two do, and -- since it has no
+execution to scope the way =--block=/=--all= do -- takes any number of paths,
+defaulting to =.=, and walks a whole directory as a corpus exactly like
+=graph=/=index=/=check= (decision 6).
 #+END_EXAMPLE
 
 =check= is the CI gate. It is deliberately separate from =graph= so that drafting
@@ -841,7 +1167,10 @@ What is stored is a file's /index contribution/ -- its nodes, containment
 edges, raw links and aliases -- rather than the markdown AST. That is exactly
 what pipeline steps 4-6 consume and a far smaller thing to write a codec for.
 =dankg fmt=, which needs the whole AST, does not use the cache and does not want
-to: it reads every file it is given anyway.
+to: it reads every file it is given anyway. A node's row grew a =kind= field
+when block nodes were added (decision 20); the row format's own =VERSION=
+was bumped alongside it, so every existing entry becomes a miss rather than
+being misread by a decoder now expecting one field more than it has.
 
 An entry also stores the diagnostics the parse raised, and a hit replays them.
 Without that, "deleting the cache changes nothing but runtime" would be false
@@ -1034,7 +1363,49 @@ invariant the first one enforced only by construction.
   to ship the whole index however little it draws, since a blob missing a node
   is a node that can never be expanded into.
 - Link resolution table tests, including root-escape refusal.
-- Eval tests use =sh= only, never the network.
+- Eval tests use =sh= only, never the network: shared dependencies collapsed to
+  one run, a cycle and an unknown dependency both reported rather than
+  guessed at, a different-language dependency refused, real process spawns
+  for stdout/stderr capture and a non-zero exit, a timeout that kills a
+  grandchild holding the output pipes open -- pinned by wall-clock time, not
+  only the =timed_out= flag, since that is exactly the dimension the bug it
+  caught broke. Write-back is checked as pure text splicing: inserting after
+  a block with nothing following, replacing an existing result in place,
+  renormalizing drifted blank-line spacing, and preserving a file's missing
+  trailing newline.
+- =[keys]= parsing: defaults with no section, individual remaps, a
+  multi-character value rejected in favour of its default, and a collision
+  between two actions reverting the whole map rather than half of it.
+- Panning: direction keys move the viewport and never the selection while
+  panning is on and move the selection as before while it is off, a pan
+  cannot go negative, and =render= clamps a scroll panned past the far edge
+  back onto the grid.
+- Eval in the TUI: cycling finds only the blocks inside a node's own line
+  range, wraps, and is a silent no-op with none to find; running writes back
+  and reports =ok=/=failed= on the status line and clears the cycle either
+  way; navigation and =esc= both cancel a cycle, the former via the same
+  =clear_transient= path movement, =tab= and =r= all share. =render= is
+  checked to draw the help screen instead of the graph while =help= is on.
+  =read_key= is checked to carry an unused byte from a standalone Esc into
+  the next call rather than losing it, and to resolve a =pending= buffer
+  that already decodes to a full key without blocking on a read that would
+  hang forever against an empty reader -- the two ends of the bug a real pty
+  session against the built binary found (see /Terminal UI/, /Help
+  screen/), neither reachable from feeding =decode=/=read_key= one complete
+  sequence at a time the way the rest of the suite already did.
+- Block nodes (decision 20): a named top-level block becomes a node
+  contained by its heading with the right =(line, end_line)=; an unnamed
+  block or one nested in a list does not; a block before any heading
+  attaches to the lazily-created file-level node; a block's own end_line
+  survives =set_extents= untouched while a heading's still correctly runs
+  past it to the /real/ next sibling; a block name colliding with a heading
+  slug gets the same =-1= suffix two same-titled headings would. Each
+  drawn format is checked to give a block node its own look -- =dot='s
+  fillcolor and monospace font, =mermaid='s =classDef block=, the HTML
+  page's =.node.block= class (both server-rendered and script-grown), and
+  the TUI's heavy border -- and =eval --list= is checked to list only the
+  named file's blocks when given one, and every file's when given a
+  directory.
 
 * Milestones
 
@@ -1067,11 +1438,44 @@ invariant the first one enforced only by construction.
    for a terminal editor; =tab= grows the view onto the existing grid the
    same way the HTML renderer's script does, without a second layout; the
    drawn grid scrolls to keep the selection on screen when it outgrows the
-   terminal, which is the common case rather than the exception. See
-   /Terminal UI/ above. Unix termios first, Windows Console API deferred;
-   =/= (jump to a node by title) is the one interaction-table key still
-   unbound.
-8. =eval/= plan, run, write-back, =dankg check=.
+   terminal, which is the common case rather than the exception; =p= detaches
+   that scroll into an explicit pan mode, edge arrows its only indicator;
+   =e= cycles a selected node's named blocks and =enter= runs the cycled one
+   through =eval::session::run_one= (milestone 8) without leaving the graph,
+   reporting the outcome on a one-row status line reserved at the bottom of
+   the viewport; =?= is a full-screen keybinding reference. See /Terminal
+   UI/ above. Letter keybindings are remappable in =[keys]= (decision 18).
+   Unix termios first, Windows Console API deferred; =/= (jump to a node by
+   title) is the one interaction-table key still unbound.
+8. [DONE] =eval/= (plan, run, result) + =dankg check=. Scoped to one file at a
+   time (decision 19): =plan.rs= walks =doc.blocks= directly rather than
+   recursing into lists the way the graph's =named_blocks= does, refuses a
+   cycle or an unknown dependency instead of guessing, and refuses a
+   dependency in a different language from its target rather than
+   concatenating incompatible source into one interpreter. =run.rs= spawns
+   once per target's whole chain, capturing stdout/stderr on their own
+   threads so a chatty process cannot deadlock the timeout poll, and kills
+   the whole process group (not just the direct child) on timeout so an
+   orphaned grandchild cannot hold the output pipes open past it -- found by
+   timing the real binary, not by the unit tests alone. =result.rs= hashes
+   the concatenated chain plus the *template* a language resolved to (never
+   the substituted argv, which would embed eval's own ephemeral temp path)
+   and writes results back as targeted text splicing over the exact line
+   range located via the parsed =Document=, not a second =md/fmt.rs= pass --
+   nothing else in the file moves. =dankg check= adds unresolved-link
+   detection (reusing the whole-root index every other command already
+   builds) alongside per-file staleness, and is the second CI gate next to
+   =dankg fmt --check=. =session.rs= holds the interactive plan-confirm-run
+   flow and =run_one=, split out from =main.rs= specifically so the TUI can
+   call the same function (see /Terminal UI/, /Eval in the TUI/); =--list=
+   is =session.rs='s exploratory mode, printing every named block's name,
+   language, line, containing heading and configured-or-not without running
+   anything -- how to find a block's name before naming it to =--block=,
+   from the CLI alone, and (decision 6) walking a whole directory as a
+   corpus when that is what was named, not just the one file =--block=/
+   =--all= are scoped to. A named top-level block is also a graph node in
+   its own right now (decision 20), drawn distinctly in every format --
+   see /Block nodes/ under /Data model/.
 9. Literate database management, over DuckDB. Depends on 8: it is the same
    plan-run-write-back machinery pointed at a database instead of a process.
 10. =dankg serve= -- deferred, opt-in, only if the static path proves insufficient.
@@ -1082,6 +1486,4 @@ invariant the first one enforced only by construction.
   filtering? Currently attributes.
 - Do containment edges count against =--depth=, or only link edges? Currently
   both, which may make depth 2 feel shallow in deeply nested files.
-- What does =dankg eval --all= mean for ordering across files? Currently
-  undefined; probably should be refused.
 - Cross-root links: refused today. Is a multi-root mode ever wanted?

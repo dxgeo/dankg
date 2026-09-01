@@ -18,7 +18,7 @@
 //! given anyway.
 
 use super::build::{ParsedFile, RawLink, Target};
-use super::model::{Edge, EdgeKind, Node, NodeId};
+use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
 use crate::config;
 use crate::diag::{Diagnostic, Level};
 use crate::hash;
@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 
 const MAGIC: &str = "!dankg-cache";
 /// Bumped whenever the record format changes. An entry from another version is
-/// a miss, not an error.
-const VERSION: u32 = 1;
+/// a miss, not an error. 2: a node row grew a `kind` field (block nodes).
+const VERSION: u32 = 2;
 /// Separates the items of a list field. `escape` guarantees it never survives
 /// inside one, so splitting on it is exact.
 const UNIT: char = '\u{1f}';
@@ -207,6 +207,7 @@ fn encode(stamp: &Stamp, file: &ParsedFile, diags: &[Diagnostic]) -> String {
                 list(&node.tags),
                 list(&node.external),
                 flag(node.resolved),
+                node.kind.as_str().to_string(),
             ],
         );
     }
@@ -298,7 +299,7 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
                 key = unescape(f[1]);
             }
             "alias" if f.len() == 1 => aliases.push(unescape(f[0])),
-            "node" if f.len() == 12 => nodes.push(Node {
+            "node" if f.len() == 13 => nodes.push(Node {
                 id: NodeId::new(unescape(f[0]), unescape(f[1])),
                 title: unescape(f[2]),
                 file: unescape(f[3]),
@@ -310,6 +311,7 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
                 tags: unlist(f[9]),
                 external: unlist(f[10]),
                 resolved: unflag(f[11])?,
+                kind: NodeKind::parse(f[12])?,
             }),
             "edge" if f.len() == 7 => containment.push(Edge {
                 from: NodeId::new(unescape(f[0]), unescape(f[1])),
@@ -477,7 +479,7 @@ mod tests {
 
     #[test]
     fn another_version_is_a_miss_not_a_failure() {
-        let text = encode(&stamp(), &parsed(), &[]).replacen("\t1\n", "\t2\n", 1);
+        let text = encode(&stamp(), &parsed(), &[]).replacen(&format!("\t{VERSION}\n"), "\t999\n", 1);
         assert!(decode(&text, &stamp()).is_none());
     }
 

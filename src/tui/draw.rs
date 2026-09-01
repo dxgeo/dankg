@@ -32,7 +32,7 @@
 //! wall rather than erasing the line without a trace. Self-loops are not
 //! drawn at all yet.
 
-use crate::graph::{Graph, NodeId};
+use crate::graph::{Graph, NodeId, NodeKind};
 use crate::layout::{fit_label, Layout, CHAR_WIDTH};
 
 const BOX_ROWS: usize = 3;
@@ -137,6 +137,41 @@ pub fn window(drawing: &Drawing, row: usize, col: usize, rows: usize, cols: usiz
     }
 }
 
+/// Stamps directional arrows onto the edges of an already-windowed
+/// `visible` drawing -- the sole visual indicator that pan mode is on,
+/// since `app.rs` has no status line to say so in words. An edge only gets
+/// an arrow when there is more grid beyond it to pan into, which doubles
+/// the indicator as feedback about which directions still have room:
+/// panned all the way to the bottom, `↓` simply stops appearing. Applied
+/// after windowing, not before, so the arrows sit at the actual screen
+/// edges regardless of where the viewport currently is inside the full
+/// grid.
+pub fn overlay_pan_arrows(visible: &mut Drawing, can_up: bool, can_down: bool, can_left: bool, can_right: bool) {
+    let rows = visible.grid.len();
+    if rows == 0 || visible.grid[0].is_empty() {
+        return;
+    }
+    let cols = visible.grid[0].len();
+    let mid_row = rows / 2;
+    let mid_col = cols / 2;
+    let mut mark = |row: usize, col: usize, ch: char| {
+        visible.grid[row][col] = ch;
+        visible.dim[row][col] = false;
+    };
+    if can_up {
+        mark(0, mid_col, '↑');
+    }
+    if can_down {
+        mark(rows - 1, mid_col, '↓');
+    }
+    if can_left {
+        mark(mid_row, 0, '←');
+    }
+    if can_right {
+        mark(mid_row, cols - 1, '→');
+    }
+}
+
 /// `selected`, when given, draws that node with a double-line border
 /// instead of its usual one -- a purely character-level cursor, since this
 /// grid carries no color yet -- and puts the view into focus mode: the
@@ -147,11 +182,15 @@ pub fn window(drawing: &Drawing, row: usize, col: usize, rows: usize, cols: usiz
 /// what makes a large view legible rather than adding more glyph variety
 /// on top of an already busy drawing. See [`draw_edge`] for the glyphs
 /// each state actually uses.
-pub fn draw(graph: &Graph, layout: &Layout, selected: Option<&NodeId>) -> Drawing {
+/// The full drawn grid's `(rows, cols)`, without drawing it -- what
+/// `crate::tui::app` clamps panning against, since panning has to know the
+/// grid's extent up front rather than discovering it by scrolling off the
+/// end. Kept in step with `draw`'s own sizing by being the thing `draw`
+/// calls, not a second computation of the same numbers.
+pub fn dimensions(layout: &Layout) -> (usize, usize) {
     if layout.nodes.is_empty() {
-        return Drawing::default();
+        return (0, 0);
     }
-
     let total_cols = layout
         .nodes
         .iter()
@@ -164,6 +203,15 @@ pub fn draw(graph: &Graph, layout: &Layout, selected: Option<&NodeId>) -> Drawin
         .max(1) as usize
         + 1;
     let total_rows = row_of(layout.ranks.saturating_sub(1)) + BOX_ROWS;
+    (total_rows, total_cols)
+}
+
+pub fn draw(graph: &Graph, layout: &Layout, selected: Option<&NodeId>) -> Drawing {
+    if layout.nodes.is_empty() {
+        return Drawing::default();
+    }
+
+    let (total_rows, total_cols) = dimensions(layout);
 
     let mut canvas =
         Drawing { grid: vec![vec![' '; total_cols]; total_rows], dim: vec![vec![false; total_cols]; total_rows] };
@@ -204,9 +252,10 @@ pub fn draw(graph: &Graph, layout: &Layout, selected: Option<&NodeId>) -> Drawin
         let node = graph.node(&laid.id);
         let title = node.map(|n| n.title.as_str()).unwrap_or(&laid.id.slug);
         let resolved = node.is_none_or(|n| n.resolved);
+        let kind = node.map_or(NodeKind::Heading, |n| n.kind);
         let is_selected = selected == Some(&laid.id);
         let dim = selected.is_some() && !focused_nodes.contains(&laid.id);
-        draw_box(&mut canvas, laid, title, resolved, is_selected, dim);
+        draw_box(&mut canvas, laid, title, resolved, kind, is_selected, dim);
     }
 
     canvas
@@ -322,20 +371,33 @@ fn put_border(canvas: &mut Drawing, row: usize, col: i32, glyph: char, dim: bool
 
 /// Unresolved nodes render with dashed box-drawing glyphs, the character-
 /// grid equivalent of "dashed and muted" in the HTML and dot renderers.
-/// Selection overrides that: it is what the reader is about to act on, so
-/// it takes the visually strongest border regardless of resolved state.
-/// `dim` is orthogonal to both -- it is [`render_ansi`]'s job, not a
-/// glyph choice, so an unresolved node outside focus can be dashed *and*
-/// faint at once.
-fn draw_box(canvas: &mut Drawing, laid: &crate::layout::LaidNode, title: &str, resolved: bool, selected: bool, dim: bool) {
+/// A block node -- always resolved, never dashed -- gets heavy lines
+/// instead, the character-grid equivalent of the tint `dot.rs`/`html.rs`
+/// give it: still a plain box, just visibly a different kind of thing.
+/// Selection overrides both: it is what the reader is about to act on, so
+/// it takes the visually strongest border regardless of resolved state or
+/// kind. `dim` is orthogonal to all three -- it is [`render_ansi`]'s job,
+/// not a glyph choice, so an unresolved node outside focus can be dashed
+/// *and* faint at once.
+fn draw_box(
+    canvas: &mut Drawing,
+    laid: &crate::layout::LaidNode,
+    title: &str,
+    resolved: bool,
+    kind: NodeKind,
+    selected: bool,
+    dim: bool,
+) {
     let (left, width) = geometry(laid);
     let top_row = row_of(laid.rank);
     let (h, v, corner) = if selected {
         ('═', '║', ['╔', '╗', '╚', '╝'])
-    } else if resolved {
-        ('─', '│', ['┌', '┐', '└', '┘'])
-    } else {
+    } else if !resolved {
         ('┄', '┆', ['┌', '┐', '└', '┘'])
+    } else if kind == NodeKind::Block {
+        ('━', '┃', ['┏', '┓', '┗', '┛'])
+    } else {
+        ('─', '│', ['┌', '┐', '└', '┘'])
     };
 
     put_border(canvas, top_row, left, corner[0], dim);
@@ -567,6 +629,14 @@ mod tests {
     }
 
     #[test]
+    fn a_block_node_gets_a_heavy_border() {
+        let lines = drawn(&[("a.md", "# One\n\n```sh name=setup\n:\n```\n")]);
+        let heavy = lines.iter().any(|l| l.contains('┏') || l.contains('┃') || l.contains('━'));
+        assert!(heavy, "expected a heavy border for the block node: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("setup")), "{lines:?}");
+    }
+
+    #[test]
     fn a_parent_and_child_are_joined_by_a_connector_in_the_gap_row() {
         let lines = drawn(&[("a.md", "# One\n\n## Two\n")]);
         // The gap between rank 0's box and rank 1's spans GAP_ROWS rows;
@@ -586,6 +656,36 @@ mod tests {
         let row = &lines[row_of(1) + 1];
         assert!(row.contains("Two"), "{row:?}");
         assert!(row.contains("Three"), "{row:?}");
+    }
+
+    #[test]
+    fn overlay_pan_arrows_draws_only_the_directions_with_more_to_pan_into() {
+        let mut visible = Drawing { grid: vec![vec![' '; 5]; 3], dim: vec![vec![false; 5]; 3] };
+        overlay_pan_arrows(&mut visible, true, false, true, false);
+        assert_eq!(visible.grid[0][2], '↑', "up is allowed");
+        assert_eq!(visible.grid[2][2], ' ', "down is not allowed: no arrow");
+        assert_eq!(visible.grid[1][0], '←', "left is allowed");
+        assert_eq!(visible.grid[1][4], ' ', "right is not allowed: no arrow");
+    }
+
+    #[test]
+    fn overlay_pan_arrows_on_an_empty_drawing_is_a_no_op() {
+        let mut visible = Drawing::default();
+        overlay_pan_arrows(&mut visible, true, true, true, true); // must not panic
+        assert!(visible.grid.is_empty());
+    }
+
+    #[test]
+    fn dimensions_matches_what_draw_actually_produces() {
+        let graph = graph_of(&[("a.md", "# One\n\n## Two\n")]);
+        let laid = layout(&graph);
+        let drawing = draw(&graph, &laid, None);
+        assert_eq!(dimensions(&laid), (drawing.grid.len(), drawing.grid[0].len()));
+    }
+
+    #[test]
+    fn dimensions_of_an_empty_layout_is_zero() {
+        assert_eq!(dimensions(&layout(&Graph::default())), (0, 0));
     }
 
     #[test]

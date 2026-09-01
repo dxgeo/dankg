@@ -10,7 +10,7 @@
 //! points, DanKG has polylines, and converting between them to satisfy a flag
 //! most people will not pass is not worth a bug in the arithmetic.
 
-use crate::graph::{EdgeKind, Graph, Node};
+use crate::graph::{EdgeKind, Graph, Node, NodeKind};
 use crate::layout::Layout;
 use std::fmt::Write as _;
 
@@ -55,6 +55,10 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
                 // Dangling links are signal. A placeholder looks like one.
                 out.push_str(", style=\"rounded,dashed\", color=\"#a0a0a0\"");
                 out.push_str(", fontcolor=\"#a0a0a0\"");
+            } else if node.kind == NodeKind::Block {
+                // A named code block reads as code, not prose: monospace,
+                // and a tint distinct from an ordinary heading's white.
+                out.push_str(", fillcolor=\"#eef2ff\", fontname=\"Menlo\"");
             }
             let _ = write!(out, ", tooltip={}", quote(&location(node)));
         }
@@ -188,6 +192,14 @@ mod tests {
         ]);
         assert_eq!(out.matches("dir=none").count(), 1, "one line, not two: {out}");
         assert!(out.contains("\"a#a\" -> \"b#b\" [dir=none]"), "{out}");
+    }
+
+    #[test]
+    fn a_block_node_is_tinted_and_monospaced() {
+        let out = dot(&[("a.md", "# One\n\n```sh name=setup\n:\n```\n")]);
+        assert!(out.contains("\"a#setup\" [label=\"setup\""), "{out}");
+        assert!(out.contains("fillcolor=\"#eef2ff\""), "{out}");
+        assert!(out.contains("fontname=\"Menlo\""), "{out}");
     }
 
     #[test]

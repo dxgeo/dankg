@@ -172,7 +172,10 @@ fn gather_fence(lines: &[Line], start: usize, fence: FenceOpen, diags: &mut Diag
         diags.warn(open.num, "unclosed code fence, treated as running to end of file");
     }
 
-    (Block::Code { info, text, fence: fence.ch, line: open.num }, i)
+    // `i` sits one past the last line consumed either way: the closing
+    // fence's own line when `closed`, or the last content line otherwise.
+    let end_line = lines[i - 1].num;
+    (Block::Code { info, text, fence: fence.ch, line: open.num, end_line }, i)
 }
 
 /// Parse a fence info string: first word is the language, the rest is DanKG
@@ -503,12 +506,13 @@ mod tests {
     #[test]
     fn fenced_code_with_info_attrs() {
         let (b, d) = blocks("```python name=index deps=setup\nprint(1)\n```\n");
-        let Block::Code { info, text, line, .. } = &b[0] else { panic!() };
+        let Block::Code { info, text, line, end_line, .. } = &b[0] else { panic!() };
         assert_eq!(info.lang.as_deref(), Some("python"));
         assert_eq!(info.name(), Some("index"));
         assert_eq!(info.deps(), vec!["setup"]);
         assert_eq!(text, "print(1)\n");
         assert_eq!(*line, 1);
+        assert_eq!(*end_line, 3, "the closing fence is line 3");
         assert!(d.is_empty());
     }
 
@@ -528,8 +532,9 @@ mod tests {
     fn unclosed_fence_warns() {
         let (b, d) = blocks("```sh\necho hi\n");
         assert!(d.items()[0].message.contains("unclosed code fence"));
-        let Block::Code { text, .. } = &b[0] else { panic!() };
+        let Block::Code { text, end_line, .. } = &b[0] else { panic!() };
         assert_eq!(text, "echo hi\n");
+        assert_eq!(*end_line, 2, "runs to the last line of the file, unclosed");
     }
 
     #[test]

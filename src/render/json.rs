@@ -11,7 +11,10 @@ use crate::graph::{Graph, Node};
 use std::fmt::Write as _;
 
 /// Bumped whenever the shape changes in a way a consumer would notice.
-pub const SCHEMA_VERSION: u32 = 1;
+/// 2: a node carries `kind` (`"heading"` or `"block"`), now that a named
+/// top-level code block is its own node rather than invisible content
+/// inside its heading's line range.
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub fn render(graph: &Graph) -> String {
     let mut out = String::new();
@@ -46,7 +49,7 @@ fn node_json(node: &Node, out: &mut String) {
     let _ = write!(
         out,
         "    {{\"id\": {}, \"title\": {}, \"file\": {}, \"line\": {}, \"end_line\": {}, \
-         \"level\": {}, \"parent\": {}, \"tags\": {}, \"external\": {}, \"resolved\": {}}}",
+         \"level\": {}, \"parent\": {}, \"tags\": {}, \"external\": {}, \"resolved\": {}, \"kind\": {}}}",
         string(&node.id.to_string()),
         string(&node.title),
         string(&node.file),
@@ -59,7 +62,8 @@ fn node_json(node: &Node, out: &mut String) {
         },
         array(&node.tags),
         array(&node.external),
-        node.resolved
+        node.resolved,
+        string(node.kind.as_str())
     );
 }
 
@@ -101,7 +105,7 @@ fn string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{Edge, EdgeKind, NodeId};
+    use crate::graph::{Edge, EdgeKind, NodeId, NodeKind};
 
     fn sample() -> Graph {
         Graph {
@@ -116,6 +120,7 @@ mod tests {
                 tags: vec!["rust".into()],
                 external: vec![],
                 resolved: true,
+                kind: NodeKind::Heading,
             }],
             edges: vec![Edge {
                 from: NodeId::new("a", "one"),
@@ -137,12 +142,13 @@ mod tests {
     #[test]
     fn renders_expected_shape() {
         let out = render(&sample());
-        assert!(out.contains("\"version\": 1"));
+        assert!(out.contains("\"version\": 2"));
         assert!(out.contains("\"id\": \"a#one\""));
         assert!(out.contains("\"title\": \"One \\\"quoted\\\"\""));
         assert!(out.contains("\"parent\": null"));
         assert!(out.contains("\"tags\": [\"rust\"]"));
-        assert!(out.contains("\"kind\": \"link\""));
+        assert!(out.contains("\"kind\": \"heading\""), "the node's own kind: {out:?}");
+        assert!(out.contains("\"kind\": \"link\""), "the edge's kind: {out:?}");
         assert!(out.contains("\"reciprocated\": true"));
         assert!(out.ends_with("]\n}\n"));
     }
@@ -150,6 +156,6 @@ mod tests {
     #[test]
     fn empty_graph_is_still_valid_json() {
         let out = render(&Graph::default());
-        assert_eq!(out, "{\n  \"version\": 1,\n  \"nodes\": [\n  ],\n  \"edges\": [\n  ]\n}\n");
+        assert_eq!(out, "{\n  \"version\": 2,\n  \"nodes\": [\n  ],\n  \"edges\": [\n  ]\n}\n");
     }
 }

@@ -4,9 +4,16 @@
 //! has not been parsed yet, so building records raw targets and
 //! [`super::resolve`] turns them into edges once the whole corpus is known.
 
-use super::model::{Edge, EdgeKind, Node, NodeId};
+use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
 use super::slug::Slugger;
 use crate::md::{Block, Document, Inline};
+
+/// Every real heading level is 1..=6 (0 is reserved for the synthetic
+/// file-level node); a block node's `level` only has to stay above all of
+/// them so `set_extents` -- which still scans past a block node to find a
+/// heading's *next* sibling-or-higher heading -- never mistakes one for
+/// it. It carries no meaning beyond that.
+const BLOCK_LEVEL: u8 = 7;
 
 /// A link as written, before its target is known to exist.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +65,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
     let mut current: Option<NodeId> = None;
 
     let mut visit = |block: &Block,
+                     top_level: bool,
                      nodes: &mut Vec<Node>,
                      containment: &mut Vec<Edge>,
                      links: &mut Vec<RawLink>,
@@ -93,6 +101,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                     tags: tags.clone(),
                     external: Vec::new(),
                     resolved: true,
+                    kind: NodeKind::Heading,
                 });
 
                 // A link written in a heading is still a link, and a heading is
@@ -120,12 +129,51 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                 let mut cursor = *line;
                 collect_links(inlines, &owner, &mut cursor, links, nodes);
             }
+            // Scoped to top-level, named blocks only -- exactly
+            // `eval::plan::top_level_blocks`'s definition (decision 19), so
+            // a node here and a block `dankg eval` can run are always the
+            // same set. A block never becomes `current`: nothing nests
+            // inside one, so later content keeps attaching to whichever
+            // heading was already open.
+            Block::Code { info, line, end_line, .. } if top_level => {
+                let Some(name) = info.name() else { return };
+                let owner = match current.clone() {
+                    Some(id) => id,
+                    None => {
+                        let id = file_node(&key, path, doc, nodes, &tags);
+                        *current = Some(id.clone());
+                        stack.push((0, id.clone()));
+                        id
+                    }
+                };
+                let block_id = NodeId::new(&key, slugger.assign(name));
+                containment.push(Edge {
+                    from: owner.clone(),
+                    to: block_id.clone(),
+                    kind: EdgeKind::Contains,
+                    line: 0,
+                    reciprocated: false,
+                });
+                nodes.push(Node {
+                    id: block_id,
+                    title: name.to_string(),
+                    file: path.to_string(),
+                    line: *line,
+                    end_line: *end_line,
+                    level: BLOCK_LEVEL,
+                    parent: Some(owner),
+                    tags: tags.clone(),
+                    external: Vec::new(),
+                    resolved: true,
+                    kind: NodeKind::Block,
+                });
+            }
             _ => {}
         }
     };
 
-    for block in flatten(&doc.blocks) {
-        visit(block, &mut nodes, &mut containment, &mut links, &mut stack, &mut current);
+    for (block, top_level) in flatten(&doc.blocks) {
+        visit(block, top_level, &mut nodes, &mut containment, &mut links, &mut stack, &mut current);
     }
 
     if nodes.is_empty() {
@@ -171,6 +219,7 @@ fn file_node(
         tags: tags.to_vec(),
         external: Vec::new(),
         resolved: true,
+        kind: NodeKind::Heading,
     };
     nodes.insert(0, node);
     id
@@ -178,8 +227,18 @@ fn file_node(
 
 /// A heading owns every line up to the next heading of the same or higher
 /// level.
+/// Heading nodes only: a block's `end_line` already came straight from the
+/// parser (`Block::Code::end_line`) and must not be recomputed here, since
+/// this function's "next node at or above my level" formula assumes
+/// siblings-and-ancestors, not a leaf. `BLOCK_LEVEL` already keeps a block
+/// from ever being mistaken for a heading's own next-sibling while
+/// searching past it, so it is left in the scan on that side, just never
+/// assigned to on the left.
 fn set_extents(nodes: &mut [Node], line_count: u32) {
     for i in 0..nodes.len() {
+        if nodes[i].kind != NodeKind::Heading {
+            continue;
+        }
         let level = nodes[i].level;
         let end = nodes[i + 1..]
             .iter()
@@ -190,19 +249,23 @@ fn set_extents(nodes: &mut [Node], line_count: u32) {
     }
 }
 
-/// Every block in document order, descending into list items.
-fn flatten(blocks: &[Block]) -> Vec<&Block> {
+/// Every block in document order, paired with whether it sits at the top
+/// level (`doc.blocks` itself) rather than inside a list item -- code
+/// blocks only become nodes at the top level (decision 19's scope, see
+/// `visit`'s `Block::Code` arm); headings and paragraphs still recurse
+/// into lists regardless, unchanged from before this distinction existed.
+fn flatten(blocks: &[Block]) -> Vec<(&Block, bool)> {
     let mut out = Vec::new();
-    push_flat(blocks, &mut out);
+    push_flat(blocks, true, &mut out);
     out
 }
 
-fn push_flat<'a>(blocks: &'a [Block], out: &mut Vec<&'a Block>) {
+fn push_flat<'a>(blocks: &'a [Block], top_level: bool, out: &mut Vec<(&'a Block, bool)>) {
     for b in blocks {
-        out.push(b);
+        out.push((b, top_level));
         if let Block::List(list) = b {
             for item in &list.items {
-                push_flat(&item.blocks, out);
+                push_flat(&item.blocks, false, out);
             }
         }
     }
@@ -398,5 +461,74 @@ mod tests {
         let f = build_src("a.md", "# Notes\n\n# Notes\n");
         assert_eq!(f.nodes[0].id.slug, "notes");
         assert_eq!(f.nodes[1].id.slug, "notes-1");
+    }
+
+    #[test]
+    fn a_named_block_becomes_a_node_contained_by_its_heading() {
+        let f = build_src("a.md", "# One\n\n```sh name=setup\necho hi\n```\n");
+        let block = f.nodes.iter().find(|n| n.id.slug == "setup").expect("block node exists");
+        assert_eq!(block.kind, NodeKind::Block);
+        assert_eq!(block.title, "setup");
+        assert_eq!(block.parent.as_ref().map(|p| p.slug.as_str()), Some("one"));
+        assert_eq!((block.line, block.end_line), (3, 5));
+        assert!(
+            f.containment.iter().any(|e| e.to.slug == "setup" && e.from.slug == "one" && e.kind == EdgeKind::Contains),
+            "{:?}",
+            f.containment
+        );
+    }
+
+    #[test]
+    fn an_unnamed_block_is_not_a_node() {
+        let f = build_src("a.md", "# One\n\n```sh\necho hi\n```\n");
+        assert!(f.nodes.iter().all(|n| n.kind == NodeKind::Heading));
+    }
+
+    #[test]
+    fn a_block_nested_in_a_list_is_not_a_node() {
+        // Matches eval::plan's own scope (decision 19): a block only
+        // becomes a node -- and only eval can run it -- at the top level.
+        let f = build_src("a.md", "# One\n\n- ```sh name=hidden\n  echo hi\n  ```\n");
+        assert!(f.nodes.iter().all(|n| n.id.slug != "hidden"));
+    }
+
+    #[test]
+    fn a_block_before_any_heading_attaches_to_the_file_level_node() {
+        let f = build_src("notes/a.md", "```sh name=setup\n:\n```\n\n# One\n");
+        let block = f.nodes.iter().find(|n| n.id.slug == "setup").expect("block node exists");
+        let file_node = f.nodes.iter().find(|n| n.level == 0).expect("a file-level node was created");
+        assert_eq!(block.parent.as_ref(), Some(&file_node.id));
+    }
+
+    #[test]
+    fn a_blocks_own_end_line_is_not_recomputed_as_a_heading_extent_would_be() {
+        // "One" would otherwise look like it ends right before "setup" if
+        // set_extents mistook the block for a next-sibling-or-higher node;
+        // it must run to "Two" instead, and the block must keep its own
+        // fence-derived end_line untouched.
+        let f = build_src("a.md", "# One\n\n```sh name=setup\nline2\nline3\n```\n\n# Two\n");
+        let one = f.nodes.iter().find(|n| n.id.slug == "one").unwrap();
+        let setup = f.nodes.iter().find(|n| n.id.slug == "setup").unwrap();
+        assert_eq!(one.end_line, 7, "One's extent runs up to Two, past the block");
+        assert_eq!((setup.line, setup.end_line), (3, 6), "the block keeps its own fence extent");
+    }
+
+    #[test]
+    fn a_block_name_colliding_with_a_heading_slug_gets_a_distinct_slug() {
+        let f = build_src("a.md", "# Setup\n\n```sh name=Setup\n:\n```\n");
+        let slugs: Vec<&str> = f.nodes.iter().map(|n| n.id.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["setup", "setup-1"], "{slugs:?}");
+    }
+
+    #[test]
+    fn two_blocks_in_different_sections_attach_to_their_own_heading() {
+        let f = build_src(
+            "a.md",
+            "# One\n\n```sh name=a\n:\n```\n\n# Two\n\n```sh name=b\n:\n```\n",
+        );
+        let a = f.nodes.iter().find(|n| n.id.slug == "a").unwrap();
+        let b = f.nodes.iter().find(|n| n.id.slug == "b").unwrap();
+        assert_eq!(a.parent.as_ref().unwrap().slug, "one");
+        assert_eq!(b.parent.as_ref().unwrap().slug, "two");
     }
 }

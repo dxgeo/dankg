@@ -3,6 +3,8 @@
 //! Hand-rolled, like everything else. The surface is small enough that a parser
 //! crate would cost more than it saves.
 
+use crate::eval::EvalTarget;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     Json,
@@ -47,6 +49,12 @@ pub enum Command {
     Index { paths: Vec<String>, cache: bool },
     Fmt { paths: Vec<String>, check: bool },
     Tui { paths: Vec<String>, cache: bool, depth: Option<u32>, all: bool },
+    /// `paths` holds exactly one entry for `Block`/`All` -- `deps=` only
+    /// resolves within one file (decision 19) -- but any number for `List`,
+    /// which walks a corpus the way `graph`/`index`/`check` do and has no
+    /// execution to scope.
+    Eval { paths: Vec<String>, target: EvalTarget, yes: bool, no_write: bool, cache: bool },
+    Check { paths: Vec<String>, cache: bool },
     Help,
     Version,
 }
@@ -59,21 +67,34 @@ usage:
   dankg index [<path>]  [--no-cache]
   dankg fmt   <path>... [--check]
   dankg tui   <path>... [--depth N | --all] [--no-cache]
+  dankg eval  <path> [--block <name> | --all] [--yes] [--no-write]
+  dankg eval  [<path>...] --list [--no-cache]
+  dankg check [<path>...] [--no-cache]
   dankg --help
   dankg --version
 
 options:
   --format <fmt>   json (default), html, dot, mermaid
   --depth <n>      hops from the entry to draw; default from [graph] depth
-  --all            draw the whole index, not a view of it
+  --all            draw the whole index (graph/tui), or every named block (eval)
   -o, --output     write to a file instead of stdout
   --no-cache       ignore .dankg/cache/ and write nothing back to it
   --check          report files not in normal form; write nothing
+  --block <name>   the named block eval should run, with its dependencies
+  --list           list every named block instead of running one -- a file
+                   lists just its own, a directory (or several paths, the
+                   default being \".\") walks the whole corpus
+  --yes            skip eval's \"proceed?\" prompt
+  --no-write       run and print output, but do not write results back
 
 `tui` needs a real terminal and draws the same view `graph` would, with the
 selected node's source line handed to `[editor] command` on enter (arrows or
-hjkl to move, tab to reveal a node's hidden neighbours, enter to open, r to
-collapse back to the entry view, q to quit).
+hjkl to move, tab to reveal a node's hidden neighbours, enter to open, e to
+cycle a node's named blocks and enter to run the cycled one in place, p to
+toggle panning the viewport instead of the selection, r to collapse back to
+the entry view, q to quit, ? for a full-screen keybinding reference). The
+letter keys -- everything but the arrows, enter, tab, esc, and `?` -- are
+remappable in `[keys]`.
 
 `graph`, `index`, and `tui` discover the root by walking up for a `.dankg/` directory,
 falling back to the directory the named paths share, and then index every
@@ -96,6 +117,25 @@ is strictly an optimisation: `--no-cache` must produce identical output.
 form does not re-parse to the same document, so a formatter bug cannot quietly
 destroy a note.
 
+`eval` never runs anything automatically: it prints what it would run (a
+named block plus its transitive `deps=`, in order) and asks before running,
+unless `--yes`. A block's language must have a configured `[lang.*] command`
+or nothing runs. Results are written back into the source, hash-tagged;
+`--no-write` prints the captured output instead of writing it. `deps=` only
+resolves within the one named file eval was given, so `--block`/`--all`
+take exactly one path. `--list` shows every named block -- name, language,
+source line, containing heading, and whether its language is configured --
+without running anything, which is how to find a block's name in the first
+place before naming it to `--block`. Unlike `--block`/`--all`, `--list` has
+no execution to scope: naming a file lists just that file's blocks, naming
+a directory (or several paths, or nothing -- defaulting to `.`) walks the
+whole corpus and lists every file's.
+
+`check` is the CI gate: exits non-zero when the corpus has an unresolved
+link or a written eval result whose hash no longer matches its current
+source, dependencies, or configured command. Deliberately separate from
+`graph`, so drafting a half-written note never fails a build.
+
 Diagnostics go to stderr, so stdout stays pipeable.
 ";
 
@@ -113,12 +153,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         "index" => return index(args),
         "fmt" => return fmt(args),
         "tui" => return tui(args),
+        "eval" => return eval(args),
+        "check" => return check(args),
         other if other.starts_with('-') => {
             return Err(format!("unknown option `{other}`"));
         }
         other => {
             return Err(format!(
-                "unknown command `{other}` (expected `graph`, `index`, `fmt`, or `tui`)"
+                "unknown command `{other}` (expected `graph`, `index`, `fmt`, `tui`, `eval`, or `check`)"
             ));
         }
     }
@@ -249,6 +291,86 @@ fn tui<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
         return Err("`--all` and `--depth` ask for different things".to_string());
     }
     Ok(Command::Tui { paths, cache, depth, all })
+}
+
+/// `--block`/`--all` take exactly one path: `deps=` only resolves within
+/// one file (`eval::plan`), so there is no meaning to naming a second.
+/// `--list` explores rather than runs, so it walks a corpus the way
+/// `graph`/`index`/`check` do -- any number of paths, defaulting to `.`.
+fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut block: Option<String> = None;
+    let mut all = false;
+    let mut list = false;
+    let mut yes = false;
+    let mut no_write = false;
+    let mut cache = true;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--block" | "-b" => {
+                block = Some(args.next().ok_or("`--block` needs a value")?);
+            }
+            "--all" | "-a" => all = true,
+            "--list" | "-l" => list = true,
+            "--yes" | "-y" => yes = true,
+            "--no-write" => no_write = true,
+            "--no-cache" => cache = false,
+            "-h" | "--help" => return Ok(Command::Help),
+            other if other.starts_with("--block=") => {
+                block = Some(other["--block=".len()..].to_string());
+            }
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown option `{other}`"));
+            }
+            other => paths.push(other.to_string()),
+        }
+    }
+
+    let target = match (block, all, list) {
+        (Some(name), false, false) => EvalTarget::Block(name),
+        (None, true, false) => EvalTarget::All,
+        (None, false, true) => EvalTarget::List,
+        (None, false, false) => return Err("`eval` needs `--block <name>`, `--all`, or `--list`".to_string()),
+        _ => return Err("`--block`, `--all`, and `--list` ask for different things".to_string()),
+    };
+
+    if matches!(target, EvalTarget::List) {
+        if paths.is_empty() {
+            paths.push(".".to_string());
+        }
+    } else {
+        if paths.is_empty() {
+            return Err("`eval` needs a path".to_string());
+        }
+        if paths.len() > 1 {
+            return Err("`eval` takes exactly one path; `deps=` only resolves within one file".to_string());
+        }
+    }
+    Ok(Command::Eval { paths, target, yes, no_write, cache })
+}
+
+/// `check` takes any number of paths, defaulting to `.` -- the corpus you are
+/// standing in is the common case, same as `index`.
+fn check<I: Iterator<Item = String>>(args: I) -> Result<Command, String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut cache = true;
+
+    for arg in args {
+        match arg.as_str() {
+            "--no-cache" => cache = false,
+            "-h" | "--help" => return Ok(Command::Help),
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown option `{other}`"));
+            }
+            other => paths.push(other.to_string()),
+        }
+    }
+
+    if paths.is_empty() {
+        paths.push(".".to_string());
+    }
+    Ok(Command::Check { paths, cache })
 }
 
 #[cfg(test)]
@@ -392,5 +514,134 @@ mod tests {
         assert!(parse(args(&["tui", "a.md", "--all", "--depth", "1"]))
             .unwrap_err()
             .contains("different things"));
+    }
+
+    #[test]
+    fn eval_collects_a_block_target() {
+        assert_eq!(
+            parse(args(&["eval", "a.md", "--block", "index"])).unwrap(),
+            Command::Eval {
+                paths: vec!["a.md".into()],
+                target: EvalTarget::Block("index".into()),
+                yes: false,
+                no_write: false,
+                cache: true,
+            }
+        );
+        assert_eq!(
+            parse(args(&["eval", "a.md", "--block=index"])).unwrap(),
+            Command::Eval {
+                paths: vec!["a.md".into()],
+                target: EvalTarget::Block("index".into()),
+                yes: false,
+                no_write: false,
+                cache: true,
+            }
+        );
+    }
+
+    #[test]
+    fn eval_collects_all_yes_and_no_write() {
+        assert_eq!(
+            parse(args(&["eval", "a.md", "--all", "--yes", "--no-write"])).unwrap(),
+            Command::Eval {
+                paths: vec!["a.md".into()],
+                target: EvalTarget::All,
+                yes: true,
+                no_write: true,
+                cache: true,
+            }
+        );
+    }
+
+    #[test]
+    fn eval_needs_a_target() {
+        assert!(parse(args(&["eval", "a.md"]))
+            .unwrap_err()
+            .contains("`--block <name>`, `--all`, or `--list`"));
+    }
+
+    #[test]
+    fn eval_list_needs_no_other_target() {
+        assert_eq!(
+            parse(args(&["eval", "a.md", "--list"])).unwrap(),
+            Command::Eval {
+                paths: vec!["a.md".into()],
+                target: EvalTarget::List,
+                yes: false,
+                no_write: false,
+                cache: true,
+            }
+        );
+    }
+
+    #[test]
+    fn eval_list_defaults_to_the_working_directory() {
+        assert_eq!(
+            parse(args(&["eval", "--list"])).unwrap(),
+            Command::Eval { paths: vec![".".into()], target: EvalTarget::List, yes: false, no_write: false, cache: true }
+        );
+    }
+
+    #[test]
+    fn eval_list_accepts_a_directory_or_several_paths() {
+        assert_eq!(
+            parse(args(&["eval", "notes", "--list"])).unwrap(),
+            Command::Eval {
+                paths: vec!["notes".into()],
+                target: EvalTarget::List,
+                yes: false,
+                no_write: false,
+                cache: true,
+            }
+        );
+        assert_eq!(
+            parse(args(&["eval", "a.md", "b.md", "--list", "--no-cache"])).unwrap(),
+            Command::Eval {
+                paths: vec!["a.md".into(), "b.md".into()],
+                target: EvalTarget::List,
+                yes: false,
+                no_write: false,
+                cache: false,
+            }
+        );
+    }
+
+    #[test]
+    fn eval_list_conflicts_with_block_and_all() {
+        assert!(parse(args(&["eval", "a.md", "--list", "--all"]))
+            .unwrap_err()
+            .contains("different things"));
+        assert!(parse(args(&["eval", "a.md", "--list", "--block", "x"]))
+            .unwrap_err()
+            .contains("different things"));
+    }
+
+    #[test]
+    fn eval_block_and_all_conflict() {
+        assert!(parse(args(&["eval", "a.md", "--block", "x", "--all"]))
+            .unwrap_err()
+            .contains("different things"));
+    }
+
+    #[test]
+    fn eval_refuses_more_than_one_path() {
+        assert!(parse(args(&["eval", "a.md", "b.md", "--all"]))
+            .unwrap_err()
+            .contains("exactly one path"));
+    }
+
+    #[test]
+    fn eval_needs_a_path() {
+        assert!(parse(args(&["eval", "--all"])).unwrap_err().contains("needs a path"));
+    }
+
+    #[test]
+    fn check_defaults_to_the_working_directory() {
+        assert_eq!(parse(args(&["check"])).unwrap(), Command::Check { paths: vec![".".into()], cache: true });
+        assert_eq!(
+            parse(args(&["check", "notes", "--no-cache"])).unwrap(),
+            Command::Check { paths: vec!["notes".into()], cache: false }
+        );
     }
 }
