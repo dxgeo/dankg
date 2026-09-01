@@ -1563,6 +1563,26 @@ All three are pinned in `glue/test_glue.py` (46 tests total across the
 three reference scripts), each named for the run that found it rather
 than the mechanism it now guards.
 
+## Self-hosting: the first real module
+
+Every pilot above proved the mechanics on a throwaway crate under
+`literate/`, never on the one `cargo build` actually compiles. `src/hash.md`
+is the first module converted for real: `src/hash.rs` is generated from it
+by `dankg tangle` and then committed alongside it, rather than left
+generated-and-ignored the way `**/.dankg/build/` is everywhere else --
+diverging from that default is deliberate here, since the crate this repo
+ships has to keep building with a plain `cargo build` for anyone who does
+not already have a working `dankg` binary, which no pilot ever had to
+consider. Committing the generated file only stays honest if drift
+between it and its source gets caught: `tests/literate.rs`'s
+`hash_rs_matches_its_literate_source` re-tangles `src/hash.md` into a
+scratch directory on every `cargo test` run and diffs the result against
+the committed `src/hash.rs` byte for byte. `src/hash.md`'s own *Literate
+source* section carries the regenerate command. No `src/`-scoped `glue` is
+configured yet -- `hash.rs` is one flat file with no subdirectory needing
+`mod` declarations, the same reason pilot 1 needed none either; that
+arrives once a second module (one with siblings) converts.
+
 ## Open questions
 
 - Should a named, eval-able block be excludable from tangle specifically

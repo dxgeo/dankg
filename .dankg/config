@@ -6,3 +6,12 @@
 #
 # `[lang.*]`/`[tangle.*]` sections are added here as `src/` modules
 # actually convert; nothing under docs alone needs either yet.
+
+[tangle.rust]
+ext = rs
+# No `glue`/`command` yet: `src/hash.md` (the first real module) is one
+# flat file with no subdirectory to declare `mod` for, and its own
+# regenerate step is manual (src/hash.md, *Literate source*) rather than
+# wired to run `cargo build` on every tangle -- add both once a second
+# module needs the directory-declaring glue `literate/layout-pilot/`
+# already proved.
