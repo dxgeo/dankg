@@ -3,10 +3,11 @@
 Running a block without leaving the graph view reuses everything
 `dankg eval`'s own CLI loop already has. `blocks_in_section` narrows to
 one node's own extent, using the same `plan::top_level_blocks` the
-planner walks. `run` hands off to `eval::session::run_one` (not yet
-converted to its own literate source), the same function the CLI's
-multi-target loop calls, so there is exactly one answer to "what does
-running one block actually do," not a second, TUI-flavored copy of it.
+planner walks. `run` hands off to
+[`eval::session::run_one`](../eval/session.md), the same function the
+CLI's multi-target loop calls, so there is exactly one answer to "what
+does running one block actually do," not a second, TUI-flavored copy
+of it.
 
 ```rust name=module_doc path=tui/eval.rs
 //! Cycling through a selected node's named blocks and running one without

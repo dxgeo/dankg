@@ -1,7 +1,7 @@
 # TUI draw
 
 `Layout` becomes a character grid here. This is a pure function, like
-`tui::input::decode` (not yet converted): no I/O, no terminal, fully
+[`tui::input::decode`](input.md): no I/O, no terminal, fully
 unit-testable without one. Node placement reuses the layout directly,
 but not uniformly. A node's column comes from dividing its pixel `x` by
 `CHAR_WIDTH`. This is sound because `x` and every box width were

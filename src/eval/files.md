@@ -9,7 +9,7 @@ already resolves a written link. Resolution is relative to the
 *declaring* file's own directory. It is refused if the path would climb
 above the root.
 
-`plan.rs` (not yet converted) itself never touches the filesystem. It
+[`plan.rs`](plan.md) itself never touches the filesystem. It
 stays a pure function of an already-built `&[BlockRef]`, the same
 discipline `resolve.rs` already follows for links (architecture.md,
 *Implementation notes*: the boundary check belongs with the code that
