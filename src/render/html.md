@@ -1,11 +1,10 @@
 # Render html
 
 A single self-contained HTML page. One file: the stylesheet and the
-script are inlined from `render::assets` (not yet converted to its own
-literate source), so there is no network request, no build step, and no
-server. Open it from a `file://` URL, mail it to somebody, commit it --
-it is the same page either way, which is the whole point of a static
-output.
+script are inlined from [`render::assets`](assets.md), so there is no
+network request, no build step, and no server. Open it from a `file://`
+URL, mail it to somebody, commit it -- it is the same page either way,
+which is the whole point of a static output.
 
 Rust emits final SVG coordinates; the script does three things and no
 more -- pan and zoom, expand a node's hidden neighbours, and open a
