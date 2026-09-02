@@ -28,10 +28,9 @@ use std::fmt::Write as _;
 ```
 
 A named code block reads as code, not prose, so it gets a distinct tint --
-the same distinction `render::dot` (not yet converted to its own literate
-source) draws with `fillcolor` and `tui/draw.rs` draws with a different
-border glyph, each renderer's own way of drawing the same underlying
-`NodeKind::Block` fact.
+the same distinction [`render::dot`](dot.md) draws with `fillcolor` and
+`tui/draw.rs` draws with a different border glyph, each renderer's own
+way of drawing the same underlying `NodeKind::Block` fact.
 
 ```rust name=render path=render/mermaid.rs
 pub fn render(graph: &Graph, layout: &Layout) -> String {
