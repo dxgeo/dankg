@@ -17,6 +17,9 @@ tool. It depends on nothing else.
 2. Plaintext-driven (no fancy front-end needed)
 3. Agent-compatible
    - Example: any LLM can run it, because it only works with plaintext files
+   - [Agent navigation pilot](agent_tests/pilot.md) tests a sharper version
+     of this claim: does the literate form itself help an LLM navigate,
+     not just run
 4. Compatible with standard markdown
 5. Can evaluate inline code
 6. Can visualize the graph interactively
