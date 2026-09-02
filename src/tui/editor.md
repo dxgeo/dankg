@@ -1,14 +1,15 @@
 # TUI editor
 
-The one place `dankg tui` shells out to something the reader chose rather
-than something this crate drew itself. `[editor] command` (decision 17)
-goes through [`crate::cmd`](../cmd.md) exactly like any other configured
-template; the part specific to this module is the fallback chain when
-nothing is configured, and the fact that it never touches raw-mode
-terminal state on its own -- suspending and resuming that around the
-editor's own full-screen use of the terminal is `app.rs`'s job, since
-opening someone's editor is the one case in this whole crate where another
-program, not `dankg`, owns the screen for a while.
+This is the one place `dankg tui` shells out to something the reader
+chose, rather than something this crate rendered itself. `[editor]
+command` (decision 17) goes through [`crate::cmd`](../cmd.md) exactly
+like any other configured template. What is specific to this module is
+the fallback chain when nothing is configured, and the fact that it
+never touches raw-mode terminal state on its own. Suspending and
+resuming that around the editor's own full-screen use of the terminal
+is `app.rs`'s job, since opening someone's editor is the one case in
+this whole crate where another program, not `dankg`, owns the screen
+for a while.
 
 ```rust name=module_doc path=tui/editor.rs
 //! Hands a node's source location to the reader's editor.
@@ -25,14 +26,15 @@ use std::process::{Command, ExitStatus};
 ```
 
 ```rust name=open path=tui/editor.rs
-/// Spawns the configured `[editor] command` (decision 17) at `file:line`,
-/// inheriting this process's stdio so the editor draws directly to the
-/// terminal, and blocks until it exits. Falls back to `$EDITOR`/`$VISUAL`
-/// when nothing is configured, opening the bare file with no line number --
-/// flag syntax for "open at a line" is not standard across editors the way
-/// `[editor] command`'s explicit `{file}`/`{line}` template lets a reader
-/// state it, so the fallback is a documented gap, not a silent one. `None`
-/// when neither source names an editor.
+/// Spawns the configured `[editor] command` (decision 17) at
+/// `file:line`, inheriting this process's stdio so the editor draws
+/// directly to the terminal, and blocks until it exits. Falls back to
+/// `$EDITOR`/`$VISUAL` when nothing is configured, opening the bare
+/// file with no line number. Flag syntax for "open at a line" is not
+/// standard across editors the way `[editor] command`'s explicit
+/// `{file}`/`{line}` template lets a reader state it, so the fallback
+/// is a documented gap, not a silent one. `None` when neither source
+/// names an editor.
 pub fn open(config: &Config, file: &str, line: u32) -> io::Result<Option<ExitStatus>> {
     let env_editor = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")).ok();
     let Some(argv) = resolve(config.editor(), env_editor.as_deref(), file, line) else {
@@ -44,13 +46,13 @@ pub fn open(config: &Config, file: &str, line: u32) -> io::Result<Option<ExitSta
 ```
 
 `open` itself is the thin, untested wrapper that reads the real
-environment and spawns a real process; every case below is exercised
+environment and spawns a real process. Every case below is exercised
 through `resolve` instead, which takes both inputs as plain arguments.
 
 ```rust name=resolve path=tui/editor.rs
 /// The argv `open` would spawn, given what `config.editor()` and the
-/// environment resolved to. Pure and separately testable from `open`,
-/// which is the thin, untested wrapper that reads the real environment and
+/// environment resolved to. Pure and separately testable from `open`:
+/// the thin, untested wrapper that reads the real environment and
 /// spawns a real process.
 fn resolve(
     configured: Option<&str>,

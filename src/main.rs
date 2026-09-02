@@ -70,8 +70,8 @@ fn main() -> ExitCode {
 }
 
 /// `dankg tangle`: never automatic, the same principle as `eval` (decision
-/// 9), but with no confirm prompt -- tangle does not run the reader's
-/// program, only assembles and optionally builds it.
+/// 9). Unlike `eval`, it has no confirm prompt. Tangle does not run the
+/// reader's program. It only assembles and optionally builds it.
 fn tangle_cmd(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -> Result<(), String> {
     let report = tangle::run(paths, lang, output, cache)?;
     if report.files.is_empty() {
@@ -114,9 +114,9 @@ fn format_files(paths: &[String], check: bool) -> Result<bool, String> {
         let doc = Document::parse(&source, &mut file_diags);
         let formatted = fmt::format(&doc);
 
-        // Verify before writing, always. Round-tripping is the strongest test
-        // this parser has, and a file on disk is not the place to discover a
-        // formatter bug.
+        // Verify before writing, always. Round-tripping is the strongest
+        // test this parser has. A file on disk is not the place to
+        // discover a formatter bug.
         if let Err(why) = fmt::verify(&doc, &formatted) {
             diags.warn_in(path, 1, format!("{why}; left unchanged"));
             diags.absorb(file_diags);
@@ -130,7 +130,8 @@ fn format_files(paths: &[String], check: bool) -> Result<bool, String> {
         }
         changed += 1;
         if check {
-            // The list of files is this command's output, so it goes to stdout.
+            // The list of files is this command's output. This way, it
+            // goes to stdout.
             println!("{path}");
             clean = false;
         } else {
@@ -149,13 +150,14 @@ fn format_files(paths: &[String], check: bool) -> Result<bool, String> {
 }
 
 /// `dankg check [<path>...]`: the CI gate. Unresolved links come from the
-/// same whole-root index `graph`/`index` build; staleness is checked
+/// same whole-root index `graph`/`index` build. Staleness is checked
 /// separately, over one `eval_files::Files` loaded with the *whole* corpus
-/// up front -- unlike `eval` itself (decision 19), `check` already visits
-/// every file for the unresolved-link pass, so there is no "avoid reading
-/// files a target's own chain does not reach" reason to hold back, and
-/// loading everything is what lets a cross-file `deps=` actually resolve
-/// during a staleness recheck regardless of which file is being iterated.
+/// up front. Unlike `eval` itself (decision 19), `check` already visits
+/// every file for the unresolved-link pass. This way, there is no "avoid
+/// reading files a target's own chain does not reach" reason to hold
+/// back. Loading everything is what lets a cross-file `deps=` actually
+/// resolve during a staleness recheck, regardless of which file is being
+/// iterated.
 fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
@@ -179,18 +181,19 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
             let Some((_, stored_hash, _)) = text.lines().next().and_then(result::parse_marker) else { continue };
             checked += 1;
 
-            // By index, not by name: the loop already holds the exact block
-            // it means, so there is no reason to route back through a name
-            // lookup at all. `plan_for_index` gets the *whole* corpus'
-            // blocks so a cross-file `deps=` resolves here exactly as it
-            // would during a real `dankg eval`.
+            // By index, not by name. The loop already holds the exact
+            // block it means. This way, there is no reason to route back
+            // through a name lookup at all. `plan_for_index` gets the
+            // *whole* corpus' blocks. This way, a cross-file `deps=`
+            // resolves here exactly as it would during a real `dankg
+            // eval`.
             let Ok(chain) = plan::plan_for_index(&all_blocks, rel_path, i) else {
                 stale += 1;
                 eprintln!("stale: {rel_path} `{}` (plan changed since this result was written)", b.name);
                 continue;
             };
             // A language dropped from config since the result was written
-            // cannot be re-verified; that is reported by the missing
+            // cannot be re-verified. That is reported by the missing
             // `[lang.*]` section itself, not double-counted as stale here.
             let Some(lang) = eval_run::command_for(&corpus.config, &chain) else { continue };
             if result::expected_hash(&chain, &lang.command) != stored_hash {
@@ -222,8 +225,9 @@ fn graph(
     let corpus = index::load(paths, cache, &mut diags)?;
     let index = resolve::resolve(&corpus.files, &mut diags);
 
-    // JSON is the index, not a view of it: it is the scriptable surface, and a
-    // consumer that asked for the graph should not get a fragment of it.
+    // JSON is the index, not a view of it. It is the scriptable surface.
+    // A consumer that asked for the graph should not get a fragment of
+    // it.
     let view = if format == Format::Json {
         None
     } else {
@@ -249,9 +253,10 @@ fn graph(
         }
         Format::Html => {
             let laid = layout::layout(drawn);
-            // The whole index goes into the page beside the drawn subgraph, so
-            // expanding a node in the browser needs no second run and no
-            // server. `corpus.entries` are already root-relative.
+            // The whole index goes into the page beside the rendered
+            // subgraph. This way, expanding a node in the browser needs no
+            // second run and no server. `corpus.entries` are already
+            // root-relative.
             let page = html::Page { root: &corpus.display, entries: &corpus.entries };
             html::render(drawn, &laid, &index, &page)
         }
@@ -272,7 +277,7 @@ fn graph(
     Ok(())
 }
 
-/// One line each to stderr, so stdout stays a clean pipe.
+/// One line each to stderr. This way, stdout stays a clean pipe.
 fn summarize(corpus: &Corpus, index: &Graph, view: Option<&Graph>, diags: &Diags) {
     let unresolved = index.nodes.iter().filter(|n| !n.resolved).count();
     eprintln!("root: {}", corpus.display);
@@ -298,9 +303,9 @@ fn summarize(corpus: &Corpus, index: &Graph, view: Option<&Graph>, diags: &Diags
 
 /// `dankg index`: what the walk found and what state the cache is in.
 ///
-/// This is the command you run when the graph is not what you expected, so it
-/// answers the two questions that produces -- which root am I in, and which
-/// files did it decide were mine.
+/// This is the command you run when the graph is not what you expected.
+/// It answers the two questions that raises: which root am I in, and
+/// which files did it decide were mine.
 fn index_report(paths: &[String], cache: bool) -> Result<(), String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;

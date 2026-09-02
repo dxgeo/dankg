@@ -1,12 +1,12 @@
 # Graph slug
 
-The anchor half of every link in this codebase: `[text](file.md#slug)`
-only jumps to the right place if the slug DanKG assigns a heading matches
-what GitHub (and every other renderer that already implements this same
-scheme) would assign it, so `slugify` follows that convention exactly
-rather than inventing DanKG's own. `char::to_lowercase`/
-`char::is_alphanumeric` being Unicode-aware in `std` is what keeps this
-lookup-table-free, in keeping with
+This is the anchor half of every link in this codebase. `[text](file.md#slug)`
+only jumps to the right place if the slug DanKG assigns a heading
+matches what GitHub (and every other renderer that already implements
+this same scheme) would assign it. `slugify` therefore follows that
+convention exactly, rather than inventing DanKG's own. `char::to_lowercase`
+and `char::is_alphanumeric` are both Unicode-aware in `std`. That keeps
+this lookup-table-free, in keeping with
 [decision 1](../../architecture.md#decision-1-dependency-policy).
 
 ```rust name=module_doc path=graph/slug.rs
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 ```
 
 ```rust name=slugify path=graph/slug.rs
-/// Slugify one heading title. Not collision-aware on its own -- use
+/// Slugify one heading title. Not collision-aware on its own. Use
 /// [`Slugger`] when processing a whole document.
 pub fn slugify(title: &str) -> String {
     let mut out = String::with_capacity(title.len());

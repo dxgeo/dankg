@@ -3,20 +3,20 @@
 //! The parse cache.
 //!
 //! Strictly an optimisation. Deleting `.dankg/cache/` changes nothing but
-//! runtime, and every failure in this module is a warning at worst -- a cache
+//! runtime. Every failure in this module is a warning at worst. A cache
 //! that can break a build is worse than no cache. `--no-cache` exists so that
 //! claim is testable rather than merely asserted.
 //!
 //! An entry is keyed on `(mtime, len)` and verified by a content hash. The
-//! first pair is a cheap rejection; the hash is what closes the window where a
+//! first pair is a cheap rejection. The hash is what closes the window where a
 //! file is rewritten within one filesystem timestamp tick. The config hash is
 //! stamped in too, because a config change can change what a file means.
 //!
 //! What is stored is the *index* contribution of a file -- its nodes,
 //! containment edges, raw links and aliases -- rather than the markdown AST.
-//! That is exactly what steps 4-6 of the pipeline consume, and it is a far
+//! That is exactly what steps 4-6 of the pipeline consume. It is also a far
 //! smaller thing to write a codec for. `dankg fmt`, which needs the whole AST,
-//! does not use the cache and does not want to: it reads every file it is
+//! does not use the cache and does not want to. It reads every file it is
 //! given anyway.
 
 use super::build::{ParsedFile, RawLink, Target};
@@ -118,8 +118,8 @@ impl Cache {
         let stamp = Stamp { config: self.config_hash, len, mtime, content: content_hash(content) };
         let text = encode(&stamp, file, diags);
         let path = entry_path(&dir, rel);
-        // Write then rename: a half-written entry must never be readable as a
-        // whole one, and two concurrent runs must not interleave.
+        // Write then rename. A half-written entry must never be readable as a
+        // whole one. Two concurrent runs must not interleave.
         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
 
         match fs::write(&tmp, text).and_then(|()| fs::rename(&tmp, &path)) {
@@ -132,7 +132,7 @@ impl Cache {
     }
 
     /// Entries on disk that no longer correspond to a file in the corpus.
-    /// Reported by `dankg index`; never deleted behind the user's back.
+    /// Reported by `dankg index`. Never deleted behind the user's back.
     pub fn orphans(&self, live: &[String]) -> usize {
         let Some(dir) = &self.dir else { return 0 };
         let Ok(entries) = fs::read_dir(dir) else { return 0 };
@@ -412,7 +412,7 @@ fn unescape(value: &str) -> String {
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
             Some('u') => out.push(UNIT),
-            // Unknown escapes are kept verbatim rather than dropped: the
+            // Unknown escapes are kept verbatim rather than dropped. The
             // decoder's job is to round-trip, not to editorialise.
             Some(other) => {
                 out.push('\\');

@@ -96,11 +96,11 @@ pub fn select(graph: &Graph, entries: &[NodeId], depth: u32) -> Graph {
 ```
 
 `select_view` is the entry point both `dankg graph` and the TUI actually
-call -- one answer to "which view," shared rather than each command
-re-deriving it. `default_depth` arrives as a plain argument rather than
-this function reaching into a loaded `Config` itself, so it stays a pure
-function of its inputs and every case below can be driven straight from
-values, with no config file involved.
+call. It gives one answer to "which view," shared rather than each
+command re-deriving it. `default_depth` arrives as a plain argument,
+rather than this function reaching into a loaded `Config` itself, so it
+stays a pure function of its inputs. Every case below can be driven
+straight from values, with no config file involved.
 
 ```rust name=select_view path=graph/view.rs
 /// The subgraph to render: the named entry files' nodes plus `depth` hops, or
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn hops_are_counted_in_both_directions() {
         let g = chain();
-        // `d` links to nothing; everything reaches it. One hop back finds `c`.
+        // `d` links to nothing. Everything reaches it. One hop back finds `c`.
         let selected = select(&g, &[NodeId::new("d", "d")], 1);
         assert_eq!(ids(&selected), vec!["c#c", "d#d"]);
     }

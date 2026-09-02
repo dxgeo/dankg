@@ -2,19 +2,19 @@
 
 //! Raw terminal mode, the alternate screen, and a size query.
 //!
-//! `std` has no termios binding, and decision 1 rules out the `libc` crate
-//! along with every other one, so this talks to the platform C library
-//! directly: `tcgetattr`/`tcsetattr`/`cfmakeraw` for raw mode, `ioctl` with
-//! `TIOCGWINSZ` for size. Both are declared, not linked from a crate --
-//! `std` already pulls in the system libc on macOS and Linux, so no
-//! `Cargo.toml` change is needed to call into it.
+//! `std` has no termios binding, and decision 1 rules out the `libc`
+//! crate along with every other one, so this talks to the platform C
+//! library directly: `tcgetattr`/`tcsetattr`/`cfmakeraw` for raw mode,
+//! `ioctl` with `TIOCGWINSZ` for size. Both are declared, not linked
+//! from a crate. `std` already pulls in the system libc on macOS and
+//! Linux, so no `Cargo.toml` change is needed to call into it.
 //!
 //! `Termios`'s field layout is not portable: macOS/BSD and Linux glibc
 //! disagree on field width and count, so the struct is `cfg`-gated per
 //! platform. `Winsize` and the ioctl request number are also
-//! platform-specific; only macOS has been run against a real terminal so
-//! far; the Linux path is written from the documented struct layout and
-//! constant but is unverified.
+//! platform-specific. Only macOS has been run against a real terminal
+//! so far. The Linux path is written from the documented struct layout
+//! and constant, but is unverified.
 
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
@@ -78,9 +78,9 @@ unsafe extern "C" {
     fn isatty(fd: i32) -> i32;
 }
 
-/// Terminal rows and columns, via `TIOCGWINSZ`. Fails with the OS error
-/// (typically `ENOTTY`) when stdin is not a real terminal -- a pipe or the
-/// non-interactive shell this was developed under, for instance.
+/// Terminal rows and columns, via `TIOCGWINSZ`. Fails with the OS
+/// error (typically `ENOTTY`) when stdin is not a real terminal: a pipe
+/// or the non-interactive shell this was developed under, for instance.
 pub fn size() -> io::Result<(u16, u16)> {
     let mut ws = Winsize::default();
     let rc = unsafe { ioctl(STDIN_FILENO, TIOCGWINSZ, &mut ws) };
@@ -96,10 +96,11 @@ pub fn is_tty() -> bool {
     unsafe { isatty(STDIN_FILENO) == 1 }
 }
 
-/// Raw mode plus the alternate screen, restored on drop -- including on
-/// panic, since `Drop::drop` still runs during unwinding. This is the
-/// guard everything else in the milestone is built inside of: nothing
-/// should touch stdin/stdout in raw mode without one of these alive.
+/// Raw mode plus the alternate screen, restored on drop. This
+/// includes on panic, since `Drop::drop` still runs during unwinding.
+/// This is the guard everything else in the milestone is built inside
+/// of: nothing should touch stdin/stdout in raw mode without one of
+/// these alive.
 pub struct RawMode {
     original: Termios,
 }

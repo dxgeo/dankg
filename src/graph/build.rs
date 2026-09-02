@@ -2,8 +2,8 @@
 
 //! Turning parsed documents into nodes and containment edges.
 //!
-//! Link edges are not resolved here: a link's target may live in a file that
-//! has not been parsed yet, so building records raw targets and
+//! Link edges are not resolved here. A link's target may live in a file that
+//! has not been parsed yet, so building records raw targets.
 //! [`super::resolve`] turns them into edges once the whole corpus is known.
 
 use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
@@ -11,10 +11,10 @@ use super::slug::Slugger;
 use crate::md::{Block, Document, Inline};
 
 /// Every real heading level is 1..=6 (0 is reserved for the synthetic
-/// file-level node); a block node's `level` only has to stay above all of
-/// them so `set_extents` -- which still scans past a block node to find a
-/// heading's *next* sibling-or-higher heading -- never mistakes one for
-/// it. It carries no meaning beyond that.
+/// file-level node). A block node's `level` only has to stay above all of
+/// them, so `set_extents` never mistakes a block for a heading's own next
+/// sibling-or-higher heading while it scans past one on its way to the
+/// real answer. It carries no meaning beyond that.
 const BLOCK_LEVEL: u8 = 7;
 
 /// A link as written, before its target is known to exist.
@@ -106,7 +106,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                     kind: NodeKind::Heading,
                 });
 
-                // A link written in a heading is still a link, and a heading is
+                // A link written in a heading is still a link. A heading is
                 // always one line, so no cursor is needed.
                 let mut cursor = *line;
                 collect_links(inlines, &id, &mut cursor, links, nodes);
@@ -131,10 +131,10 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                 let mut cursor = *line;
                 collect_links(inlines, &owner, &mut cursor, links, nodes);
             }
-            // Scoped to top-level, named blocks only -- exactly
+            // Scoped to top-level, named blocks only. This exactly matches
             // `eval::plan::top_level_blocks`'s definition (decision 19), so
-            // a node here and a block `dankg eval` can run are always the
-            // same set. A block never becomes `current`: nothing nests
+            // a node here and a block `dankg eval` can evaluate are always
+            // the same set. A block never becomes `current`. Nothing nests
             // inside one, so later content keeps attaching to whichever
             // heading was already open.
             Block::Code { info, line, end_line, .. } if top_level => {
@@ -229,13 +229,13 @@ fn file_node(
 
 /// A heading owns every line up to the next heading of the same or higher
 /// level.
-/// Heading nodes only: a block's `end_line` already came straight from the
+/// Heading nodes only. A block's `end_line` already came straight from the
 /// parser (`Block::Code::end_line`) and must not be recomputed here, since
 /// this function's "next node at or above my level" formula assumes
 /// siblings-and-ancestors, not a leaf. `BLOCK_LEVEL` already keeps a block
 /// from ever being mistaken for a heading's own next-sibling while
-/// searching past it, so it is left in the scan on that side, just never
-/// assigned to on the left.
+/// searching past it, so it stays in the scan on that side. It is just
+/// never assigned to on the left.
 fn set_extents(nodes: &mut [Node], line_count: u32) {
     for i in 0..nodes.len() {
         if nodes[i].kind != NodeKind::Heading {
@@ -252,9 +252,9 @@ fn set_extents(nodes: &mut [Node], line_count: u32) {
 }
 
 /// Every block in document order, paired with whether it sits at the top
-/// level (`doc.blocks` itself) rather than inside a list item -- code
+/// level (`doc.blocks` itself) rather than inside a list item. Code
 /// blocks only become nodes at the top level (decision 19's scope, see
-/// `visit`'s `Block::Code` arm); headings and paragraphs still recurse
+/// `visit`'s `Block::Code` arm). Headings and paragraphs still recurse
 /// into lists regardless, unchanged from before this distinction existed.
 fn flatten(blocks: &[Block]) -> Vec<(&Block, bool)> {
     let mut out = Vec::new();
@@ -488,8 +488,9 @@ mod tests {
 
     #[test]
     fn a_block_nested_in_a_list_is_not_a_node() {
-        // Matches eval::plan's own scope (decision 19): a block only
-        // becomes a node -- and only eval can run it -- at the top level.
+        // Matches eval::plan's own scope (decision 19). A block only
+        // becomes a node at the top level, and only eval can evaluate it
+        // there.
         let f = build_src("a.md", "# One\n\n- ```sh name=hidden\n  echo hi\n  ```\n");
         assert!(f.nodes.iter().all(|n| n.id.slug != "hidden"));
     }
@@ -505,8 +506,8 @@ mod tests {
     #[test]
     fn a_blocks_own_end_line_is_not_recomputed_as_a_heading_extent_would_be() {
         // "One" would otherwise look like it ends right before "setup" if
-        // set_extents mistook the block for a next-sibling-or-higher node;
-        // it must run to "Two" instead, and the block must keep its own
+        // set_extents mistook the block for a next-sibling-or-higher node.
+        // It must run to "Two" instead. The block must keep its own
         // fence-derived end_line untouched.
         let f = build_src("a.md", "# One\n\n```sh name=setup\nline2\nline3\n```\n\n# Two\n");
         let one = f.nodes.iter().find(|n| n.id.slug == "one").unwrap();

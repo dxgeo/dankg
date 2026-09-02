@@ -4,21 +4,21 @@
 //!
 //! Steps 1-6 of the pipeline build the index and never depend on the entry.
 //! This is step 7, the first thing that does. The index is always the whole
-//! root, because backlinks are only honest when every file has been seen; the
-//! view is what a reader can actually take in.
+//! root, because backlinks are only honest when every file has been seen.
+//! The view is what a reader can actually take in.
 //!
 //! Hops are counted in both directions. A link that points at the entry is as
-//! much a neighbour as one the entry points at -- that is the whole reason the
+//! much a neighbour as one the entry points at. That is the whole reason the
 //! index is built over the corpus rather than over the file. Containment
-//! counts too, which is the open question in architecture.md: it can make
-//! depth 2 feel shallow in a deeply nested file, and `--all` is the answer
+//! counts too. This is the open question in architecture.md. It can make
+//! depth 2 feel shallow in a deeply nested file. `--all` is the answer
 //! until something better is decided.
 
 use super::build::strip_extension;
 use super::model::{Graph, NodeId};
 
 /// Every node belonging to one of the named files. A file names all of its
-/// headings, not just the first: "graph this file and what it touches" is the
+/// headings, not just the first. "graph this file and what it touches" is the
 /// question being asked.
 pub fn entry_nodes(graph: &Graph, files: &[String]) -> Vec<NodeId> {
     let keys: Vec<String> = files.iter().map(|f| strip_extension(f)).collect();
@@ -32,9 +32,9 @@ pub fn entry_nodes(graph: &Graph, files: &[String]) -> Vec<NodeId> {
 
 /// The subgraph induced by the entry and everything within `depth` hops.
 ///
-/// Induced, not spanning: an edge between two nodes that both made it in is
+/// Induced, not spanning. An edge between two nodes that both made it in is
 /// kept even when it was not the edge that brought either of them there.
-/// Dropping it would draw a graph that is missing structure it can see.
+/// Dropping it would render a graph that is missing structure it can see.
 pub fn select(graph: &Graph, entries: &[NodeId], depth: u32) -> Graph {
     let mut frontier: Vec<NodeId> = Vec::new();
     let mut chosen: Vec<NodeId> = Vec::new();
@@ -73,15 +73,15 @@ pub fn select(graph: &Graph, entries: &[NodeId], depth: u32) -> Graph {
     }
 }
 
-/// The subgraph to draw: the named entry files' nodes plus `depth` hops, or
-/// the whole index under `all` (or when there is no entry -- a bare
-/// directory was named, and the only sensible reading of "graph this
-/// corpus" is all of it). Shared by `dankg graph` and the TUI (milestone 7),
-/// since both need the same answer to "which view."
+/// The subgraph to render: the named entry files' nodes plus `depth` hops, or
+/// the whole index under `all`. Also the whole index when there is no entry,
+/// because a bare directory was named and the only sensible reading of
+/// "graph this corpus" is all of it. Shared by `dankg graph` and the TUI
+/// (milestone 7), since both need the same answer to "which view."
 ///
 /// `default_depth` is the caller's job to resolve (typically `[graph]
-/// depth` off the loaded config) so this stays a pure function of its
-/// arguments rather than reaching into a `Corpus` or raising diagnostics
+/// depth` off the loaded config), so this stays a pure function of its
+/// arguments. It does not reach into a `Corpus` or raise diagnostics
 /// itself.
 pub fn select_view(index: &Graph, entry_files: &[String], depth: Option<u32>, all: bool, default_depth: u32) -> Graph {
     if all || entry_files.is_empty() {
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn hops_are_counted_in_both_directions() {
         let g = chain();
-        // `d` links to nothing; everything reaches it. One hop back finds `c`.
+        // `d` links to nothing. Everything reaches it. One hop back finds `c`.
         let selected = select(&g, &[NodeId::new("d", "d")], 1);
         assert_eq!(ids(&selected), vec!["c#c", "d#d"]);
     }

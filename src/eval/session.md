@@ -1,20 +1,21 @@
 # Eval session
 
 The interactive `dankg eval` flow: print the plan, confirm, run, write
-back. Lives in the library crate rather than `main.rs`, unlike `graph`/
-`fmt`'s own orchestration -- `run_one`, running one already-named block
-end to end, is shared with `tui::eval`'s in-grid cycle-and-run, and the
-TUI cannot depend on the `main` binary the other way around. This module
-is the one place that sequence is implemented at all, so the CLI's own
-multi-target loop and the TUI's single-block cycle agree by construction
-about what "run this block" means.
+back. It lives in the library crate rather than `main.rs`, unlike
+`graph`/`fmt`'s own orchestration. `run_one`, running one already-named
+block end to end, is shared with `tui::eval`'s in-grid cycle-and-run,
+and the TUI cannot depend on the `main` binary the other way around.
+This module is the one place that sequence is implemented at all, so
+the CLI's own multi-target loop and the TUI's single-block cycle agree
+by construction about what "run this block" means.
 
 ```rust name=module_doc path=eval/session.rs
 //! The interactive `dankg eval` flow: print the plan, confirm, run, write
-//! back. Lives in the library (not `main.rs`, unlike `graph`/`fmt`'s own
-//! orchestration) because `run_one` -- running one already-named block end
-//! to end -- is shared with `tui::eval`'s in-grid cycle-and-run, and the TUI
-//! cannot depend on the `main` binary the other way around.
+//! back. It lives in the library, not `main.rs` (unlike `graph`/`fmt`'s
+//! own orchestration), because `run_one` -- running one already-named
+//! block end to end -- is shared with `tui::eval`'s in-grid
+//! cycle-and-run. The TUI cannot depend on the `main` binary the other
+//! way around.
 
 use super::files::Files;
 use super::plan::{self, BlockRef};
@@ -44,9 +45,9 @@ pub enum EvalTarget {
     List,
 }
 
-/// What one call to [`run_one`] produced. Presentation -- printing to
-/// stderr, showing a status line, deciding an exit code -- is entirely the
-/// caller's job; this is just the data.
+/// What one call to [`run_one`] produced. Presentation (printing to
+/// stderr, showing a status line, deciding an exit code) is entirely
+/// the caller's job. This is just the data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunSummary {
     pub stdout: String,
@@ -56,11 +57,12 @@ pub struct RunSummary {
 }
 
 /// `dankg eval <path> [--block NAME | --all | --list] [--yes] [--no-write]`.
-/// `--list` walks whatever was named as a corpus (`list`, below); the other
-/// two targets need exactly one path in `paths` (the CLI guarantees this)
-/// and run through `run_single`, reading and re-parsing just that file --
-/// not the whole corpus the way `graph`/`index`/`tui` do -- since `deps=`
-/// only resolves within one file (decision 19).
+/// `--list` walks whatever was named as a corpus (`list`, below). The
+/// other two targets need exactly one path in `paths` (the CLI
+/// guarantees this) and run through `run_single`, reading and
+/// re-parsing just that file. This is not the whole corpus the way
+/// `graph`/`index`/`tui` do, since `deps=` only resolves within one
+/// file (decision 19).
 pub fn run(paths: &[String], target: &EvalTarget, yes: bool, no_write: bool, cache: bool) -> Result<(), String> {
     if matches!(target, EvalTarget::List) {
         return list(paths, cache);
@@ -69,15 +71,15 @@ pub fn run(paths: &[String], target: &EvalTarget, yes: bool, no_write: bool, cac
     run_single(path, target, yes, no_write)
 }
 
-/// The root and `path`'s own root-relative form -- what `Files` keys
-/// everything on and what a block's `deps=` resolves cross-file references
-/// relative to (the same root-relative shape a written link already
-/// resolves against). Falls back to `path` itself, unchanged, when it
-/// cannot be expressed relative to the discovered root at all; a
-/// cross-file `deps=` would then simply fail to resolve anything, exactly
-/// as if it had named a file that does not exist -- no worse than today's
-/// behaviour, since nothing before this feature ever needed `path` in
-/// root-relative form.
+/// The root and `path`'s own root-relative form. This is what `Files`
+/// keys everything on and what a block's `deps=` resolves cross-file
+/// references relative to (the same root-relative shape a written link
+/// already resolves against). Falls back to `path` itself, unchanged,
+/// when it cannot be expressed relative to the discovered root at all.
+/// A cross-file `deps=` would then simply fail to resolve anything,
+/// exactly as if it had named a file that does not exist. This is no
+/// worse than today's behaviour, since nothing before this feature ever
+/// needed `path` in root-relative form.
 fn locate(path: &str) -> (PathBuf, String) {
     let abs = index::absolute(Path::new(path));
     let root = index::discover_root(&abs)
@@ -87,16 +89,16 @@ fn locate(path: &str) -> (PathBuf, String) {
 }
 ```
 
-`run_single` never partially acts on a plan: every chain's interpreter is
-resolved up front, and if even one target's language turns out to be
-unconfigured, nothing runs at all rather than running everything except
-that one -- the plan the reader confirmed is exactly what happens, or
-nothing does. Targets are identified by *position* among the entry file's
-own named top-level blocks, never by name -- decision 22 scoped name
-uniqueness to a heading, so two different targets in the same loop can
-legally share a literal name, and that position stays valid across every
-write-back in the loop since a result marker is never itself a named
-block.
+`run_single` never partially acts on a plan. Every chain's interpreter
+is resolved up front, and if even one target's language turns out to
+be unconfigured, nothing runs at all, rather than running everything
+except that one. The plan the reader confirmed is exactly what
+happens, or nothing does. Targets are identified by *position* among
+the entry file's own named top-level blocks, never by name. Decision 22
+scoped name uniqueness to a heading, so two different targets in the
+same loop can legally share a literal name. That position stays valid
+across every write-back in the loop, since a result marker is never
+itself a named block.
 
 ```rust name=run_single path=eval/session.rs
 fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Result<(), String> {
@@ -125,10 +127,10 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Res
     }
 
     // The plan is always printed before anything runs (decision 9), and
-    // every chain's interpreter is resolved up front too: eval either runs
-    // everything it printed or, on any block with no configured language,
-    // runs nothing at all rather than partially acting on a plan the reader
-    // already approved.
+    // every chain's interpreter is resolved up front too. Eval either
+    // runs everything it printed or, on any block with no configured
+    // language, runs nothing at all, rather than partially acting on a
+    // plan the reader already approved.
     let mut commands = Vec::with_capacity(chains.len());
     for chain in &chains {
         let target_name = chain.last().expect("plan_for/plan_all never return an empty chain").name;
@@ -157,26 +159,27 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Res
     }
 
     // `run_one` re-reads `path` from disk on every call and writes its
-    // result back before returning, so an earlier target's write-back --
-    // which can grow or shrink the file, shifting every line number below
-    // it -- is already reflected by the time the next target's own plan is
-    // rebuilt. No in-memory copy of the source needs to be threaded through
-    // this loop for that to be correct.
+    // result back before returning. An earlier target's write-back can
+    // grow or shrink the file, shifting every line number below it. That
+    // shift is already reflected by the time the next target's own plan
+    // is rebuilt, so no in-memory copy of the source needs to be threaded
+    // through this loop for that to be correct.
     //
     // Targets are identified by their position among *`entry_file`'s own*
-    // named top-level blocks, in document order, not by name: decision 22
-    // scoped name uniqueness to a heading, so two different targets in this
-    // very loop can share a literal name, and `run_one` re-resolving by
-    // name alone could not tell them apart, or could even run the wrong
-    // one. That position stays valid across every write-back in this loop,
-    // since a result marker is never itself a named block and so never
-    // changes how many named top-level blocks exist or their relative
-    // order -- only their line numbers, which `run_one` re-derives fresh
-    // from each re-parse anyway. A target is always one of `entry_file`'s
-    // own blocks (`plan_for`/`plan_all`/`plan_each` all scope target
-    // selection to it), never a cross-file dependency pulled into its
-    // chain, so filtering to `entry_file` before counting position is
-    // exactly `plan_for_index`'s own contract.
+    // named top-level blocks, in document order, not by name. Decision 22
+    // scoped name uniqueness to a heading, so two different targets in
+    // this very loop can share a literal name, and `run_one` re-resolving
+    // by name alone could not tell them apart, or could even run the
+    // wrong one. That position stays valid across every write-back in
+    // this loop, since a result marker is never itself a named block, so
+    // it never changes how many named top-level blocks exist or their
+    // relative order. Only their line numbers change, and `run_one`
+    // re-derives those fresh from each re-parse anyway. A target is
+    // always one of `entry_file`'s own blocks (`plan_for`/`plan_all`/
+    // `plan_each` all scope target selection to it), never a cross-file
+    // dependency pulled into its chain. Filtering to `entry_file` before
+    // counting position is therefore exactly `plan_for_index`'s own
+    // contract.
     let targets: Vec<(usize, String)> = chains
         .iter()
         .map(|c| {
@@ -216,23 +219,23 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Res
 }
 ```
 
-`--list` is the one target that runs nothing, which is exactly why it
-alone is allowed to cover more than a single file -- `--block`/`--all`/
-`--each` stay scoped to one file because `deps=` only ever resolves within
-it (decision 19), but listing has no such reason to hold back, so a named
-directory walks the whole corpus the same way `graph`/`index`/`check`
-already do.
+`--list` is the one target that runs nothing. This is exactly why it
+alone is allowed to cover more than a single file. `--block`/`--all`/
+`--each` stay scoped to one file because `deps=` only ever resolves
+within it (decision 19). Listing has no such reason to hold back, so a
+named directory walks the whole corpus the same way `graph`/`index`/
+`check` already do.
 
 ```rust name=list_and_corpus_text path=eval/session.rs
-/// `dankg eval <path>... --list`: lists every top-level named block found
-/// under whatever was named. A single named file lists just its own
-/// blocks; a directory (or several paths) walks the whole corpus the way
-/// `graph`/`index`/`check` already do (decision 6) and lists every file's,
-/// each block's line still prefixed by its own file so multiple files stay
-/// distinguishable. Unlike `--block`/`--all`, which are scoped to exactly
-/// one file because `deps=` only resolves within one (decision 19),
-/// listing runs nothing, so nothing stops it from covering everything the
-/// reader named.
+/// `dankg eval <path>... --list`: lists every top-level named block
+/// found under whatever was named. A single named file lists just its
+/// own blocks. A directory (or several paths) walks the whole corpus
+/// the way `graph`/`index`/`check` already do (decision 6) and lists
+/// every file's own blocks, each block's line still prefixed by its own
+/// file so multiple files stay distinguishable. `--block`/`--all` are
+/// scoped to exactly one file, because `deps=` only resolves within one
+/// (decision 19). Listing runs nothing, so nothing stops it from
+/// covering everything the reader named.
 fn list(paths: &[String], cache: bool) -> Result<(), String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
@@ -250,9 +253,10 @@ fn list(paths: &[String], cache: bool) -> Result<(), String> {
 /// all, so `list` can tell "found nothing" from "found it, it was empty"
 /// without the caller re-deriving that from an empty string.
 fn list_corpus_text(paths: &[String], corpus: &Corpus) -> Option<String> {
-    // A directory names a corpus, not a file, so the only sensible reading
-    // of "list here" is everything under it -- the same call `graph`/`tui`
-    // make for a named directory (architecture.md, View Selection).
+    // A directory names a corpus, not a file, so the only sensible
+    // reading of "list here" is everything under it. This is the same
+    // call `graph`/`tui` make for a named directory (architecture.md,
+    // View Selection).
     let only_files = paths.iter().all(|p| !Path::new(p).is_dir());
     let targets: &[String] = if only_files { &corpus.entries } else { &corpus.paths };
 
@@ -275,14 +279,15 @@ fn list_corpus_text(paths: &[String], corpus: &Corpus) -> Option<String> {
 ```
 
 ```rust name=list_blocks path=eval/session.rs
-/// `dankg eval <path> --list`: every top-level named block, its language,
-/// where it lives, whether that language is configured to run at all, and
-/// which heading it falls under -- the nearest heading at or above the
-/// block's own line, since a block's containing node is exactly the range
-/// `graph/build.rs` already computes a heading's own extent to be, and this
-/// is a cheap, self-contained approximation of the same thing without
-/// needing the whole graph pipeline (root discovery, the corpus walk) just
-/// to answer "what can I run here."
+/// `dankg eval <path> --list`: every top-level named block, its
+/// language, where it lives, whether that language is configured to run
+/// at all, and which heading it falls under. This is the nearest
+/// heading at or above the block's own line, since a block's containing
+/// node is exactly the range `graph/build.rs` already computes a
+/// heading's own extent to be. It is a cheap, self-contained
+/// approximation of the same thing, without needing the whole graph
+/// pipeline (root discovery, the corpus walk) just to answer "what can
+/// I run here."
 fn list_blocks(path: &str, blocks: &[BlockRef], doc: &Document, config: &Config) -> String {
     let mut out = String::new();
     if blocks.is_empty() {
@@ -306,35 +311,36 @@ fn list_blocks(path: &str, blocks: &[BlockRef], doc: &Document, config: &Config)
 }
 ```
 
-`run_one` identifies its target purely by *position*, never by name, for
-the same reason `run_single`'s own loop does above: decision 22 scoped
-name uniqueness to a heading, so a caller re-resolving by name alone could
-not always tell two same-named blocks apart, or worse, could silently run
-the wrong one. The caller already knows exactly which block it means --
-the one it just cycled to in the TUI, or just planned in the CLI loop --
-and that identity should not have to survive a round trip through a
-string that might not be unique.
+`run_one` identifies its target purely by *position*, never by name,
+for the same reason `run_single`'s own loop does above. Decision 22
+scoped name uniqueness to a heading, so a caller re-resolving by name
+alone could not always tell two same-named blocks apart, or worse,
+could silently run the wrong one. The caller already knows exactly
+which block it means: the one it just cycled to in the TUI, or just
+planned in the CLI loop. That identity should not have to survive a
+round trip through a string that might not be unique.
 
 ```rust name=run_one path=eval/session.rs
-/// Runs `position` -- an index into `path`'s named top-level blocks, in
-/// document order, *not* a name -- end to end: rebuilds its plan, resolves
+/// Runs `position` (an index into `path`'s named top-level blocks, in
+/// document order, *not* a name) end to end: rebuilds its plan, resolves
 /// its language, spawns its whole chain once, and (unless `no_write`)
-/// writes the result back into `path`. The one place this sequence is
-/// implemented, so `run`'s own multi-target loop and `tui::eval`'s
-/// single-block cycle-and-run agree by construction about what "run this
-/// block" means.
+/// writes the result back into `path`. This is the one place this
+/// sequence is implemented, so `run`'s own multi-target loop and
+/// `tui::eval`'s single-block cycle-and-run agree by construction about
+/// what "run this block" means.
 ///
-/// By position rather than by name because decision 22 scoped name
-/// uniqueness to a heading: two different blocks in the same file can
-/// legally share a literal name, and re-resolving one by name alone, from
-/// no heading of its own to search from, is exactly `plan_for`'s
-/// `AmbiguousTarget` case -- the caller already knows which block it means
-/// (the one it just cycled to, or just planned), and that identity should
-/// not have to survive a round trip through a string that might not be
-/// unique. The position stays valid across repeated calls against the same
-/// file even as earlier calls write results back, because a result marker
-/// is never itself a named block and so never changes how many named
-/// top-level blocks exist or their relative order.
+/// It uses position rather than name because decision 22 scoped name
+/// uniqueness to a heading. Two different blocks in the same file can
+/// legally share a literal name, and re-resolving one by name alone,
+/// from no heading of its own to search from, is exactly `plan_for`'s
+/// `AmbiguousTarget` case. The caller already knows which block it
+/// means (the one it just cycled to, or just planned), and that
+/// identity should not have to survive a round trip through a string
+/// that might not be unique. The position stays valid across repeated
+/// calls against the same file, even as earlier calls write results
+/// back, because a result marker is never itself a named block, so it
+/// never changes how many named top-level blocks exist or their
+/// relative order.
 pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> Result<RunSummary, String> {
     let (root, entry_file) = locate(path);
     let mut diags = Diags::new("dankg");
@@ -387,8 +393,8 @@ mod tests {
         path
     }
 
-    /// A fresh, isolated directory per call (a counter, not just the pid):
-    /// `list_corpus_text` walks the whole directory it is given, and two
+    /// A fresh, isolated directory per call (a counter, not just the pid).
+    /// `list_corpus_text` walks the whole directory it is given, so two
     /// tests sharing one scratch directory would see each other's files.
     fn scratch_dir(files: &[(&str, &str)]) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};

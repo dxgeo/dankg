@@ -2,21 +2,22 @@
 
 //! The formatter: AST back to markdown, in normal form.
 //!
-//! `dankg fmt` exists so that a knowledge base stays diffable and a graph never
-//! changes because someone indented a list differently. That makes losslessness
-//! the whole problem: this is a pure function of the AST, so anything the AST
-//! does not record cannot be reproduced. Two rules follow.
+//! `dankg fmt` exists so that a knowledge base stays diffable. It also
+//! exists so a graph never changes because someone indented a list
+//! differently. That makes losslessness the whole problem. This is a pure
+//! function of the AST. Anything the AST does not record cannot be
+//! reproduced. Two rules follow.
 //!
-//! Constructs outside the subset are re-emitted byte for byte -- `Passthrough`
-//! blocks and the frontmatter block both. The formatter never rewrites a
-//! construct it does not model.
+//! Constructs outside the subset are re-emitted byte for byte:
+//! `Passthrough` blocks and the frontmatter block both. The formatter never
+//! rewrites a construct it does not model.
 //!
-//! Text is escaped on the way out, not merely copied. A `Text` node holds the
-//! character the author meant, not the bytes they typed, so anything that would
-//! be re-read as markup has to be escaped back. `escape` therefore mirrors the
-//! parser's own decisions -- `can_open_close` is shared with `inline.rs` rather
-//! than reimplemented, because an escaper that disagrees with the parser about
-//! flanking silently mangles emphasis.
+//! Text is escaped on the way out, not merely copied. A `Text` node holds
+//! the character the author meant, not the bytes they typed. Anything that
+//! would be re-read as markup has to be escaped back. `escape` therefore
+//! mirrors the parser's own decisions. `can_open_close` is shared with
+//! `inline.rs` rather than reimplemented, because an escaper that disagrees
+//! with the parser about flanking silently mangles emphasis.
 
 use super::{Block, Document, Inline, InfoString, List, KNOWN_ATTRS};
 use crate::diag::Diags;
@@ -38,9 +39,9 @@ pub fn format(doc: &Document) -> String {
 
 /// Check that formatting changed the text of the document but not its meaning.
 ///
-/// Round-tripping is the strongest test this parser has, so the formatter runs
+/// Round-tripping is the strongest test this parser has. The formatter runs
 /// it on every file it is about to rewrite rather than trusting the suite. A
-/// failure here is a formatter or parser bug, and the caller must not write.
+/// failure here is a formatter or parser bug. The caller must not write.
 pub fn verify(original: &Document, formatted: &str) -> Result<(), String> {
     let mut scratch = Diags::new("<formatted>");
     let reparsed = Document::parse(formatted, &mut scratch);
@@ -58,7 +59,7 @@ pub fn verify(original: &Document, formatted: &str) -> Result<(), String> {
 /// A copy with every source line number zeroed.
 ///
 /// Line numbers are the one part of the AST that formatting is *expected* to
-/// change, so they have to come out before two documents can be compared.
+/// change. They have to come out before two documents can be compared.
 pub fn without_lines(doc: &Document) -> Document {
     Document {
         frontmatter: doc.frontmatter.clone(),
@@ -96,8 +97,8 @@ fn strip_block(b: &Block) -> Block {
     }
 }
 
-/// Blocks in sequence. Every block's text ends in exactly one newline, so the
-/// only decision here is whether a blank line goes between them -- which is
+/// Blocks in sequence. Every block's text ends in exactly one newline. The
+/// only decision here is whether a blank line goes between them. This is
 /// also the difference between a tight and a loose list item.
 fn blocks(list: &[Block], blank_between: bool) -> String {
     let mut out = String::new();
@@ -117,7 +118,7 @@ fn block(b: &Block) -> String {
         Block::Code { info, text, fence, .. } => code(info, text, *fence),
         Block::List(l) => list(l),
         // `---` would be read back as frontmatter at the top of a file and as a
-        // bullet inside a list item; `***` is a thematic break everywhere.
+        // bullet inside a list item. `***` is a thematic break everywhere.
         Block::ThematicBreak { .. } => "***\n".to_string(),
         Block::Passthrough { text, .. } => format!("{text}\n"),
     }
@@ -129,8 +130,8 @@ fn heading(level: u8, inlines: &[Inline]) -> String {
     if text.is_empty() {
         return format!("{hashes}\n");
     }
-    // A trailing run of hashes is a closing sequence, so the run has to be
-    // escaped or the heading loses its last word.
+    // A trailing run of hashes is a closing sequence. The run has to be
+    // escaped. Otherwise the heading loses its last word.
     let mut text = text;
     if text.ends_with('#') {
         let run = text.len() - text.trim_end_matches('#').len();
@@ -157,8 +158,8 @@ fn code(info: &InfoString, text: &str, fence: char) -> String {
 
 /// Canonical info string: language, then known attributes in the order
 /// `KNOWN_ATTRS` declares them, then anything the parser did not recognise, in
-/// the order it was written. Unknown words are ignored everywhere else, but
-/// deleting them would make `fmt` lossy.
+/// the order it was written. Unknown words are ignored everywhere else.
+/// Deleting them would make `fmt` lossy.
 fn info_text(info: &InfoString) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(lang) = &info.lang {
@@ -244,8 +245,8 @@ struct Writer {
 }
 
 impl Writer {
-    /// `after` is the character that will follow the last inline -- a closing
-    /// emphasis delimiter, say. Flanking is decided by neighbours, so the last
+    /// `after` is the character that will follow the last inline, a closing
+    /// emphasis delimiter, say. Flanking is decided by neighbours. The last
     /// child has to know what its parent is about to write.
     fn run(&mut self, inlines: &[Inline], after: char) {
         for (i, item) in inlines.iter().enumerate() {
@@ -308,8 +309,8 @@ impl Writer {
             let before = if i == 0 { self.prev } else { chars[i - 1] };
             let after = chars.get(i + 1).copied().unwrap_or(next);
             match c {
-                // `]` matters even though a bare one is inert: a real link
-                // writes an unescaped `[`, and a stray `]` in its text would
+                // `]` matters even though a bare one is inert. A real link
+                // writes an unescaped `[`. A stray `]` in its text would
                 // close it early.
                 '\\' | '`' | '[' | ']' => self.out.push('\\'),
                 '*' | '_' => {
@@ -433,9 +434,9 @@ fn longest_run(s: &str, ch: char) -> usize {
     best
 }
 
-/// A link destination. Whitespace forces the `<...>` form, which is the only
-/// way to write it; otherwise parentheses and backslashes are escaped so that
-/// the destination cannot end early.
+/// A link destination. Whitespace forces the `<...>` form. This is the
+/// only way to write it. Otherwise parentheses and backslashes are
+/// escaped. This way, the destination cannot end early.
 fn destination(dest: &str) -> String {
     if dest.is_empty() || dest.chars().any(|c| c.is_ascii_whitespace()) {
         let mut s = String::from("<");

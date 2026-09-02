@@ -3,9 +3,9 @@
 //! The graph itself.
 //!
 //! Edges are stored directed. `reciprocated` is computed once the whole corpus
-//! is known: when `a -> b` and `b -> a` both exist, both are marked, and the
-//! renderer draws one undirected edge instead of two arrows. That is the
-//! mechanism behind "the link goes both ways, but displays as unidirectional
+//! is known. When `a -> b` and `b -> a` both exist, both are marked. The
+//! renderer renders one undirected edge instead of two arrows. That is the
+//! mechanism behind "the link goes both ways, but renders as unidirectional
 //! unless it is linked back".
 
 use std::fmt;
@@ -47,11 +47,12 @@ impl EdgeKind {
     }
 }
 
-/// What a node stands for. A heading is a section of prose; a block is a
+/// What a node stands for. A heading is a section of prose. A block is a
 /// named, top-level, evaluable code block (decision 19's exact scope --
 /// the same one `eval::plan` and `dankg eval --list` use, so "this is a
-/// node you can navigate to" and "this is a node `dankg eval` can run"
-/// never disagree). A block is always a leaf: nothing nests inside one.
+/// node you can navigate to" and "this is a node `dankg eval` can
+/// evaluate" never disagree). A block is always a leaf. Nothing nests
+/// inside one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Heading,
@@ -100,7 +101,7 @@ pub struct Node {
     /// Absolute URLs referenced from this node. Recorded, never graphed.
     pub external: Vec<String>,
     /// False for placeholder nodes invented to receive a dangling link.
-    /// Always true for a block node -- nothing ever links to one by name
+    /// Always true for a block node. Nothing ever links to one by name
     /// today, so there is nothing for it to be unresolved against.
     pub resolved: bool,
     pub kind: NodeKind,
@@ -134,8 +135,8 @@ impl Graph {
 
     /// Mark every pair of link edges that point at each other.
     ///
-    /// Containment is excluded: a parent containing a child is not the child
-    /// linking back, and treating it as mutual would erase direction from the
+    /// Containment is excluded. A parent containing a child is not the child
+    /// linking back. Treating it as mutual would erase direction from the
     /// document skeleton.
     pub fn reciprocate(&mut self) {
         let links: Vec<(NodeId, NodeId)> = self

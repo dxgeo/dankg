@@ -45,21 +45,21 @@ pub enum Command {
         cache: bool,
         /// Hops from the entry. `None` falls back to `[graph] depth`.
         depth: Option<u32>,
-        /// Skip view selection and draw the whole index.
+        /// Skip view selection. Render the whole index.
         all: bool,
     },
     Index { paths: Vec<String>, cache: bool },
     Fmt { paths: Vec<String>, check: bool },
     Tui { paths: Vec<String>, cache: bool, depth: Option<u32>, all: bool },
-    /// `paths` holds exactly one entry for `Block`/`All`/`Each` -- `deps=`
-    /// only resolves within one file (decision 19) -- but any number for
-    /// `List`, which walks a corpus the way `graph`/`index`/`check` do and
-    /// has no execution to scope.
+    /// `paths` holds exactly one entry for `Block`/`All`/`Each`. `deps=`
+    /// only resolves within one file (decision 19). `List` takes any
+    /// number of paths instead. It walks a corpus the way
+    /// `graph`/`index`/`check` do, with no execution to scope.
     Eval { paths: Vec<String>, target: EvalTarget, yes: bool, no_write: bool, cache: bool },
     Check { paths: Vec<String>, cache: bool },
     /// `dankg tangle <path>... --lang LANG [-o DIR]`: assemble named blocks
     /// into a source tree (decisions 23-28). One file tangles just it,
-    /// unchanged since decisions 23-25; a directory (or several paths)
+    /// unchanged since decisions 23-25. A directory (or several paths)
     /// walks the corpus (decision 26), the same file-or-directory choice
     /// `--list` already offers.
     Tangle { paths: Vec<String>, lang: String, output: Option<String>, cache: bool },
@@ -333,10 +333,10 @@ fn tui<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     Ok(Command::Tui { paths, cache, depth, all })
 }
 
-/// `--block`/`--all` take exactly one path: `deps=` only resolves within
-/// one file (`eval::plan`), so there is no meaning to naming a second.
-/// `--list` explores rather than runs, so it walks a corpus the way
-/// `graph`/`index`/`check` do -- any number of paths, defaulting to `.`.
+/// `--block`/`--all` take exactly one path. `deps=` only resolves within
+/// one file (`eval::plan`). Naming a second path has no meaning.
+/// `--list` explores rather than evaluates. It walks a corpus the way
+/// `graph`/`index`/`check` do, with any number of paths, defaulting to `.`.
 fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     let mut paths: Vec<String> = Vec::new();
     let mut block: Option<String> = None;
@@ -395,10 +395,10 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     Ok(Command::Eval { paths, target, yes, no_write, cache })
 }
 
-/// One file tangles just it; a directory (or several paths) walks the
-/// corpus (decision 26), the same choice `--list` already offers -- unlike
-/// `--block`/`--all`/`--each`, tangle never reads `deps=` (decision 24), so
-/// there is no single-file DAG forcing this to stop at one path.
+/// One file tangles just it. A directory (or several paths) walks the
+/// corpus (decision 26), the same choice `--list` already offers. Unlike
+/// `--block`/`--all`/`--each`, tangle never reads `deps=` (decision 24).
+/// There is no single-file DAG forcing this to stop at one path.
 fn tangle<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     let mut paths: Vec<String> = Vec::new();
     let mut lang: Option<String> = None;
@@ -432,8 +432,8 @@ fn tangle<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     Ok(Command::Tangle { paths, lang, output, cache })
 }
 
-/// `check` takes any number of paths, defaulting to `.` -- the corpus you are
-/// standing in is the common case, same as `index`.
+/// `check` takes any number of paths, defaulting to `.`. The corpus you
+/// are standing in is the common case, same as `index`.
 fn check<I: Iterator<Item = String>>(args: I) -> Result<Command, String> {
     let mut paths: Vec<String> = Vec::new();
     let mut cache = true;
