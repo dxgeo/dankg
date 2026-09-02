@@ -1,32 +1,34 @@
 # Render json
 
 `--format json` is the one output every other consumer of a DanKG graph
-goes through, `dankg` itself included: the graph logic's own test suite
-renders through this module and asserts on the result rather than probing
-`Graph` internals directly, so a shape change here is a shape change every
-test sees. Pretty-printed, not minified, because the output is meant to
-be committed and diffed -- and hand-rolled, not pulled from a JSON crate,
-because [decision 1](../../architecture.md#decision-1-dependency-policy)
-rules that out and the shape needed here is small enough to keep fully
-under this crate's own control.
+goes through. Even `dankg` itself goes through it: the graph logic's own
+test suite renders through this module and asserts on the result, rather
+than probing `Graph` internals directly. So a shape change here is a shape
+change every test sees.
+
+The output is pretty-printed, not minified, because it is meant to be
+committed and diffed. It is hand-rolled, not pulled from a JSON crate.
+[Decision 1](../../architecture.md#decision-1-dependency-policy) rules
+that out. The shape needed here is also small enough to keep fully under
+this crate's own control.
 
 ```rust name=module_doc path=render/json.rs
 //! Canonical JSON graph dump.
 //!
-//! This is the surface that makes DanKG scriptable, and the one the graph logic
-//! is tested through. It is pretty-printed rather than minified because the
-//! output is meant to be committed and diffed.
+//! This is the surface that makes DanKG scriptable. It is also the one the
+//! graph logic is tested through. It is pretty-printed rather than minified
+//! because the output is meant to be committed and diffed.
 //!
-//! Written by hand: DanKG takes no crates, and the shape here is small and
+//! It is written by hand. DanKG takes no crates. The shape here is small and
 //! fully under our control.
 
 use crate::graph::{Graph, Node};
 use std::fmt::Write as _;
 
 /// Bumped whenever the shape changes in a way a consumer would notice.
-/// 2: a node carries `kind` (`"heading"` or `"block"`), now that a named
-/// top-level code block is its own node rather than invisible content
-/// inside its heading's line range.
+/// 2: a node now carries `kind` (`"heading"` or `"block"`). A named
+/// top-level code block is now its own node, not invisible content inside
+/// its heading's line range.
 pub const SCHEMA_VERSION: u32 = 2;
 ```
 
@@ -96,8 +98,9 @@ fn array(items: &[String]) -> String {
 ```
 
 `string` is the one escaper every hand-rolled JSON writer in this crate
-shares -- `tangle`'s own sidecar manifest included -- rather than each
-writing its own and risking the two disagreeing on what needs escaping.
+shares, including `tangle`'s own sidecar manifest. That avoids each one
+writing its own escaper and risking the two disagreeing on what needs
+escaping.
 
 ```rust name=string_escaper path=render/json.rs
 /// A JSON string literal, with the escapes the spec requires. `pub(crate)`

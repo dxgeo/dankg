@@ -1,32 +1,34 @@
 # Layout coord
 
 Phase 4, the last of the four: turn layers and left-right orders into
-actual x coordinates. Sugiyama's priority method -- each node would like
-to sit at the average x of what it connects to in the layer above or
-below, and gets to, as far as its neighbours allow it to move. Priority
-decides who yields when two nodes want the same space: a bend point
-(`layout::rank`'s virtual node for a long edge) outranks every real node,
-because a long edge that zigzags is far harder to follow than one node
-sitting slightly off-centre; among real nodes, priority is simply how much
-is attached to them. Passes alternate up and down so both ends of an edge
-get a turn pulling on it, and ordering itself is never touched here -- a
-node may slide within its own layer but can never pass a neighbour, so
-[`layout::order`](order.md)'s crossing count from phase 3 survives
-untouched into the final drawing.
+actual x coordinates. This is Sugiyama's priority method. Each node
+would like to sit at the average x of what it connects to in the layer
+above or below. It gets to, as far as its neighbours allow it to move.
+Priority decides who yields when two nodes want the same space. A bend
+point (`layout::rank`'s virtual node for a long edge) outranks every
+real node, because a long edge that zigzags is far harder to follow
+than one node sitting slightly off-centre. Among real nodes, priority
+is simply how much is attached to them. Passes alternate up and down,
+so both ends of an edge get a turn pulling on it. Ordering itself is
+never touched here. A node may slide within its own layer, but it can
+never pass a neighbour. This way, [`layout::order`](order.md)'s
+crossing count from phase 3 survives untouched into the final
+rendering.
 
 ```rust name=module_doc path=layout/coord.rs
 //! Phase 4: turn layers and orders into x coordinates.
 //!
 //! Sugiyama's priority method. Each node would like to sit at the average of
-//! the nodes it connects to in the layer above or below; it gets to, as far as
-//! its neighbours allow. Priority decides who yields: a bend point outranks
-//! everything, because a long edge that zigzags is far harder to follow than
-//! one node sitting slightly off-centre, and among real nodes the priority is
-//! how much is attached to them.
+//! the nodes it connects to in the layer above or below. It gets to, as far
+//! as its neighbours allow. Priority decides who yields. A bend point
+//! outranks everything, because a long edge that zigzags is far harder to
+//! follow than one node sitting slightly off-centre. Among real nodes, the
+//! priority is how much is attached to them.
 //!
-//! Passes alternate up and down so that both ends of an edge get a turn at
-//! pulling. Ordering is never changed here -- a node may slide within its
-//! layer but can never pass a neighbour, so phase 3's crossing count survives.
+//! Passes alternate up and down, so both ends of an edge get a turn at
+//! pulling. Ordering is never changed here. A node may slide within its
+//! layer, but it can never pass a neighbour. This way, phase 3's crossing
+//! count survives.
 
 use super::{Dag, MARGIN, NODE_SEP};
 
@@ -69,9 +71,9 @@ fn pack(dag: &mut Dag) {
 }
 ```
 
-Each sweep processes one layer, highest-priority node first -- ties break
-by position so the pass is reproducible, not merely deterministic-in-
-practice.
+Each sweep processes one layer, highest-priority node first. Ties break
+by position. This keeps the pass reproducible, not merely
+deterministic-in-practice.
 
 ```rust name=sweep_and_desired path=layout/coord.rs
 fn sweep(dag: &mut Dag, rank: usize, down: bool) {
@@ -94,8 +96,8 @@ fn sweep(dag: &mut Dag, rank: usize, down: bool) {
 }
 
 /// Where a node would like to be: the weighted average of what it connects to
-/// in the reference layer. `None` when it connects to nothing there, in which
-/// case it stays where the packing put it.
+/// in the reference layer. `None` when it connects to nothing there. Then it
+/// stays where the packing put it.
 fn desired(dag: &Dag, node: usize, down: bool) -> Option<i32> {
     let mut total: i64 = 0;
     let mut weight: i64 = 0;
@@ -113,7 +115,7 @@ fn desired(dag: &Dag, node: usize, down: bool) -> Option<i32> {
     if weight == 0 {
         return None;
     }
-    // Round to nearest; coordinates are non-negative until `normalize`.
+    // Round to nearest. Coordinates are non-negative until `normalize`.
     Some(((total + weight / 2) / weight) as i32)
 }
 
@@ -131,7 +133,7 @@ fn priority(dag: &Dag, node: usize, down: bool) -> i64 {
 
 `push_right`/`push_left` are mirror images: move one node toward where it
 wants to be, and drag along whatever lower-priority neighbours are in the
-way, stopping short of the first neighbour that outranks it -- which is
+way, stopping short of the first neighbour that outranks it. This is
 the entire mechanism that keeps a bend point from ever being shoved aside
 by a real node it happens to share a layer with.
 
@@ -198,8 +200,8 @@ fn push_left(dag: &mut Dag, layer: &[usize], priorities: &[i64], i: usize, want:
     }
 }
 
-/// Slide everything so the leftmost box starts at the margin. Pushing left is
-/// allowed to go negative, and a canvas cannot.
+/// Slide everything so the leftmost box starts at the margin. Pushing
+/// left is allowed to go negative. A canvas cannot.
 fn normalize(dag: &mut Dag) {
     let Some(leftmost) = (0..dag.count()).map(|n| dag.x[n] - dag.width[n] / 2).min() else {
         return;
@@ -230,8 +232,8 @@ mod tests {
         let roles = acyclic::break_cycles(count, edges);
         rank::assign(&mut dag, edges, &roles);
         rank::split_long_edges(&mut dag, edges, &roles);
-        // Bend points have no width, and the builder above cannot know how
-        // many there will be.
+        // Bend points have no width. The builder above cannot know how many
+        // there will be.
         dag.width.resize(dag.count(), 0);
         order::minimize_crossings(&mut dag);
         assign(&mut dag);
@@ -283,9 +285,9 @@ mod tests {
     #[test]
     fn a_bend_point_never_yields_to_a_real_node() {
         // 0 -> 1 -> 2 with the spanning edge 0 -> 2 bending beside 1, plus a
-        // wide sibling crowding the middle layer. The last pass runs upwards,
-        // so the bend's one wish is to sit under node 2 -- and it outranks
-        // everything in its layer, so it gets it exactly.
+        // wide sibling crowding the middle layer. The last pass runs upwards.
+        // The bend's one wish is to sit under node 2. It outranks everything
+        // in its layer. It gets exactly that.
         let d = build(4, &[100, 100, 100, 240], &[e(0, 1), e(1, 2), e(0, 2), e(0, 3)]);
         let bend = d.real;
         assert!(d.is_virtual(bend), "the spanning edge produced a bend point");

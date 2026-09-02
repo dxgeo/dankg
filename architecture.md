@@ -32,7 +32,7 @@ Documented subset; spec suite vendored.
 
 `[t](f.md#h)` canonical, `[[f#h]]` also read.
 
-**Rationale:** Files stay portable; wikilinks stay fast to type.
+**Rationale:** Files stay portable. Wikilinks stay fast to type.
 
 ## Decision 5: Node identity
 
@@ -80,7 +80,7 @@ Deps prepended into one process.
 
 Written back into the markdown, hash-tagged.
 
-**Rationale:** File stays the source of truth; results survive in git.
+**Rationale:** File stays the source of truth. Results survive in git.
 
 ## Decision 13: CLI shape
 
@@ -98,7 +98,7 @@ Flat `key: value` subset only.
 
 Re-parse and compare before writing.
 
-**Rationale:** `fmt` writes in place; a round-trip bug must not reach a note.
+**Rationale:** `fmt` writes in place. A round-trip bug must not reach a note.
 
 ## Decision 16: Database engine
 
@@ -152,48 +152,48 @@ Exactly decision 20's node scope (named, top-level).
 
 Heading containment + document order; `deps` not consulted.
 
-**Rationale:** Placement is presentational structure; `deps` stays eval's own DAG concern.
+**Rationale:** Placement is presentational structure. `deps` stays eval's own DAG concern.
 
 ## Decision 25: Command name
 
 `dankg tangle`, not `compile`.
 
-**Rationale:** DanKG assembles; a configured command does any actual compiling, and some languages compile nothing at all.
+**Rationale:** DanKG assembles. A configured command does any actual compiling. Some languages compile nothing at all.
 
 ## Decision 26: Tangle corpus scope
 
-One file unchanged; a directory (or several paths) walks the corpus, nesting each contributing file under its own subdirectory once more than one is involved.
+One file unchanged. A directory (or several paths) walks the corpus, nesting each contributing file under its own subdirectory once more than one is involved.
 
-**Rationale:** A crate is a whole-corpus artifact; `deps=` has no bearing since tangle never reads it.
+**Rationale:** A crate is a whole-corpus artifact. `deps=` has no bearing since tangle never reads it.
 
 ## Decision 27: Module glue
 
 An external, per-language, spawned `[tangle.<lang>] glue` command; never DanKG's own code.
 
-**Rationale:** Matches the spawned-command pattern (decision 1); lets an extension do things DanKG's own code must not (read a block's source).
+**Rationale:** Matches the spawned-command pattern (decision 1). Lets an extension do things DanKG's own code must not (read a block's source).
 
 ## Decision 28: Per-file tangle hints
 
 `dankg.tangle.public` frontmatter, surfaced to `glue` only through a sidecar manifest.
 
-**Rationale:** Visibility is a per-file authorial call; whether the mechanism runs at all stays root-config only (decision 27).
+**Rationale:** Visibility is a per-file authorial call. Whether the mechanism runs at all stays root-config only (decision 27).
 
 ## Decision 29: Cross-file `deps`
 
-`deps=other.md#name` reaches another file's top-level block; `--block`/`--all`/`--each`' own targets stay one file (decision 19 unchanged).
+`deps=other.md#name` reaches another file's top-level block. `--block`/`--all`/`--each`' own targets stay one file (decision 19 unchanged).
 
-**Rationale:** Concatenation (decision 11) makes "the chain crosses a file" and "the chain crosses a language" the same *kind* of non-problem; only resolution needed widening, not the execution model.
+**Rationale:** Concatenation (decision 11) makes "the chain crosses a file" and "the chain crosses a language" the same *kind* of non-problem. Only resolution needed widening, not the execution model.
 
 ## Decision 30: Manifest schema v2
 
 Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same `BlockRef` fields `result.rs` already tracks.
 
-**Rationale:** A richer glue script needs block-level source position to compare against, never a paragraph's own text; DanKG hands over structure, judgment stays glue's (decision 27).
+**Rationale:** A richer glue script needs block-level source position to compare against, never a paragraph's own text. DanKG hands over structure. Judgment stays glue's (decision 27).
 
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
-  the corpus; everything outside is not. Never called a "vault".
+  the corpus. Everything outside is not. Never called a "vault".
 - node :: One heading, at any depth, in one file.
 - containment edge :: Parent heading to child heading. Derived from document
   structure, not written by hand.
@@ -239,8 +239,8 @@ struct Edge {
 }
 ```
 
-Extent is a line range rather than a byte range: the parser carries line numbers
-throughout, and a line range is what diagnostics and editors both want.
+Extent is a line range rather than a byte range. The parser carries line numbers
+throughout. A line range is what diagnostics and editors both want.
 
 A file with no headings, or with links written above its first heading, gets a
 synthetic level-0 node named from its frontmatter title or file name, so that
@@ -248,42 +248,43 @@ synthetic level-0 node named from its frontmatter title or file name, so that
 
 ## Block nodes
 
-A named, top-level code block is a node too (decision 20), scoped to
+A named, top-level code block is a node too (decision 20). It is scoped to
 `eval::plan::top_level_blocks`'s exact definition (decision 19) rather than to
-"every fenced block" -- a selectable node that `dankg eval` cannot run would be
-a dead end, so "is this a node" and "is this eval-able" are made the same
-question by construction, not by convention. Concretely: not nested in a
-list, and named (`name=` present in its info string); an unnamed block, or one
-inside a list item, is invisible to the graph exactly as it already is to
-eval.
+"every fenced block". A selectable node that `dankg eval` cannot run would be
+a dead end. So "is this a node" and "is this eval-able" are made the same
+question by construction, not by convention. Concretely, a block node must sit
+outside a list and carry a name (`name=` present in its info string). An
+unnamed block, or one inside a list item, is invisible to the graph exactly as
+it already is to eval.
 
 `graph/build.rs` builds a block's node in the same single pass as headings and
-paragraphs, attached to whichever heading is `current` at that point in the
-document (or, before the first heading, the lazily-created file-level node --
-the same fallback a pre-heading paragraph already triggers). A block never
-becomes `current` itself: nothing nests inside one, so later content keeps
-attaching to whichever heading was already open. Its slug comes from the same
-per-file `Slugger` a heading's does, so a block named `index` colliding with a
-heading titled "Index" gets the `-1` suffix exactly as two same-titled
-headings would.
+paragraphs. It attaches the node to whichever heading is `current` at that
+point in the document, or, before the first heading, to the lazily-created
+file-level node (the same fallback a pre-heading paragraph already triggers).
+A block never becomes `current` itself: nothing nests inside one, so later
+content keeps attaching to whichever heading was already open. Its slug comes
+from the same per-file `Slugger` a heading's does, so a block named `index`
+colliding with a heading titled "Index" gets the `-1` suffix exactly as two
+same-titled headings would.
 
-`level` carries no heading depth for a block -- there is none -- only a
-sentinel (`BLOCK_LEVEL = 7`) picked to sit above every real heading level
-(1..=6). That single fact is what keeps `set_extents` correct without a
-special case in its search: scanning past a block while looking for a
-heading's own next sibling-or-higher never mistakes one for it, since a
+A block has no heading depth for `level` to carry. There is none. Instead
+`level` holds a sentinel (`BLOCK_LEVEL = 7`), picked to sit above every real
+heading level (1..=6). That single fact is what keeps `set_extents` correct
+without a special case in its search. Scanning past a block while looking for
+a heading's own next sibling-or-higher never mistakes one for it, since a
 block's level can never satisfy `<= a real heading's`. Overwriting a block's
-own end_line the way a heading's is computed would be wrong regardless --
-`Block::Code::end_line`, straight from the parser, is already exactly right --
-so `set_extents`'s outer loop is scoped to `kind == Heading` nodes, full stop;
-by the time it runs, no block node exists yet to touch anyway, since block
-nodes are appended to the same pass that produces headings, and `set_extents`
-runs once, after.
+own end_line the way a heading's is computed would be wrong regardless.
+`Block::Code::end_line`, straight from the parser, is already exactly right.
+So `set_extents`'s outer loop is scoped to `kind == Heading` nodes, full stop.
+By the time it runs, no block node exists yet to touch anyway. Block nodes are
+appended to the same pass that produces headings, and `set_extents` runs once,
+after.
 
-Edges are stored directed. `reciprocated` is filled in after the whole corpus is
-indexed: if `a -> b` and `b -> a` both exist, both are marked, and the renderer
-draws one undirected edge instead of two arrows. This is the mechanism behind
-"the link goes both ways but displays as unidirectional unless linked back".
+Edges are stored directed. `reciprocated` is filled in after the whole corpus
+is indexed. If `a -> b` and `b -> a` both exist, both are marked, and the
+renderer renders one undirected edge instead of two arrows. This is the
+mechanism behind "the link goes both ways but renders as unidirectional unless
+linked back".
 
 # Pipeline
 
@@ -364,17 +365,17 @@ quotes, indented code blocks, entity references, autolinks, images, and link
 reference definitions.
 
 Link titles are parsed and kept even though DanKG has no use for them. An AST
-that discards input it has already read cannot be rendered faithfully, and the
+that discards input it has already read cannot be rendered faithfully. The
 field costs nothing.
 
 The vendored CommonMark `spec.json` lives at `tests/data/commonmark/spec.json`.
 It is test *data*, not a dependency. Scoring it requires rendering the AST to
-HTML, so `tests/support/html.rs` implements a CommonMark HTML renderer used
-*only* as a conformance oracle -- DanKG itself never renders markdown to HTML,
-it renders a graph.
+HTML. So `tests/support/html.rs` implements a CommonMark HTML renderer used
+*only* as a conformance oracle. DanKG itself never renders markdown to HTML.
+It renders a graph.
 
-The harness is a regression gate: unimplemented sections never fail a build, but
-a section that loses ground does.
+The harness is a regression gate. Unimplemented sections never fail a build,
+but a section that loses ground does.
 
 ```
 cargo test --test commonmark -- --nocapture   # full per-section table
@@ -383,11 +384,11 @@ DANKG_BLESS=1 cargo test --test commonmark    # re-record the baseline
 ```
 
 Current conformance is 368/652 (56%). The implemented sections score as
-intended -- emphasis 94%, ATX headings 94%, code spans 90%, fenced code 89% --
-and nearly all remaining failures are constructs deliberately outside the
-subset. Notably, most list failures are not list bugs: the list structure is
-correct and the case fails only because it also contains an indented code block
-or a block quote.
+intended: emphasis 94%, ATX headings 94%, code spans 90%, fenced code 89%.
+Nearly all remaining failures are constructs deliberately outside the subset.
+Notably, most list failures are not list bugs. The list structure is correct.
+The case fails only because it also contains an indented code block or a block
+quote.
 
 ## Fence info strings
 
@@ -412,44 +413,44 @@ GitHub. `NodeId` is `<file path relative to root, extension stripped>#<slug>`.
 # Root discovery and the corpus walk
 
 The root is the single most load-bearing value in the program. Node identity is
-taken relative to it, so output is the same wherever the binary was run from,
-and the resolver refuses any link that climbs above it.
+taken relative to it. Output is the same wherever the binary was run from. The
+resolver refuses any link that climbs above it.
 
-Discovery walks up from the named path looking for a `.dankg/` directory; the
+Discovery walks up from the named path looking for a `.dankg/` directory. The
 directory containing it is the root. Failing that the root is the common
 ancestor of the paths given, which for a single file is its own directory. A
-`.dankg/` is never created: a directory the user did not mark is not a root, it
-is just where a file happens to live.
+`.dankg/` is never created. A directory the user did not mark is not a root.
+It is just where a file happens to live.
 
 Naming a second path in a different root is refused. Cross-root graphs would
-need a second boundary, and one boundary is the point.
+need a second boundary. One boundary is the point.
 
-The walk covers the whole root, always (decision 6), and yields root-relative
-`/`-separated paths in sorted order -- filesystem order is not deterministic and
+The walk covers the whole root, always (decision 6). It yields root-relative
+`/`-separated paths in sorted order. Filesystem order is not deterministic and
 would leak into the output. Three exclusions are structural rather than
 configured:
 
 - Dot-entries are skipped outright, which is what keeps `.dankg/` and `.git/`
   out of the corpus without anyone writing a pattern for them.
 - Symlinks are never followed. They are the one way a walk could leave the
-  root, and the root is a hard boundary. Every skipped link is reported.
-- Paths are resolved lexically, never with `canonicalize`, for the same reason:
-  resolving a link before the boundary check is what would defeat it.
+  root. The root is a hard boundary. Every skipped link is reported.
+- Paths are resolved lexically, never with `canonicalize`, for the same reason.
+  Resolving a link before the boundary check is what would defeat it.
 
 A path named on the command line is always indexed, even when `.dankgignore`
-excludes it, with a warning saying so. Naming a file is an explicit request,
-and it should not fail silently -- but neither should the override be invisible.
+excludes it, with a warning saying so. Naming a file is an explicit request.
+It should not fail silently. But neither should the override be invisible.
 
 ## .dankgignore
 
-One pattern per line; `#` comments; `!` un-ignores; a leading `/` anchors to the
-root; a trailing `/` matches directories only; `*` and `?` stay within one path
-segment and `**` crosses them. Later rules win, so an exception can follow the
-rule it excepts. A pattern with no `/` applies at every depth.
+One pattern per line. `#` comments. `!` un-ignores. A leading `/` anchors to
+the root. A trailing `/` matches directories only. `*` and `?` stay within one
+path segment. `**` crosses them. Later rules win, so an exception can follow
+the rule it excepts. A pattern with no `/` applies at every depth.
 
 Deliberately a subset of gitignore rather than a clone of it. The whole point
-of a root is that its contents are predictable, and a matcher nobody can
-predict would undo that.
+of a root is that its contents are predictable. A matcher nobody can predict
+would undo that.
 
 # Link resolution
 
@@ -467,123 +468,124 @@ being graphed is frequently untrusted input.
 # View selection
 
 Step 7, and the first thing in the pipeline that depends on the entry. The
-index is the whole root; the view is what a reader can take in.
+index is the whole root. The view is what a reader can take in.
 
 Hops are counted in *both* directions. A link pointing at the entry is as much
-a neighbour as one the entry points at -- which is the entire reason the index
-is built over the corpus rather than over the one file. Containment counts as a
-hop too, which is the open question below: it can make depth 2 feel shallow in
-a deeply nested file, and `--all` is the answer until something better is
-decided.
+a neighbour as one the entry points at. That is the entire reason the index is
+built over the corpus rather than over the one file. Containment counts as a
+hop too. That is the open question below. It can make depth 2 feel shallow in
+a deeply nested file. `--all` is the answer until something better is decided.
 
-The result is the *induced* subgraph, not a spanning tree: an edge between two
+The result is the *induced* subgraph, not a spanning tree. An edge between two
 nodes that both made it in survives even when it was not the edge that brought
-either of them there. Dropping it would draw a graph missing structure it can
-plainly see.
+either of them there. Dropping it would render a graph missing structure it
+can plainly see.
 
 Naming a file selects every heading in it, not just the first. Naming a
-directory leaves no entry to start from, and the only sensible reading of
-"graph this corpus" is all of it, so that is what it does.
+directory leaves no entry to start from. The only sensible reading of "graph
+this corpus" is all of it. So that is what it does.
 
 # Layout
 
 Standard four-phase Sugiyama over the selected subgraph.
 
-1. *Acyclic* -- DFS, reverse back edges, remember them so arrowheads still point
-   the original way. Nothing is dropped: a self-link is marked instead, since
-   it cannot be layered, and is drawn as a loop.
-2. *Rank* -- longest-path layering. Edges spanning more than one layer are split
+1. *Acyclic*: DFS, reverse back edges, remember them so arrowheads still point
+   the original way. Nothing is dropped. A self-link is marked instead, since
+   it cannot be layered, and is rendered as a loop.
+2. *Rank*: longest-path layering. Edges spanning more than one layer are split
    into one-layer segments joined by virtual nodes, which become the bend
-   points of the drawn polyline.
-3. *Order* -- median heuristic, four alternating sweeps, keeping the best
+   points of the rendered polyline.
+3. *Order*: median heuristic, four alternating sweeps, keeping the best
    ordering seen. Ties broken by NodeId so the result is deterministic.
-4. *Coordinate* -- priority method for x, fixed layer height for y. Edges through
+4. *Coordinate*: priority method for x, fixed layer height for y. Edges through
    virtual nodes become polylines.
 
 Containment edges carry weight 2 and link edges weight 1. The weight is what
-the *ordering and coordinate* phases read, not the ranking: longest-path
-layering already puts a child one layer below its parent, and what weight 2
-buys is horizontal -- a parent is pulled into line with its children rather
-than with whatever else happens to link to it. That is the sense in which a
-heading sits directly above them.
+the *ordering and coordinate* phases read, not the ranking. Longest-path
+layering already puts a child one layer below its parent. What weight 2 buys
+is horizontal: a parent is pulled into line with its children rather than with
+whatever else happens to link to it. That is the sense in which a heading sits
+directly above them.
 
 Priority in phase 4 goes to the virtual nodes, ahead of every real one. A long
 edge that zigzags is far harder to follow than a box sitting slightly
-off-centre, so the bend points get the position they ask for and the real nodes
-move aside. Ordering is never changed here -- a node may slide within its layer
+off-centre. So the bend points get the position they ask for. The real nodes
+move aside. Ordering is never changed here. A node may slide within its layer
 but can never overtake a neighbour, so phase 3's crossing count survives.
 
 Coordinates are integers. Whole pixels have no float formatting to disagree
-about, and the output is meant to be committed.
+about. The output is meant to be committed.
 
-Determinism is a hard requirement, not a nicety: it is what lets a rendered
-graph be committed and diffed. Nothing here iterates a hash map, the starting
+Determinism is a hard requirement, not a nicety. It is what lets a rendered
+graph be committed and diffed. Nothing here iterates a hash map. The starting
 order comes from a depth-first walk in index order rather than from whatever
-the graph handed over, and there are tests asserting byte-identical output
-across repeated runs and across the order the corpus was read in.
+the graph handed over. Tests assert byte-identical output across repeated
+runs and across the order the corpus was read in.
 
 # Drawn formats
 
-Both take the same `Layout`; what they can do with it differs, and pretending
+Both take the same `Layout`. What they can do with it differs. Pretending
 otherwise would be the dishonest part.
 
-- *dot* -- node positions are emitted as pinned `pos` attributes, so
+- *dot*: node positions are emitted as pinned `pos` attributes, so
   `neato -n -Tsvg` reproduces DanKG's layout exactly. Plain `dot -Tsvg` throws
-  them away and re-lays the graph out, but the `rank=same` groups and
+  them away and re-lays the graph out. But the `rank=same` groups and
   `weight=2` on containment mean it still agrees about which node belongs on
-  which layer. Edge geometry is deliberately *not* emitted: graphviz wants
-  B-spline control points, DanKG has polylines, and converting between them to
+  which layer. Edge geometry is deliberately *not* emitted. Graphviz wants
+  B-spline control points. DanKG has polylines. Converting between them to
   satisfy a flag most people will not pass is not worth a bug in the
   arithmetic.
-- *mermaid* -- runs its own layout and will not take coordinates at all. What
-  it takes is the ordering: nodes are emitted rank by rank, left to right, and
-  edge direction is DanKG's, including which edge of a cycle was turned around.
-  Identifiers are `n0`, `n1`, ... because mermaid's identifier grammar does not
-  admit `#` or `/`.
+- *mermaid*: runs its own layout and will not take coordinates at all. What
+  it takes is the ordering. Nodes are emitted rank by rank, left to right.
+  Edge direction is DanKG's, including which edge of a cycle was turned
+  around. Identifiers are `n0`, `n1`, ... because mermaid's identifier grammar
+  does not admit `#` or `/`.
 
-A reciprocated pair is one undirected line in both, and the half that gets
-drawn is the one the layout ran *down* the page -- so a renderer doing its own
-layering ends up agreeing with DanKG about which node sits above which.
+A reciprocated pair is one undirected line in both. The half that gets
+rendered is the one the layout ran *down* the page. So a renderer doing its
+own layering ends up agreeing with DanKG about which node sits above which.
 Unresolved nodes are dashed and muted in both. A block node (decision 20)
 gets a tint and a monospace label in `dot` (`fillcolor`/`fontname`, since
 `resolved` is always true for one, the two states never fight for the same
-box) and its own `classDef` in `mermaid`, collected into a `class` line the
-same way dangling nodes already are -- distinct from an ordinary heading's,
-never dashed, since a block is never unresolved.
+box). It also gets its own `classDef` in `mermaid`, collected into a `class`
+line the same way dangling nodes already are. This is distinct from an
+ordinary heading's, never dashed, since a block is never unresolved.
 
 # HTML renderer
 
 One file. CSS and JS are `const &str` in `assets.rs`, inlined at render time. No
 network requests, no build step, no server. The only URL in the page is the SVG
-namespace, which is an identifier rather than an address, and a test asserts
-there is never a second one.
+namespace, which is an identifier rather than an address. A test asserts there
+is never a second one.
 
 The Rust side emits final SVG coordinates. The JS does three things only: pan
 and zoom, click a node to expand its hidden neighbours, and click through to
 the source file. Expansion is instant because the full index ships in the page
-as a JSON blob alongside the visible subgraph -- and it is the canonical
-`--format json` dump rather than a bespoke shape, so the page and the
+as a JSON blob alongside the visible subgraph. It is the canonical
+`--format json` dump rather than a bespoke shape. So the page and the
 scriptable surface cannot disagree about what the graph is.
 
 Unresolved nodes render dashed and muted. A block node (decision 20) renders
-with a `.node.block` class -- a tint and a monospace label, distinct from an
-ordinary heading's, both server-rendered and script-grown alike, since the
-grown path reads `data.kind` straight out of the same embedded index the
-server-rendered path reads `Node.kind` from. Reciprocated edges render as a
-single line with no arrowhead. Stale results render with a warning badge.
+with a `.node.block` class: a tint and a monospace label, distinct from an
+ordinary heading's. This holds both when the node is server-rendered and when
+it is script-grown, since the grown path reads `data.kind` straight out of the
+same embedded index that the server-rendered path reads `Node.kind` from.
+Reciprocated edges render as a single line with no arrowhead. Stale results
+render with a warning badge.
 
 ## Expansion is a placement, not a second layout
 
 Clicking a node reveals its hidden neighbours from the blob. They are dropped
 into the nearest free slot on the rank the edge puts them, on the same grid
-`layout/` already fixed -- not laid out again. Running Sugiyama in the browser
-would move every box on screen, which is exactly what a reader tracing one link
-does not want, and it would need a second layout engine in a second language.
+`layout/` already fixed. They are not laid out again. Running Sugiyama in the
+browser would move every box on screen, which is exactly what a reader tracing
+one link does not want. It would also need a second layout engine in a second
+language.
 
-The price is that the expanded drawing is not the drawing `--depth N+1` would
-produce, so grown boxes are drawn as provisional rather than passed off as
-authoritative. Re-running DanKG is how you get the real layout of the larger
-graph, and `reset` returns the page to exactly what Rust drew.
+The price is that the expanded rendering is not the rendering `--depth N+1`
+would produce. So grown boxes are rendered as provisional rather than passed
+off as authoritative. Re-running DanKG is how you get the real layout of the
+larger graph. `reset` returns the page to exactly what Rust rendered.
 
 ## One click never means two things
 
@@ -592,14 +594,14 @@ a small badge on the box's top-right corner, in the gap the layout already
 leaves between boxes, costing the label no characters.
 
 The `href` is the root-relative path, which means the page works where it is
-meant to live -- at the root. An absolute path would work from anywhere and
-could not be committed, and committing the output is the point.
+meant to live: at the root. An absolute path would work from anywhere and
+could not be committed. Committing the output is the point.
 
 ## What the script is told rather than trusted to know
 
 Anything both halves need is sent in the meta blob: the box metrics
 (`CHAR_WIDTH` and friends, so an expanded box is sized the way the layout sized
-the drawn ones) and the edge-key separator. The rule is that a value used by
+the rendered ones) and the edge-key separator. The rule is that a value used by
 both languages lives in Rust and travels, because nothing type-checks the two
 against each other. See the implementation note below for what it cost to learn
 that.
@@ -607,13 +609,13 @@ that.
 # Terminal UI
 
 Milestone 7, placed before eval: it depends only on `graph/` and `layout/`
-(milestones 2 and 5), not on anything eval or the database milestone add, so
+(milestones 2 and 5), not on anything eval or the database milestone add. So
 there is no ordering reason to wait.
 
 Selecting a node and handing it to the reader's own editor only works
 unconditionally from inside a terminal. A browser click cannot spawn an
-arbitrary local process, and only editors that register an OS URI scheme
-(`vscode://`) can be reached from HTML at all -- `vim`, `nvim`, and `emacs` are
+arbitrary local process. Only editors that register an OS URI scheme
+(`vscode://`) can be reached from HTML at all. `vim`, `nvim`, and `emacs` are
 structurally unreachable from a page. A TUI lives in the same terminal as the
 editor it hands off to, so any configured `[editor] command` (decision 17)
 reaches it, no scheme required.
@@ -624,7 +626,7 @@ reaches it, no scheme required.
 HTML renderer does, over the same selected view (decision 7). One piece of the
 existing box-metrics work already speaks the TUI's language: `CHAR_WIDTH` and
 friends are computed in character units so an HTML-expanded box matches the
-layout's sizing -- a terminal cell *is* that unit, so drawing the same
+layout's sizing. A terminal cell *is* that unit. So rendering the same
 Sugiyama output as text needs no rescaling.
 
 ## What is new
@@ -647,110 +649,110 @@ src/tui/
 
 ## Interaction
 
-- `arrows/hjkl` -- move selection; up/down cross ranks, left/right stay in one
-- `enter` -- suspend, spawn the configured editor at the node's line, resume -- or, while cycling a node's blocks, run the cycled one
-- `tab` -- expand the selected node's hidden neighbours -- a placement on the existing grid, not a second layout, same rule as HTML
-- `/` -- jump to a node by title
-- `e` -- cycle the selected node's named blocks; enter runs the cycled one, in place, without leaving the graph (see *Eval* below)
-- `esc` -- cancel an in-progress block cycle; otherwise unbound
-- `p` -- toggle panning: direction keys move the viewport, not selection
-- `r` -- collapse back to the entry view
-- `q` -- quit, restoring the terminal
-- `?` -- toggle a full-screen keybinding reference
+- `arrows/hjkl`: move selection. Up/down cross ranks. Left/right stay in one.
+- `enter`: suspend, spawn the configured editor at the node's line, resume. Or, while cycling a node's blocks, run the cycled one.
+- `tab`: expand the selected node's hidden neighbours. A placement on the existing grid, not a second layout, same rule as HTML.
+- `/`: jump to a node by title
+- `e`: cycle the selected node's named blocks. `enter` runs the cycled one, in place, without leaving the graph (see *Eval* below)
+- `esc`: cancel an in-progress block cycle. Otherwise unbound.
+- `p`: toggle panning. Direction keys move the viewport, not selection.
+- `r`: collapse back to the entry view
+- `q`: quit, restoring the terminal
+- `?`: toggle a full-screen keybinding reference
 
 Movement follows the rank/order structure `layout/order.rs` already computed,
 so "down" is well-defined without inventing a second notion of adjacency.
 
 Every letter here but the mode-independent bindings above is remappable in
-`[keys]` (decision 18); arrows, enter, tab, esc and `?` are not, since they
-are not graph-navigation letters to begin with -- `?` specifically because it
-is close to universal for "help" across terminal tools (vim, htop, git) and
-is not itself a graph action.
+`[keys]` (decision 18). Arrows, enter, tab, esc and `?` are not, since they
+are not graph-navigation letters to begin with. `?` specifically is fixed
+because it is close to universal for "help" across terminal tools (vim, htop,
+git) and is not itself a graph action.
 
 ## Panning
 
 `p` repurposes the direction keys from moving the selection to moving the
 viewport directly (`App::pan`), for surveying a region of the graph with
-nothing selected nearby -- the gap the *Open questions* below used to name.
-A status line exists now (see *Eval* below), but panning still says nothing
-in words there -- toggling pan on and off is exactly the kind of thing that
-happens on nearly every keypress while surveying a graph, and a status line
+nothing selected nearby. That was the gap the *Open questions* below used to
+name. A status line exists now (see *Eval* below), but panning still says
+nothing in words there. Toggling pan on and off is exactly the kind of thing
+that happens on nearly every keypress while surveying a graph. A status line
 that changed that often would be more noise than signal. The indicator stays
-visual instead: whichever screen edges still have grid beyond them draw an
+visual instead. Whichever screen edges still have grid beyond them render an
 arrow (`draw::overlay_pan_arrows`), stamped onto the already-windowed frame
-after scrolling, not into the full grid before it, so the glyphs sit at the
+after scrolling, not into the full grid before it. So the glyphs sit at the
 real screen edges wherever the viewport currently is. An edge with nothing
 further to pan into simply grows no arrow, which makes the indicator double
 as feedback: panned all the way down, `↓` stops appearing.
 
 `render` stops calling `scroll_to_show` while panning is on, which is what
-lets the viewport actually separate from the selection -- otherwise the very
+lets the viewport actually separate from the selection. Otherwise the very
 next frame would snap the scroll straight back to wherever the (unmoved)
 selection sits. `pan` clamps only the near end, at zero, because that is all
-it can know; the far end -- not scrolling past the last row or column of
-content -- is clamped in `render`, the one place that already has both the
+it can know. The far end (not scrolling past the last row or column of
+content) is clamped in `render`, the one place that already has both the
 terminal size and `draw::dimensions`'s full-grid extent in hand. Toggling
-panning back off needs no explicit re-clamp of its own: the very next frame
+panning back off needs no explicit re-clamp of its own. The very next frame
 resumes calling `scroll_to_show`, which snaps the viewport back onto the
 selection the same way any other selection move would.
 
 ## Eval in the TUI
 
 Milestone 8 built `eval/` as a library, not a `main.rs` orchestration function
-like `graph`/`fmt`, specifically so this could reuse it: `eval::session::run_one`
-\-- rebuild a named block's plan, resolve its language, spawn its chain once,
-write the result back -- is now the one place "run this block" is
-implemented, called both by `dankg eval`'s own multi-target loop and by
+like `graph`/`fmt`, specifically so this could reuse it. `eval::session::run_one`
+(rebuild a named block's plan, resolve its language, spawn its chain once,
+write the result back) is now the one place "run this block" is
+implemented. It is called both by `dankg eval`'s own multi-target loop and by
 `tui::eval::run`. The TUI cannot depend on the `main` binary, so a function
-two different front ends both need has to live in the library either way;
-this is the same reasoning as `cmd.rs` already being shared between the
+two different front ends both need has to live in the library either way.
+This is the same reasoning as `cmd.rs` already being shared between the
 editor handoff and `eval`'s own command spawning.
 
-`e` (`keys.eval`) looks up the selected node's named blocks -- every
+`e` (`keys.eval`) looks up the selected node's named blocks (every
 top-level block whose own line falls in `node.line..=node.end_line`, exactly
-the section `graph/build.rs` already computes that heading to span -- and
+the section `graph/build.rs` already computes that heading to span) and
 starts cycling on the first one. A second press advances to the next,
-wrapping; `enter` runs whichever is currently cycled, exactly the way `enter`
-already runs the editor, except it never leaves the TUI: `eval::run` spawns
+wrapping. `enter` runs whichever is currently cycled, exactly the way `enter`
+already runs the editor, except it never leaves the TUI. `eval::run` spawns
 and captures output through pipes (`eval/run.rs`), not through inherited
 stdio, so nothing about it needs the terminal suspended. No separate confirm
-prompt either -- cycling to a block and pressing `enter` to run it already
+prompt either. Cycling to a block and pressing `enter` to run it already
 *is* the confirmation, the same reasoning decision 9's `dankg eval` prompt
 does not apply to `enter`'s editor handoff.
 
-A node with no named blocks in its section is a silent no-op on `e`: there is
+A node with no named blocks in its section is a silent no-op on `e`. There is
 nowhere to cycle to, the same "nowhere to report to" call `enter`'s
 best-effort editor-spawn failure already makes. Navigating away (any
-direction key, `tab`, `r`) cancels an in-progress cycle -- it was scoped to
+direction key, `tab`, `r`) cancels an in-progress cycle. It was scoped to
 whichever node was selected when it started, and moving off that node makes
 it stale. `esc` cancels it explicitly, without moving anything.
 
 ### The status line
 
 One row, reserved at the bottom of the viewport whenever `app.status` is
-`Some`, so the graph's own content never has to reflow around it -- `render`
+`Some`, so the graph's own content never has to reflow around it. `render`
 computes `content_rows = term_rows - 1` up front and windows the graph into
 that, the same fixed-upper-bound reasoning as everywhere else column/row
 budgets get clamped in this module. It shows the block-cycle list while
 cycling (`eval: [setup] index   enter=run esc=cancel`, the cycled name
 bracketed) and the last run's outcome afterward (`index: ok`, `index: failed`, `index: timed out`, or the error text for something that could not
-even be attempted, such as an unconfigured language). `reload` -- which a
-completed run always triggers, since the file just changed -- leaves
-`status` alone on purpose: the reader just ran the block and reloading is not
+even be attempted, such as an unconfigured language). `reload`, which a
+completed run always triggers since the file just changed, leaves
+`status` alone on purpose. The reader just ran the block. Reloading is not
 itself a reason to hide what happened.
 
 ### Block nodes and the cycle key, side by side
 
-Decision 20 made a named top-level block a node in its own right, drawn with
-a heavy border (`draw_box`'s third glyph set, alongside plain and dashed --
-`┏━┓┃┗━┛`) wherever it already sits in the graph -- reachable by ordinary
-arrow/hjkl navigation, not only by `e`. This was added after `e`'s cycle mode
-already existed, deliberately left standing rather than replaced: cycling
-answers "what can I run from here" without moving the selection or the
-viewport at all, which staying on the current node and pressing `e`
+Decision 20 made a named top-level block a node in its own right, rendered
+with a heavy border (`draw_box`'s third glyph set, alongside plain and
+dashed: `┏━┓┃┗━┛`) wherever it already sits in the graph. It is reachable by
+ordinary arrow/hjkl navigation, not only by `e`. This was added after `e`'s
+cycle mode already existed, deliberately left standing rather than replaced.
+Cycling answers "what can I run from here" without moving the selection or
+the viewport at all, which staying on the current node and pressing `e`
 repeatedly still does more directly than navigating to a block node instead.
-Both paths end at the same call (`eval::run`, `run_selected_block`), so they
-cannot disagree about what running a block does -- only about how a reader
+Both paths end at the same call (`eval::run`, `run_selected_block`). So they
+cannot disagree about what running a block does, only about how a reader
 gets there.
 
 ### Discoverability outside the TUI
@@ -758,7 +760,7 @@ gets there.
 `dankg eval <path>... --list` (`eval::session::list_blocks`/`list_corpus_text`)
 answers the same question a CI script or a reader without a terminal needs
 answered: every top-level named block, its language, source line, containing
-heading (the nearest heading at or above the block's own line -- a cheap
+heading (the nearest heading at or above the block's own line, a cheap
 approximation of the same containment `graph/build.rs` computes properly for
 the node itself, without needing the whole graph pipeline just to answer
 "what can I run here"), and whether that language is configured at all. It
@@ -767,9 +769,9 @@ graph's own pipeable, "requested output" surface (decision 13's reasoning
 applied to eval).
 
 Unlike `--block`/`--all`, scoped to exactly one file because `deps=` only
-resolves within one (decision 19), `--list` has no execution to scope: a
-named file lists just its own blocks, a directory (or several paths, or
-nothing -- defaulting to `.`) walks the whole corpus via `index::load` the
+resolves within one (decision 19), `--list` has no execution to scope. A
+named file lists just its own blocks. A directory (or several paths, or
+nothing, defaulting to `.`) walks the whole corpus via `index::load` the
 same way `graph`/`index`/`check` already do (decision 6) and lists every
 file's, each line still prefixed by its own root-relative path.
 
@@ -777,47 +779,47 @@ file's, each line still prefixed by its own root-relative path.
 
 `?` is fixed, not remappable (see *Interaction* above), and toggles a
 full-screen keybinding reference (`app::help_lines`) that *replaces* the
-graph rather than overlaying it -- there is no compositing in this module,
-and full-screen takeover is exactly what `enter`'s editor handoff already
+graph rather than overlaying it. There is no compositing in this module.
+Full-screen takeover is exactly what `enter`'s editor handoff already
 does for the same reason. It reads `keys` live, so a remapped letter shows up
 correctly rather than the reference silently going stale next to a config
 that no longer matches it.
 
-Help mode is fully modal in the event loop: every key but the dismissers
+Help mode is fully modal in the event loop. Every key but the dismissers
 (`?`, esc, `keys.quit`) is swallowed before it reaches the graph's own match
 arms, so nothing about the selection, panning, or an in-progress eval cycle
-can change while help is on screen. `write_frame` -- the buffered-write,
+can change while help is on screen. `write_frame` (the buffered-write,
 no-trailing-`\r\n`-on-the-last-line logic decision-critical to not scrolling
-the alternate screen (see the Terminal UI intro) -- is shared between the
-graph frame and the help screen, the only two things this module ever draws;
-it deliberately does not clip columns itself, since a graph line carries
-ANSI dimming codes that count as characters but not screen columns, and
-column-clipping those would cut one off mid-escape-sequence. Plain-text
+the alternate screen; see the Terminal UI intro) is shared between the
+graph frame and the help screen, the only two things this module ever
+renders. It deliberately does not clip columns itself, since a graph line
+carries ANSI dimming codes that count as characters but not screen columns.
+Column-clipping those would cut one off mid-escape-sequence. Plain-text
 callers (the status line, help's own lines) clip themselves before handing
 `write_frame` anything.
 
 ### A byte lost after a standalone Esc
 
 Binding `esc` to something real surfaced a latent bug in `input.rs` that
-nothing had ever exercised: \[`decode`\] tells a lone Esc apart from
-`ESC [ <letter>` by reading one more byte, and when that byte is not `[`, it
-correctly reports using only 1 of the 2 bytes it looked at -- but
-`read_key`'s loop discarded its whole buffer between calls, so that second,
-unused byte -- the start of whatever the reader actually typed *next* --
+nothing had ever exercised. [`decode`] tells a lone Esc apart from
+`ESC [ <letter>` by reading one more byte. When that byte is not `[`, it
+correctly reports using only 1 of the 2 bytes it looked at. But
+`read_key`'s loop discarded its whole buffer between calls. So that second,
+unused byte (the start of whatever the reader actually typed *next*)
 simply vanished. In a debug build this tripped a `debug_assert_eq!` the loop
-carried for exactly this invariant; in a release build there was no assert
-to catch it, so the keystroke right after every standalone Esc was silently
-eaten and the reader had to press it twice. Nothing before this session ever
+carried for exactly this invariant. In a release build there was no assert
+to catch it. So the keystroke right after every standalone Esc was silently
+eaten, and the reader had to press it twice. Nothing before this session ever
 bound standalone Esc to anything, so the path was real but unreachable by
-any interaction table entry -- true "documented gap" until eval's cycle mode
-gave Esc a job and made it load-bearing.
+any interaction table entry. It was a true "documented gap" until eval's
+cycle mode gave Esc a job and made it load-bearing.
 
 The fix threads a small `pending: Vec<u8>` through `read_key` across calls,
-owned by `event_loop`: a byte `decode` reports as unused is carried into the
+owned by `event_loop`. A byte `decode` reports as unused is carried into the
 next call instead of discarded, decoded first (before any new read, so a
 `pending` buffer that already resolves to a full key never blocks trying to
 read more), and drained back out to whatever is left over each time. Found by
-driving the real binary through a pty, not by the unit tests alone -- the
+driving the real binary through a pty, not by the unit tests alone. The
 existing suite only ever fed `decode` and `read_key` complete, single
 sequences in one shot, never a standalone Esc immediately followed by
 another real keystroke in the same read.

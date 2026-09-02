@@ -3,8 +3,8 @@
 A deliberately flat subset of YAML: `key: value` scalars, optionally
 quoted, and inline bracket lists (`tags: [a, b]`). Nested mappings, block
 sequences, anchors, aliases, and multiline scalars are all outside the
-subset -- unsupported input warns with its line number and is skipped,
-never guessed at, matching the same "half-understood is worse than
+subset. Unsupported input warns with its line number and is skipped,
+never guessed at. This matches the same "half-understood is worse than
 refused" bar the rest of DanKG's own markdown subset holds
 (`md/mod.md`'s `Block::Passthrough`).
 
@@ -14,7 +14,7 @@ refused" bar the rest of DanKG's own markdown subset holds
 //! Supported: `key: value` scalars, optionally quoted, and inline bracket lists
 //! (`tags: [a, b]`). Not supported: nested mappings, block sequences, anchors
 //! and aliases, and multiline scalars. Unsupported input warns with its line
-//! number and is skipped -- never guessed at.
+//! number and is skipped, never guessed at.
 
 use crate::diag::Diags;
 
@@ -25,12 +25,12 @@ pub enum Value {
 }
 ```
 
-`raw` is deliberately kept alongside the lossy `entries` view: quoting,
+`raw` is deliberately kept alongside the lossy `entries` view. Quoting,
 comments, key order, and every unsupported line are all gone from
-`entries` by the time it exists, so `dankg fmt` re-emits `raw` verbatim
-instead of trying to reconstruct any of that -- the same principle
-`Block::Passthrough` already applies to a construct outside the block-level
-subset, extended down into frontmatter.
+`entries` by the time it exists. `dankg fmt` re-emits `raw` verbatim
+instead of trying to reconstruct any of that. This is the same principle
+`Block::Passthrough` already applies to a construct outside the
+block-level subset, extended down into frontmatter.
 
 ```rust name=frontmatter_struct path=md/frontmatter.rs
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -40,18 +40,18 @@ pub struct Frontmatter {
     ///
     /// `entries` is a lossy view: quoting, comments, key order and every
     /// unsupported line are gone from it. `dankg fmt` re-emits this instead, on
-    /// the same principle as `Block::Passthrough` -- the formatter never
+    /// the same principle as `Block::Passthrough`. The formatter never
     /// rewrites a construct it does not fully model.
     pub raw: String,
 }
 ```
 
 `tangle_public` is decision 27's own frontmatter hint, read here and
-consumed only through the tangle sidecar manifest a `glue` command reads
-\-- DanKG's own code never branches on it directly. Anything other than
-exactly `true` means private, the same conservative default frontmatter
-already applies everywhere else in this module: a typo should never
-silently widen a module's visibility.
+consumed only through the tangle sidecar manifest a `glue` command reads.
+DanKG's own code never branches on it directly. Anything other than
+exactly `true` means private. This is the same conservative default
+frontmatter already applies everywhere else in this module. A typo
+should never silently widen a module's visibility.
 
 ```rust name=frontmatter_impl path=md/frontmatter.rs
 impl Frontmatter {
@@ -98,13 +98,14 @@ impl Frontmatter {
     /// `dankg.tangle.public` (decision 27): this file's tangled output
     /// should be declared publicly visible wherever a `[tangle.<lang>]
     /// glue` command's generated module declarations would otherwise
-    /// default to private. Per file, not per heading -- frontmatter has no
-    /// finer scope than that -- and consumed only through the sidecar
-    /// manifest a glue command reads; DanKG's own code never branches on
-    /// it. Unset or anything other than exactly `true` means private,
-    /// the same "half-understood is worse than refused" default frontmatter
-    /// already applies elsewhere: a typo here should never silently make a
-    /// module more visible than the author checked for.
+    /// default to private. This is per file, not per heading. Frontmatter
+    /// has no finer scope than that. It is consumed only through the
+    /// sidecar manifest a glue command reads. DanKG's own code never
+    /// branches on it. Unset, or anything other than exactly `true`, means
+    /// private. This is the same "half-understood is worse than refused"
+    /// default frontmatter already applies elsewhere. A typo here should
+    /// never silently make a module more visible than the author checked
+    /// for.
     pub fn tangle_public(&self) -> bool {
         self.scalar("dankg.tangle.public") == Some("true")
     }
@@ -113,8 +114,8 @@ impl Frontmatter {
 
 `split` is the only entry point block-level parsing ever calls
 (`md/mod.md`'s `Document::parse`). Without a closing fence, what looked
-like frontmatter was never frontmatter at all -- a lone `---` is a
-thematic break, and the whole file stays content untouched, matching
+like frontmatter was never frontmatter at all. A lone `---` is a
+thematic break. The whole file stays content untouched. This matches
 CommonMark rather than guessing at authorial intent.
 
 ```rust name=split path=md/frontmatter.rs
@@ -127,8 +128,8 @@ pub fn split<'a>(source: &'a str, diags: &mut Diags) -> (Frontmatter, &'a str, u
         return (Frontmatter::default(), source, 1);
     };
 
-    // Find the closing fence. Without one this was never frontmatter -- it is a
-    // thematic break, and the whole file is content.
+    // Find the closing fence. Without one this was never frontmatter. It is
+    // a thematic break. The whole file is content.
     let mut offset = 0usize;
     let mut close: Option<(usize, u32)> = None;
     for (i, line) in rest.lines().enumerate() {
@@ -163,16 +164,16 @@ fn strip_open_fence(source: &str) -> Option<&str> {
 }
 ```
 
-Each unsupported construct gets its own warning with its own explanation
-\-- a reader who hits one should never have to guess which of YAML's
-excluded features they wrote, only what to do instead.
+Each unsupported construct gets its own warning with its own
+explanation. A reader who hits one should never have to guess which of
+YAML's excluded features they wrote, only what to do instead.
 
 ```rust name=parse_body path=md/frontmatter.rs
 fn parse_body(body: &str, diags: &mut Diags) -> Frontmatter {
     let mut fm = Frontmatter::default();
 
     for (i, raw) in body.lines().enumerate() {
-        // Line 1 is the opening `---`, so body line 0 is document line 2.
+        // Line 1 is the opening `---`. Body line 0 is document line 2.
         let line = i as u32 + 2;
         let trimmed = raw.trim();
 
@@ -262,7 +263,7 @@ fn find_key_separator(line: &str) -> Option<usize> {
     None
 }
 
-/// Strip a ` # comment` tail. YAML requires whitespace before the `#`, which
+/// Strip a ` # comment` tail. YAML requires whitespace before the `#`. This
 /// keeps values such as `color: #fff` intact.
 fn strip_trailing_comment(value: &str) -> &str {
     if value.starts_with('"') || value.starts_with('\'') {
@@ -354,7 +355,7 @@ mod tests {
 
     #[test]
     fn unterminated_fence_is_content_not_frontmatter() {
-        // A lone `---` is a thematic break. Nothing is dropped, so nothing warns.
+        // A lone `---` is a thematic break. Nothing is dropped. Nothing warns.
         let (fm, rest, _, d) = parse("---\nsome text\n");
         assert!(fm.is_empty());
         assert_eq!(rest, "---\nsome text\n");

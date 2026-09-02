@@ -1,70 +1,71 @@
 # Eval plan
 
 The dependency DAG: which named top-level code blocks a target needs, in
-the order `eval::run` must concatenate them. Deliberately scoped to
-*top-level* blocks only -- `doc.blocks` directly, never recursing into a
-list the way `Document::named_blocks` does for the graph -- because
+the order `eval::run` must concatenate them. It is deliberately scoped to
+*top-level* blocks only, meaning `doc.blocks` directly. It never recurses
+into a list the way `Document::named_blocks` does for the graph.
 `eval::result`'s write-back needs a block's position in that same flat
-list to find (or place) its result marker right after it. Keeping eval's
-whole view of "what blocks exist" to that one flat list means there is
-only one notion of "the code block named `index`" to keep in step, rather
-than two; a named block nested in a list is invisible to eval entirely,
-not planned and not a valid `deps=` target -- a documented gap rather
-than a silently different rule for write-back versus everything else.
+list, to find (or place) its result marker right after it. Keeping
+eval's whole view of "what blocks exist" to that one flat list means
+there is only one notion of "the code block named `index`" to keep in
+step, rather than two. A named block nested in a list is invisible to
+eval entirely: it is not planned, and not a valid `deps=` target. This is
+a documented gap, not a silently different rule for write-back versus
+everything else.
 
-A block's name is unique across the *whole file*, and `deps=` resolves
-against the whole file too -- flat, not scoped to a heading. Decision 22
-tried heading-scoped uniqueness with lexical, ancestor-only `deps=`
-resolution; it was reverted once real use showed it broke the single most
-natural literate-pipeline shape, a sequence of sibling sections each
-depending on the last, which a lexical walk that only ever looks *upward*
-cannot reach. Flat resolution is what every block, in any heading, being
-reachable from any other actually requires; heading-scoped identity was
-never load-bearing for anything but tangle's own placement, and tangle
-groups by heading directly without needing eval's notion of a name to
-agree.
+A block's name is unique across the *whole file*. `deps=` resolves
+against the whole file too, flat rather than scoped to a heading.
+Decision 22 tried heading-scoped uniqueness with lexical, ancestor-only
+`deps=` resolution. It was reverted once real use showed it broke the
+single most natural literate-pipeline shape: a sequence of sibling
+sections each depending on the last. A lexical walk that only ever looks
+*upward* cannot reach that shape. Every block, in any heading, must be
+reachable from any other. Flat resolution is what makes that possible.
+Heading-scoped identity was never load-bearing for anything but tangle's
+own placement. Tangle groups by heading directly, without needing eval's
+notion of a name to agree.
 
 ```rust name=module_doc path=eval/plan.rs
 //! The dependency DAG: which named top-level code blocks a target needs,
 //! in the order `run.rs` must concatenate them.
 //!
-//! Deliberately scoped to *top-level* blocks only -- `doc.blocks` directly,
-//! never recursing into a list the way `Document::named_blocks` does for
-//! the graph. `result.rs`'s write-back needs a block's position in that
-//! same flat list to find (or place) its result marker right after it;
-//! keeping eval's whole view of "what blocks exist" to that flat list
-//! means there is only one notion of "the code block named `index`" to
-//! keep in step, rather than two. A named block nested in a list is
-//! invisible to eval entirely -- not planned, not a valid `deps=` target --
-//! a documented gap rather than a silently different rule for write-back
-//! versus everything else.
+//! Deliberately scoped to *top-level* blocks only, meaning `doc.blocks`
+//! directly. It never recurses into a list the way `Document::named_blocks`
+//! does for the graph. `result.rs`'s write-back needs a block's position
+//! in that same flat list, to find (or place) its result marker right
+//! after it. Keeping eval's whole view of "what blocks exist" to that
+//! flat list means there is only one notion of "the code block named
+//! `index`" to keep in step, rather than two. A named block nested in a
+//! list is invisible to eval entirely: it is not planned, and not a valid
+//! `deps=` target. This is a documented gap, not a silently different
+//! rule for write-back versus everything else.
 //!
-//! A block's name is unique across the whole file, and `deps=` resolves
-//! against the whole file too -- flat, not scoped to a heading. Decision
-//! 22 tried heading-scoped uniqueness with lexical, ancestor-only `deps=`
-//! resolution; it was reverted (see architecture.md) once real use showed
-//! it broke the single most natural literate-pipeline shape, a sequence of
-//! sibling sections each depending on the last, which a lexical walk that
-//! only ever looks *upward* cannot reach. Flat resolution is what every
-//! block, in any heading, being reachable from any other actually
-//! requires; heading-scoped identity was never load-bearing for anything
-//! but tangle's placement, and tangle groups by heading directly
-//! (`containing_heading`/`root_heading`, below) without needing eval's
-//! notion of a name to agree.
+//! A block's name is unique across the whole file. `deps=` resolves
+//! against the whole file too, flat rather than scoped to a heading.
+//! Decision 22 tried heading-scoped uniqueness with lexical, ancestor-only
+//! `deps=` resolution. It was reverted (see architecture.md) once real
+//! use showed it broke the single most natural literate-pipeline shape: a
+//! sequence of sibling sections each depending on the last. A lexical
+//! walk that only ever looks *upward* cannot reach that shape. Every
+//! block, in any heading, must be reachable from any other. Flat
+//! resolution is what makes that possible. Heading-scoped identity was
+//! never load-bearing for anything but tangle's placement
+//! (`containing_heading`/`root_heading`, below). Tangle groups by heading
+//! directly, without needing eval's notion of a name to agree.
 
 use crate::md::{Block, Document, InfoString, Inline};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// One heading as `Document::headings` reports it: level, title inlines,
-/// and the line its `#` marker opens on. Only the level and line matter to
-/// `tangle`'s placement; title text is read separately, from the same
+/// and the line its `#` marker opens on. Only the level and line matter
+/// to `tangle`'s placement. Title text is read separately, from the same
 /// tuple, only where a display string is actually needed.
 pub type Heading<'a> = (u8, &'a [Inline], u32);
 
-/// One block eval can run: enough of `Block::Code` and its `InfoString` to
-/// plan, execute and locate for write-back, borrowed straight from the
-/// parsed `Document` rather than copied.
+/// One block that eval can evaluate. It holds enough of `Block::Code`
+/// and its `InfoString` to plan, evaluate, and locate for write-back. It
+/// is borrowed straight from the parsed `Document` rather than copied.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockRef<'a> {
     /// Root-relative path of the file this block was parsed from. Needed
@@ -73,7 +74,7 @@ pub struct BlockRef<'a> {
     /// not `name` alone. Every same-file caller passes one literal string
     /// for every block it builds, so nothing about the common case changes.
     pub file: &'a str,
-    /// Position in `doc.blocks` -- what `result::locate_existing` uses to
+    /// Position in `doc.blocks`. `result::locate_existing` uses this to
     /// look immediately after this block for an existing result marker.
     pub index: usize,
     pub name: &'a str,
@@ -84,7 +85,7 @@ pub struct BlockRef<'a> {
     pub deps: Vec<&'a str>,
     pub timeout: Option<u64>,
     /// `tangle`'s placement override (decision 24). Ignored by eval
-    /// entirely -- a block's `path=` has nothing to do with running it.
+    /// entirely. A block's `path=` has nothing to do with evaluating it.
     pub path: Option<&'a str>,
 }
 ```
@@ -105,13 +106,14 @@ pub enum PlanError {
     /// ending back where it started.
     Cycle(Vec<String>),
     /// `block` declares a different `lang` than `target`, the block whose
-    /// chain it was pulled into -- refused because the whole chain is
-    /// concatenated into one file and run through `target`'s one
-    /// interpreter, and code in the wrong language would just fail there.
+    /// chain it was pulled into. This is refused because the whole chain
+    /// is concatenated into one file and run through `target`'s one
+    /// interpreter. Code in the wrong language would just fail there.
     MixedLang { target: String, target_lang: String, block: String, block_lang: String },
     /// `block`'s `deps=dep` named a cross-file path that climbs above the
-    /// root -- the same refusal a written link's target already gets
-    /// (`graph::resolve::join_normalize`), reused rather than reimplemented.
+    /// root. This is the same refusal a written link's target already
+    /// gets (`graph::resolve::join_normalize`), reused rather than
+    /// reimplemented.
     DepEscapesRoot { block: String, dep: String },
 }
 
@@ -189,21 +191,21 @@ fn block_ref<'a>(
 ```
 
 `split_dep` mirrors a written link's own `other.md#heading` shape
-exactly, and `resolve_dep` reuses `graph::resolve::join_normalize`
-rather than reimplementing it -- the same reason `graph::resolve` shares
-it with this module in the first place: a dependency and a link should
-never disagree about what a relative path means. A file nobody loaded and
-a name that does not exist in a file that *was* loaded are deliberately
-indistinguishable from here: both are just "not found," which is exactly
-what `PlanError::UnknownDep`'s own message already says without needing
-to explain why.
+exactly. `resolve_dep` reuses `graph::resolve::join_normalize` rather
+than reimplementing it. `graph::resolve` shares it with this module for
+the same reason: a dependency and a link should never disagree about
+what a relative path means. A file nobody loaded and a name that does
+not exist in a file that *was* loaded are deliberately indistinguishable
+from here. Both are just "not found." That is exactly what
+`PlanError::UnknownDep`'s own message already says, without needing to
+explain why.
 
 ```rust name=split_dep_and_resolve path=eval/plan.rs
 /// Splits a `deps=` entry into a cross-file path part (if any) and the
-/// name, mirroring a written link's own `other.md#heading` shape exactly:
-/// `deps=setup` is `(None, "setup")`; `deps=../lib.md#setup` is
-/// `(Some("../lib.md"), "setup")`. A `#` with nothing before it (`#name`) is
-/// treated as local, the same as a bare link fragment addressing the
+/// name, mirroring a written link's own `other.md#heading` shape exactly.
+/// `deps=setup` is `(None, "setup")`. `deps=../lib.md#setup` is
+/// `(Some("../lib.md"), "setup")`. A `#` with nothing before it (`#name`)
+/// is treated as local, the same as a bare link fragment addressing the
 /// current file.
 pub fn split_dep(raw: &str) -> (Option<&str>, &str) {
     match raw.split_once('#') {
@@ -217,16 +219,16 @@ enum DepLookup {
     NotFound,
 }
 
-/// Resolves one `deps=` entry declared by a block living in `from_file` to
-/// its index in `blocks`. A local reference (no `#`) stays within
-/// `from_file`; a cross-file one resolves its path against `from_file`'s own
-/// directory the same way a written link's target would
-/// (`graph::resolve::join_normalize`, reused rather than reimplemented, so a
-/// dependency and a link agree about what a relative path means). A file
-/// nobody loaded and a name that does not exist in a file that *was* loaded
-/// are indistinguishable from here on purpose: both are just "not found",
-/// which is exactly what `PlanError::UnknownDep`'s existing message already
-/// says without needing to say why.
+/// Resolves one `deps=` entry declared by a block living in `from_file`
+/// to its index in `blocks`. A local reference (no `#`) stays within
+/// `from_file`. A cross-file one resolves its path against `from_file`'s
+/// own directory the same way a written link's target would
+/// (`graph::resolve::join_normalize`, reused rather than reimplemented,
+/// so a dependency and a link agree about what a relative path means). A
+/// file nobody loaded and a name that does not exist in a file that
+/// *was* loaded are indistinguishable from here on purpose. Both are
+/// just "not found". That is exactly what `PlanError::UnknownDep`'s
+/// existing message already says, without needing to say why.
 fn resolve_dep(blocks: &[BlockRef], from_file: &str, raw: &str) -> Result<usize, DepLookup> {
     let (path_part, name) = split_dep(raw);
     let target_file: std::borrow::Cow<str> = match path_part {
@@ -247,7 +249,7 @@ fn dep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
 }
 
 /// `name` alone for a block belonging to `home` (today's messages,
-/// unchanged for the common single-file case); `file#name` once a block
+/// unchanged for the common single-file case). `file#name` once a block
 /// came from somewhere else, so a cycle or an error naming it says which
 /// file it actually lives in.
 fn label(b: &BlockRef, home: &str) -> String {
@@ -256,21 +258,21 @@ fn label(b: &BlockRef, home: &str) -> String {
 ```
 
 `containing_heading`/`root_heading` exist here, not in `graph::build`,
-because `tangle` needs exactly this lookup and nothing more -- no slug, no
-file key, no graph -- to decide which file a block belongs in (decision
-24\). `root_heading`'s walk is what generalizes "a level-1 heading becomes
-one file" to "the top of the containment tree becomes one file," so a
-document that opens with a level-2 heading (no level-1 wrapper at all)
-still has a well-defined top rather than one dictated by a level number no
-ancestor of it actually has.
+because `tangle` needs exactly this lookup and nothing more: no slug, no
+file key, no graph. It uses them to decide which file a block belongs in
+(decision 24). `root_heading`'s walk generalizes "a level-1 heading
+becomes one file" to "the top of the containment tree becomes one file."
+This way, a document that opens with a level-2 heading (no level-1
+wrapper at all) still has a well-defined top, rather than one dictated by
+a level number no ancestor of it actually has.
 
 ```rust name=heading_lookups path=eval/plan.rs
-/// The line number of the heading that immediately contains a block sitting
-/// at `block_line` -- the nearest heading at or above it, in document
-/// order. `None` is the file-level scope: before any heading, or a file
-/// with none. The same approximation `session::list_blocks` already uses
-/// to report a block's containing heading, reused here by `tangle`
-/// (decision 24) to group blocks by heading without a second
+/// The line number of the heading that immediately contains a block
+/// sitting at `block_line`: the nearest heading at or above it, in
+/// document order. `None` is the file-level scope: before any heading, or
+/// a file with none. This is the same approximation `session::list_blocks`
+/// already uses to report a block's containing heading. `tangle` reuses
+/// it (decision 24) to group blocks by heading, without a second
 /// implementation of the same lookup.
 pub(crate) fn containing_heading(headings: &[Heading], block_line: u32) -> Option<u32> {
     headings.iter().rfind(|(_, _, line)| *line <= block_line).map(|(_, _, line)| *line)

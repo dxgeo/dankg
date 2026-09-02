@@ -2,8 +2,8 @@
 
 Inline parsing: code spans, links, wikilinks, emphasis, breaks. Emphasis
 follows CommonMark's own delimiter-stack algorithm exactly, left/right-
-flanking rules and the "rule of three" included, and links resolve on the
-closing bracket rather than the opening one so that emphasis written
+flanking rules and the "rule of three" included. Links resolve on the
+closing bracket rather than the opening one. This way, emphasis written
 *inside* link text nests correctly instead of leaking past the link's own
 boundary. Outside the implemented subset and therefore left as literal
 text: images, autolinks, raw HTML, entity references, and link reference
@@ -13,16 +13,17 @@ definitions.
 //! Inline parsing: code spans, links, wikilinks, emphasis, breaks.
 //!
 //! Emphasis follows CommonMark's delimiter-stack algorithm, including the
-//! left/right-flanking rules and the "rule of three". Links are resolved on the
-//! closing bracket so that emphasis inside link text nests correctly.
+//! left/right-flanking rules and the "rule of three". Links are resolved on
+//! the closing bracket. This way, emphasis inside link text nests
+//! correctly.
 //!
 //! Outside the subset and therefore left as literal text: images, autolinks,
 //! raw HTML, entity references, and link reference definitions.
 
 use super::Inline;
 
-/// Transient node. Emphasis and bracket markers survive only until they are
-/// matched; unmatched ones degrade to literal text.
+/// Transient node. Emphasis and bracket markers survive only until they
+/// are matched. Unmatched ones degrade to literal text.
 #[derive(Debug, Clone, PartialEq)]
 enum Node {
     Text(String),
@@ -80,7 +81,7 @@ struct Parser<'a> {
 }
 ```
 
-`run` is a single-pass dispatch over character kind; everything more
+`run` is a single-pass dispatch over character kind. Everything more
 interesting (bracket matching, emphasis resolution) happens after the
 pass, over the flat node list it produces.
 
@@ -219,8 +220,8 @@ impl<'a> Parser<'a> {
 ```
 
 `close_bracket` is where emphasis inside link text gets resolved *before*
-the link node itself is formed -- `process_emphasis` runs on just the
-slice between the opener and this closer, which is exactly what makes
+the link node itself is formed. `process_emphasis` runs on just the
+slice between the opener and this closer. This is exactly what makes
 `[*a*](x)` nest an `Emph` inside the `Link` rather than the reverse.
 
 ```rust name=close_bracket path=md/inline.rs
@@ -240,7 +241,7 @@ impl<'a> Parser<'a> {
         }
 
         let Some((dest, title, end)) = self.link_destination(self.pos + 1) else {
-            // Not a link after all; the bracket becomes literal text.
+            // Not a link after all. The bracket becomes literal text.
             self.nodes[bracket.idx] = Node::Text("[".into());
             self.push_text(']');
             self.pos += 1;
@@ -255,7 +256,7 @@ impl<'a> Parser<'a> {
         let children: Vec<Node> = self.nodes.drain(bracket.idx + 1..).collect();
         self.nodes[bracket.idx] = Node::Link { dest, title, children };
 
-        // Links do not nest, so any enclosing bracket can no longer open one.
+        // Links do not nest. Any enclosing bracket can no longer open one.
         for b in &mut self.brackets {
             b.active = false;
         }
@@ -264,11 +265,11 @@ impl<'a> Parser<'a> {
 }
 ```
 
-DanKG makes no use of link titles anywhere in the graph -- but the parser
-keeps them anyway, on the same principle every AST in this crate follows:
-a tree that discards input it has already read cannot be rendered
-faithfully back, and `dankg fmt`'s round-trip guarantee depends on that
-never being true.
+DanKG makes no use of link titles anywhere in the graph. The parser
+keeps them anyway, on the same principle every AST in this crate
+follows. A tree that discards input it has already read cannot be
+rendered faithfully back. `dankg fmt`'s round-trip guarantee depends on
+that never being true.
 
 ```rust name=link_destination path=md/inline.rs
 impl<'a> Parser<'a> {
@@ -325,8 +326,9 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // DanKG makes no use of link titles, but the parser keeps them: an AST
-        // that discards input it has already read cannot be rendered faithfully.
+        // DanKG makes no use of link titles. The parser keeps them anyway. An
+        // AST that discards input it has already read cannot be rendered
+        // faithfully.
         let before_title = i;
         i = self.skip_ascii_space(i);
         let mut title = None;
@@ -350,8 +352,8 @@ impl<'a> Parser<'a> {
         i
     }
 
-    /// A `"..."`, `'...'`, or `(...)` title. Backslash escapes are honoured, so
-    /// an escaped quote does not end the title early.
+    /// A `"..."`, `'...'`, or `(...)` title. Backslash escapes are honoured.
+    /// This way, an escaped quote does not end the title early.
     fn link_title(&self, at: usize) -> Option<(String, usize)> {
         let open = *self.chars.get(at)?;
         let close = match open {
@@ -407,12 +409,12 @@ fn run_length(chars: &[char], start: usize, ch: char) -> usize {
 ```
 
 `can_open_close` is shared verbatim with the formatter, which has to
-escape exactly the delimiters this function says are live -- two separate
-copies of the same rule would eventually drift, and the drift would show
-up as emphasis silently appearing or vanishing across a `dankg fmt` run,
-exactly the kind of formatter bug the write-guard exists to catch, except
-this one would slip past it since both sides would agree with each other
-while disagreeing with the truth.
+escape exactly the delimiters this function says are live. Two separate
+copies of the same rule would eventually drift. The drift would show up
+as emphasis silently appearing or vanishing across a `dankg fmt` run,
+exactly the kind of formatter bug the write-guard exists to catch. This
+one would slip past it. Both sides would agree with each other while
+disagreeing with the truth.
 
 ```rust name=flanking_rules path=md/inline.rs
 pub(crate) fn is_punct(c: char) -> bool {
@@ -425,14 +427,14 @@ pub(crate) fn is_punct(c: char) -> bool {
 /// emphasis.
 ///
 /// Shared with the formatter, which has to escape exactly the delimiters this
-/// says are live. Two copies of this rule would drift, and the drift would show
+/// says are live. Two copies of this rule would drift. The drift would show
 /// up as emphasis appearing or vanishing on `dankg fmt`.
 pub(crate) fn can_open_close(ch: char, before: char, after: char) -> (bool, bool) {
     let (left, right) = flanking(before, after);
     if ch == '*' {
         (left, right)
     } else {
-        // `_` cannot open or close inside a word, so that snake_case_names
+        // `_` cannot open or close inside a word. This way, snake_case_names
         // survive intact.
         (left && (!right || is_punct(before)), right && (!left || is_punct(after)))
     }
@@ -467,14 +469,14 @@ fn strip_code_padding(content: &str) -> String {
 ```
 
 `process_emphasis` is CommonMark's own "process emphasis" procedure,
-adapted to an index-based node list rather than a linked list: splicing a
-matched pair out of `nodes` shifts every later index, so every delimiter
+adapted to an index-based node list rather than a linked list. Splicing
+a matched pair out of `nodes` shifts every later index. Every delimiter
 position gets fixed up immediately after each match rather than being
 trusted to stay valid across the whole loop.
 
 ```rust name=process_emphasis path=md/inline.rs
 /// CommonMark's `process emphasis` procedure, adapted to an index-based node
-/// list. Splicing shifts later indices, so delimiter positions are fixed up
+/// list. Splicing shifts later indices. Delimiter positions are fixed up
 /// after every match.
 fn process_emphasis(nodes: &mut Vec<Node>, delims: &mut Vec<Delim>, stack_bottom: usize) {
     // Lowest opener index worth revisiting, keyed by closer shape. The key is
@@ -551,7 +553,7 @@ fn process_emphasis(nodes: &mut Vec<Node>, delims: &mut Vec<Delim>, stack_bottom
         };
         nodes.insert(oi + 1, wrapped);
 
-        // The drain removed (ci - oi - 1) nodes and the insert added one.
+        // The drain removed (ci - oi - 1) nodes. The insert added one.
         let removed = ci - oi - 1;
         let delta = removed as isize - 1;
         for d in delims.iter_mut() {
@@ -616,7 +618,7 @@ fn to_inlines(nodes: Vec<Node>) -> Vec<Inline> {
             }
             Node::BracketOpen => Inline::Text("[".into()),
         };
-        // Merge adjacent text so downstream consumers see one run per span.
+        // Merge adjacent text. This way downstream consumers see one run per span.
         match (out.last_mut(), &inline) {
             (Some(Inline::Text(a)), Inline::Text(b)) => a.push_str(b),
             _ => out.push(inline),

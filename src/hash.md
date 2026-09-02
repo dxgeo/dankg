@@ -3,40 +3,42 @@ title: Hash
 ---
 # Hash
 
-DanKG needs a content hash for two things: keying the per-file index cache
-(`graph/cache.rs`) and stamping the config into that cache, so that an
-edited `.dankg/config` invalidates every entry rather than leaving a stale
-one behind. Neither use is security-bearing -- a collision costs a stale
-parse, which the next edit corrects -- so this is FNV-1a: eight lines, no
-tables, no dependency, exactly the standard-library-only constraint
+DanKG needs a content hash for two things: keying the per-file index
+cache (`graph/cache.rs`) and stamping the config into that cache. This
+way, an edited `.dankg/config` invalidates every entry rather than
+leaving a stale one behind. Neither use is security-bearing. A collision
+costs a stale parse, which the next edit corrects. This is why the
+choice is FNV-1a: eight lines, no tables, no dependency, exactly the
+standard-library-only constraint
 [decision 1](../architecture.md#decision-1-dependency-policy) holds
 everywhere else.
 
-This file is the literate source; `src/hash.rs` is generated from it by
-`dankg tangle` and then committed alongside it, so `cargo build` never
-needs a working `dankg` binary just to compile the crate -- only editing
-this module does. See *Literate source* below for the regenerate command
-and how staleness is caught.
+This file is the literate source. `src/hash.rs` is generated from it by
+`dankg tangle` and then committed alongside it. This way, `cargo build`
+never needs a working `dankg` binary just to compile the crate. Only
+editing this module does. See *Literate source* below for the regenerate
+command and how staleness is caught.
 
 ## The hash
 
 Rust's inner-doc-comment (`//!`) has to be the first thing in the file it
-documents, so it gets its own small leading block rather than living
-inside `fnv1a`'s. Every block below shares one explicit `path=hash.rs`
-(`src/lib.md` explains the convention) rather than the heading-derived
-default this file used at first -- the default only stays flat once
-`hash.md` is the *only* source file contributing Rust, and stopped being
-true the moment a second module converted: an un-pathed block groups by
-its file-prefixed heading once tangle sees more than one contributor
-([decision 26](../architecture.md#decision-26-tangle-corpus-scope)), which
+documents. This is why it gets its own small leading block, rather than
+living inside `fnv1a`'s. Every block below shares one explicit
+`path=hash.rs` (`src/lib.md` explains the convention), rather than the
+heading-derived default this file used at first. That default only stays
+flat once `hash.md` is the *only* source file contributing Rust. It
+stopped being true the moment a second module converted. An un-pathed
+block groups by its file-prefixed heading once tangle sees more than one
+contributor
+([decision 26](../architecture.md#decision-26-tangle-corpus-scope)). That
 would nest this file under `hash/hash.rs` in a corpus-wide run. An
-explicit `path=` sidesteps that decision entirely, landing at exactly
+explicit `path=` sidesteps that decision entirely. It lands at exactly
 `hash.rs` regardless of how many other files tangle alongside it.
 
-This is also the file's one deliberately duplicated sentence, not a habit
-to repeat: `//!` is what a `cargo doc` reader sees with no markdown in
-front of them, so it needs *something*, but it stays a pointer rather than
-a second copy of the paragraph above.
+This is also the file's one deliberately duplicated sentence, not a
+habit to repeat. `//!` is what a `cargo doc` reader sees with no markdown
+in front of them, so it needs *something*. It stays a pointer, though,
+rather than a second copy of the paragraph above.
 
 ```rust name=module_doc path=hash.rs
 //! A 64-bit content hash (FNV-1a). See `src/hash.md#the-hash` for why.
@@ -60,8 +62,8 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 }
 ```
 
-Cache file names all need the same shape, so the hex form is fixed-width
-rather than however many digits the value happens to need.
+Cache file names all need the same shape. This is why the hex form is
+fixed-width, rather than however many digits the value happens to need.
 
 ```rust name=hex path=hash.rs
 /// Fixed-width so cache file names all have the same shape.
@@ -115,31 +117,33 @@ mod tests {
 
 ## Literate source
 
-This is the first real (non-pilot) module converted to literate form --
-see `literate/hash.md` (outside this corpus -- `.dankgignore` excludes
-`/literate/` as its own, already self-contained concern) for the
-standalone pilot that proved the mechanics first, on a throwaway crate
-rather than the one `cargo build` actually compiles.
+This is the first real (non-pilot) module converted to literate form.
+See `literate/hash.md` for the standalone pilot that proved the
+mechanics first, on a throwaway crate rather than the one `cargo build`
+actually compiles. That directory sits outside this corpus:
+`.dankgignore` excludes `/literate/` as its own, already self-contained
+concern.
 
-Regenerate every converted module at once, from the repo root (this file
-included -- there is no narrower single-file command any more, now that
-more than one source contributes; `src/lib.md`, *Literate source*):
+Regenerate every converted module at once, from the repo root, including
+this file. There is no narrower single-file command any more, now that
+more than one source contributes (`src/lib.md`, *Literate source*):
 
 ```
 cargo run --bin dankg -- tangle . --lang rust -o src
 ```
 
 That overwrites `src/hash.rs` in place. No `[tangle.rust] glue`/`command`
-is even configured for `rust` at the repo root yet, and tangle never runs
-on its own regardless (architecture.md,
+is even configured for `rust` at the repo root yet. Tangle never runs on
+its own regardless (architecture.md,
 *[Trigger](../architecture.md#trigger)*, the same principle as
-[decision 9](../architecture.md#decision-9-eval-trigger)): run `cargo test` yourself afterward to confirm the regenerated tree still builds
+[decision 9](../architecture.md#decision-9-eval-trigger)). Run `cargo
+test` yourself afterward to confirm the regenerated tree still builds
 before committing it.
 
 **Staleness is a checked property, not an assumption.**
 `tests/literate.rs` re-tangles the whole corpus into a scratch directory
-on every `cargo test` run and diffs every file it produced against the
+on every `cargo test` run. It diffs every file it produced against the
 committed one at the same path under `src/`, failing loudly the moment
-any of them drift -- the generated tree is trusted only as far as that
-check, never on its own; the markdown that produced it is what's actually
-trusted ([Trigger](../architecture.md#trigger)).
+any of them drift. The generated tree is trusted only as far as that
+check, never on its own. The markdown that produced it is what's
+actually trusted ([Trigger](../architecture.md#trigger)).

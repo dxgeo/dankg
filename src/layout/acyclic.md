@@ -1,27 +1,29 @@
 # Layout acyclic
 
-Layering (`layout::rank`) needs a DAG, and a knowledge graph is full of
-cycles by nature -- two notes linking to each other is the normal case,
+Layering (`layout::rank`) needs a DAG. A knowledge graph is full of
+cycles by nature. Two notes linking to each other is the normal case,
 not the exception this crate needs to guard against. This is layout's
-first phase: a depth-first search finds every back edge, and the rest of
-the pipeline runs those edges the other way. Nothing is ever deleted --
-each edge remembers whether it was turned around, so the renderer still
-draws the arrowhead the way the author actually wrote the link, and only
+first phase. A depth-first search finds every back edge. The rest of
+the pipeline runs those edges the other way. Nothing is ever deleted.
+Each edge remembers whether it was turned around. The renderer still
+renders the arrowhead the way the author actually wrote the link. Only
 the internal layout geometry runs backwards. A layout that silently
-dropped an edge would be drawing a different graph from the one it was
-given, which is a correctness bar this crate holds everywhere else too.
+dropped an edge would be rendering a different graph from the one it
+was given. This is a correctness bar this crate holds everywhere else
+too.
 
 ```rust name=module_doc path=layout/acyclic.rs
 //! Phase 1: break cycles.
 //!
-//! Layering needs a DAG, and a knowledge graph is full of cycles -- two notes
-//! that link to each other are the normal case, not the exception. A depth-
-//! first search finds the back edges and the layout runs them the other way.
+//! Layering needs a DAG. A knowledge graph is full of cycles. Two notes
+//! that link to each other are the normal case, not the exception. A
+//! depth-first search finds the back edges. The layout runs them the
+//! other way.
 //!
-//! Nothing is deleted. Each edge remembers that it was turned around, so the
-//! renderer draws the arrowhead the way the author wrote it and only the
-//! geometry runs backwards. A layout that silently dropped an edge would be
-//! drawing a different graph from the one it was given.
+//! Nothing is deleted. Each edge remembers that it was turned around.
+//! The renderer still renders the arrowhead the way the author wrote it.
+//! Only the geometry runs backwards. A layout that silently dropped an
+//! edge would be rendering a different graph from the one it was given.
 
 /// What the layout had to do with one input edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,23 +31,23 @@ pub enum Role {
     Forward,
     /// A back edge, run the other way so the graph can be layered.
     Reversed,
-    /// `a -> a`. It cannot be layered at all, and is drawn as a loop.
+    /// `a -> a`. It cannot be layered at all, and is rendered as a loop.
     SelfLoop,
 }
 ```
 
-The search is iterative rather than recursive -- a corpus is allowed to
-be deeper than the call stack -- and visits roots and adjacency strictly
-in index order, so which edge of a given cycle gets reversed is arbitrary
-but never *inconsistently* arbitrary: the same input always yields the
+The search is iterative, not recursive, because a corpus is allowed to
+be deeper than the call stack. It visits roots and adjacency strictly in
+index order. Which edge of a given cycle gets reversed is arbitrary. It
+is never *inconsistently* arbitrary. The same input always yields the
 same set of reversals.
 
 ```rust name=break_cycles path=layout/acyclic.rs
 /// Classify every edge. `edges` are `(from, to, weight)` over `0..count`.
 ///
-/// The search visits roots and adjacency in index order, so the same input
-/// always yields the same set of reversals -- which of a cycle's edges gets
-/// turned around is arbitrary, but it must not be arbitrary twice.
+/// The search visits roots and adjacency in index order. The same input
+/// always yields the same set of reversals. Which of a cycle's edges gets
+/// turned around is arbitrary. It must not be arbitrary twice.
 pub fn break_cycles(count: usize, edges: &[(usize, usize, i32)]) -> Vec<Role> {
     #[derive(Clone, Copy, PartialEq)]
     enum Mark {

@@ -1,24 +1,24 @@
 # Markdown block
 
 Block structure: headings, fenced code, lists, paragraphs, thematic
-breaks. A construct outside that subset -- indented code, block quotes,
-HTML blocks -- is gathered into `Block::Passthrough` and kept verbatim
-rather than rejected: it is not an error and does not warn, it simply
-carries no graph meaning of its own, matching every other place this
+breaks. A construct outside that subset (indented code, block quotes,
+HTML blocks) is gathered into `Block::Passthrough` and kept verbatim
+rather than rejected. It is not an error. It does not warn. It simply
+carries no graph meaning of its own. This matches every other place this
 crate prefers "kept, uninterpreted" over "dropped."
 
 ```rust name=module_doc path=md/block.rs
 //! Block structure: headings, fenced code, lists, paragraphs, thematic breaks.
 //!
-//! Constructs outside the subset -- indented code, block quotes, HTML blocks --
+//! Constructs outside the subset (indented code, block quotes, HTML blocks)
 //! are gathered into `Block::Passthrough` and kept verbatim. They are not
-//! errors and do not warn; they simply carry no graph meaning.
+//! errors. They do not warn. They simply carry no graph meaning.
 
 use super::{Block, InfoString, List, ListItem, KNOWN_ATTRS};
 use crate::diag::Diags;
 
-/// A source line paired with its original 1-based line number, so that nesting
-/// and dedenting never lose the true location.
+/// A source line paired with its original 1-based line number. This way,
+/// nesting and dedenting never lose the true location.
 #[derive(Debug, Clone)]
 struct Line {
     text: String,
@@ -91,8 +91,8 @@ fn parse_lines(lines: &[Line], diags: &mut Diags) -> Vec<Block> {
 ```
 
 A paragraph only breaks on a construct that could legally interrupt one
-under CommonMark -- and an ordered list is deliberately excluded unless it
-starts at exactly `1`, which is the one rule standing between "the year
+under CommonMark. An ordered list is deliberately excluded unless it
+starts at exactly `1`. This is the one rule standing between "the year
 1986\. It was" and that sentence accidentally becoming a two-item list.
 
 ```rust name=paragraph_and_passthrough path=md/block.rs
@@ -130,7 +130,7 @@ fn interrupts_paragraph(text: &str) -> bool {
         || atx_heading(text).is_some()
         || fence_open(text).is_some()
         || text.trim_start().starts_with('>')
-        // Only a list that starts at 1 may interrupt a paragraph, which keeps
+        // Only a list that starts at 1 may interrupt a paragraph. This keeps
         // "the year 1986. It was" from becoming a list.
         || list_marker(text).is_some_and(|m| !m.ordered || m.start == 1)
 }
@@ -153,15 +153,15 @@ fn gather_passthrough(
 }
 ```
 
-A fence's own opening `len` and `indent` govern gathering and closing but
-never survive into the AST -- only the character does, since the length
-is normalized away to the shortest run that still clears the body the
-moment `dankg fmt` re-emits it, so storing what the author actually typed
+A fence's own opening `len` and `indent` govern gathering and closing.
+They never survive into the AST. Only the character does. The length is
+normalized away to the shortest run that still clears the body the
+moment `dankg fmt` re-emits it. Storing what the author actually typed
 would only ever be thrown away again.
 
 ```rust name=fence_and_info path=md/block.rs
-/// An opening fence line. Only `ch` survives into the AST; `len` and `indent`
-/// govern gathering and are then normalized away.
+/// An opening fence line. Only `ch` survives into the AST. `len` and
+/// `indent` govern gathering and are then normalized away.
 #[derive(Debug, Clone, Copy)]
 struct FenceOpen {
     ch: char,
@@ -203,8 +203,9 @@ fn gather_fence(lines: &[Line], start: usize, fence: FenceOpen, diags: &mut Diag
     (Block::Code { info, text, fence: fence.ch, line: open.num, end_line }, i)
 }
 
-/// Parse a fence info string: first word is the language, the rest is DanKG
-/// `key=value` metadata. Unknown keys warn rather than being silently dropped.
+/// Parse a fence info string. The first word is the language. The rest is
+/// DanKG `key=value` metadata. Unknown keys warn rather than being
+/// silently dropped.
 fn parse_info(raw: &str, line: u32, diags: &mut Diags) -> InfoString {
     let mut info = InfoString::default();
     let mut words = raw.split_whitespace();
@@ -242,10 +243,10 @@ fn handle_attr(info: &mut InfoString, word: &str, line: u32, diags: &mut Diags) 
 }
 ```
 
-`Marker` carries both a column-based and a byte-based content offset,
-because tabs advance a column by more than one byte -- conflating the two
-would corrupt any slice taken against whichever one the caller actually
-needed at that moment.
+`Marker` carries both a column-based and a byte-based content offset.
+Tabs advance a column by more than one byte. Conflating the two would
+corrupt any slice taken against whichever one the caller actually needed
+at that moment.
 
 ```rust name=marker_and_list_marker path=md/block.rs
 #[derive(Debug, Clone, Copy)]
@@ -255,7 +256,7 @@ struct Marker {
     /// Bullet char, or the delimiter for ordered lists. A change of character
     /// starts a new list.
     ch: char,
-    /// Column at which the item's content begins; continuation lines must be
+    /// Column at which the item's content begins. Continuation lines must be
     /// indented at least this far.
     content: usize,
     /// Byte offset of the content on the marker line itself. Distinct from
@@ -310,8 +311,8 @@ fn list_marker(text: &str) -> Option<Marker> {
     })
 }
 
-/// Spaces between the marker and the content. More than four means the content
-/// is an indented code block, so only one space counts.
+/// Spaces between the marker and the content. More than four means the
+/// content is an indented code block. Only one space counts.
 fn spaces_after_marker(after: &str) -> usize {
     let n = after.chars().take_while(|c| *c == ' ').count();
     if n == 0 || n > 4 { 1 } else { n }
@@ -319,11 +320,10 @@ fn spaces_after_marker(after: &str) -> usize {
 ```
 
 A list is loose only when a blank line separates two items that both
-already have content -- a blank line sitting right after a bare marker,
+already have content. A blank line sitting right after a bare marker,
 before the item has said anything at all, is just spacing (`-\n\n  foo`
-is one tight item), never a paragraph break, and `gather_list` tracks
-that distinction explicitly rather than treating every blank line the
-same.
+is one tight item), never a paragraph break. `gather_list` tracks that
+distinction explicitly rather than treating every blank line the same.
 
 ```rust name=gather_list path=md/block.rs
 fn gather_list(lines: &[Line], start: usize, first: Marker, diags: &mut Diags) -> (Block, usize) {
@@ -351,7 +351,7 @@ fn gather_list(lines: &[Line], start: usize, first: Marker, diags: &mut Diags) -
 
         let mut item: Vec<Line> = Vec::new();
         // The marker is consumed here. Using strip_indent would leave it in
-        // place, and parse_lines would rediscover the same list forever.
+        // place. parse_lines would rediscover the same list forever.
         let first_text = lines[i].text.get(marker.content_byte..).unwrap_or("");
         item.push(Line { text: first_text.to_string(), num: lines[i].num });
         i += 1;
@@ -371,7 +371,7 @@ fn gather_list(lines: &[Line], start: usize, first: Marker, diags: &mut Diags) -
             }
             if pending_blanks > 0 {
                 // A blank line before the item has any content is just space
-                // after the marker, not a paragraph break, so it does not make
+                // after the marker, not a paragraph break. It does not make
                 // the list loose. `-\n\n  foo` is one tight item.
                 if item.iter().any(|l| !l.text.trim().is_empty()) {
                     loose = true;
@@ -408,7 +408,7 @@ fn gather_list(lines: &[Line], start: usize, first: Marker, diags: &mut Diags) -
 ```
 
 `atx_heading` strips a trailing run of `#` as a closing sequence rather
-than content, matching CommonMark's own `## Title ##` convention; the
+than content, matching CommonMark's own `## Title ##` convention. The
 remaining recognisers (fence open, thematic break, HTML block start) are
 each a narrow, single-purpose check over one line.
 
@@ -487,10 +487,10 @@ fn starts_html_block(text: &str) -> bool {
 ```
 
 `indent_info` is the one place column and byte offset are computed
-together rather than separately, precisely because every caller above
-that needs indentation needs *both* -- a column to compare against a
-threshold, a byte offset to slice with -- and tabs are what make deriving
-one from the other unsafe.
+together rather than separately. Every caller above that needs
+indentation needs *both*: a column to compare against a threshold, a
+byte offset to slice with. Tabs are what make deriving one from the
+other unsafe.
 
 ```rust name=indent_helpers path=md/block.rs
 fn indent_of(text: &str) -> usize {
@@ -498,8 +498,8 @@ fn indent_of(text: &str) -> usize {
 }
 
 /// Leading whitespace measured both in columns (tabs advance to the next
-/// multiple of four) and in bytes. The two differ whenever tabs are involved,
-/// and conflating them corrupts every slice taken against them.
+/// multiple of four) and in bytes. The two differ whenever tabs are
+/// involved. Conflating them corrupts every slice taken against them.
 fn indent_info(text: &str) -> (usize, usize) {
     let mut cols = 0;
     for (bytes, c) in text.char_indices() {

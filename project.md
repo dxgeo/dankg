@@ -3,51 +3,67 @@ title: DanKG Project
 author: Daniel J. Okuniewicz
 ---
 This document records *what* DanKG is and *why*. [Architecture](architecture.md)
-records *how* it is built. Where the two disagree, this file wins and
+records *how* it is built. Where the two disagree, this file wins.
 architecture.md is wrong.
 
 # Overview
 
-DanKG (Dan's Knowledge Grapher) is a vanilla markdown knowledge graphing tool that is not dependent on anything else.
+DanKG (Dan's Knowledge Grapher) is a vanilla markdown knowledge graphing
+tool. It depends on nothing else.
 
 ## Key Features
 
 1. Lightweight
-2. Plaintext-driven (no fancy front-end necessary)
-3. Agent-driven capable
-   - Example: any LLM can run it for you because it only works with plaintext files
+2. Plaintext-driven (no fancy front-end needed)
+3. Agent-compatible
+   - Example: any LLM can run it, because it only works with plaintext files
 4. Compatible with standard markdown
-5. Can execute in-line code
-6. Interactive visualization capabilities
-7. Literate database management
+5. Can evaluate inline code
+6. Can visualize the graph interactively
+7. Manages literate databases
 
 ## Constraints
 
-1. Pure rust
+1. Pure Rust
 2. Dependency-free, built from scratch
 
 ## General Functionality
 
-You write a markdown file, give it a title, date, author, whatever.
-DanKG can generate a knowledge graph of all the content in that file, plus all the content in any other linked files.
-Example: You link to another top-level heading in the same document.
-Running DanKG on the file shows a flow chart going from that heading to the next one.
-The link automatically goes both ways, but it is displayed as a unidirection unless it is linked back.
+You write a markdown file and give it a title, a date, and an author.
+DanKG can generate a knowledge graph of all the content in that file and
+in any linked files. Example: you link to another top-level heading in
+the same document. Running DanKG on the file renders a graph from that
+heading to the next.
+
+A link connects both nodes automatically. DanKG renders it as
+one-directional unless there's also a link back.
 
 ## Literate database management
 
-Literate programming keeps the prose and the code that implements it in one file.
-DanKG does the same for data.
-A markdown file can hold the explanation of a table, the ETL that builds it, and a link from the table back to both.
-Running DanKG on the file shows the tables and views as nodes in the graph, edged back to the block that produced them and forward to everything downstream.
-"Where did this number come from" becomes a question you answer by following a link.
-DuckDB is the first database supported. It is never linked into DanKG; it is run as a configured command, like any other interpreter.
+Literate programming keeps the prose and the code that implements it in
+one file. DanKG does the same for data. A markdown file can hold the
+explanation of a table, the ETL that builds it, and a link from the
+table back to both. Running DanKG on the file renders the tables and
+views as nodes in the graph. Each node links back to the block that
+produced it and forward to everything downstream. "Where did this number
+come from" becomes a question you answer by following a link.
+
+DuckDB is the first database supported. DanKG never links it in. DuckDB
+runs as a configured command, like any other interpreter.
 
 ## Code evaluation
 
-DanKG can evaluate code by using the configured compiler/interpreter in PATH (or in a virtual environment like `uv`)
-The output will be displayed in the knowledge graph.
-Only code that is in view will be executed (example: in the current context) unless it is dependent on code from another context (in that case it pulls only what is needed).
-Code blocks are defined using standard markdown syntax.
-Rules for code block execution can be defined in the config file, or within each markdown file.
-Code is never evaluated automatically, it must be manually triggered for evaluation within a context.
+DanKG can evaluate code with the configured compiler or interpreter on
+PATH, or in a virtual environment like `uv`. DanKG renders the output in
+the knowledge graph.
+
+DanKG evaluates only the code that is in view, meaning the current
+context. If that code depends on code in another context, DanKG pulls
+in only what it needs.
+
+You define code blocks using standard markdown syntax. You can define
+rules for code block evaluation in the config file or in each markdown
+file.
+
+DanKG never evaluates code automatically. You must evaluate it manually,
+within a context.

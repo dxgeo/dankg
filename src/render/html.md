@@ -1,31 +1,32 @@
 # Render html
 
-A single self-contained HTML page. One file: the stylesheet and the
-script are inlined from [`render::assets`](assets.md), so there is no
+A single self-contained HTML page. It is one file. The stylesheet and the
+script are inlined from [`render::assets`](assets.md). So there is no
 network request, no build step, and no server. Open it from a `file://`
-URL, mail it to somebody, commit it -- it is the same page either way,
-which is the whole point of a static output.
+URL, mail it to somebody, or commit it. It is the same page either way.
+That is the whole point of a static output.
 
-Rust emits final SVG coordinates; the script does three things and no
-more -- pan and zoom, expand a node's hidden neighbours, and open a
-node's source file. Everything about *where the boxes are* was already
-decided here, by the same layout every other format gets. Expansion is
-instant because the whole index ships in the page as a JSON blob beside
-the drawn subgraph -- the same dump `--format json` emits. What the
-script does with it is a local placement onto the rank grid this layout
-already fixed, not a second layout engine: re-running Sugiyama in the
-browser would move every box on screen, which is precisely what a reader
-following one link does not want. `--depth N+1` is how you get the real
-layout of the larger graph, and the expanded boxes are drawn as
-provisional so the difference stays visible rather than implied.
+Rust emits final SVG coordinates. The script does three things and no
+more: pan and zoom, expand a node's hidden neighbours, and open a node's
+source file. Everything about *where the boxes are* was already decided
+here, by the same layout every other format gets.
+
+Expansion is instant because the whole index ships in the page as a JSON
+blob beside the rendered subgraph. That is the same dump `--format json`
+emits. What the script does with it is a local placement onto the rank
+grid this layout already fixed, not a second layout engine. Re-running
+Sugiyama in the browser would move every box on screen. That is precisely
+what a reader following one link does not want. `--depth N+1` is how you
+get the real layout of the larger graph. The expanded boxes render as
+provisional, so the difference stays visible rather than implied.
 
 ```rust name=module_doc path=render/html.rs
 //! A single self-contained HTML page.
 //!
-//! One file: the stylesheet and the script are inlined from `assets.rs`, so
-//! there is no network request, no build step and no server. Open it from a
-//! file:// URL, mail it to somebody, commit it -- it is the same page either
-//! way, which is the point of a static output.
+//! One file: the stylesheet and the script are inlined from `assets.rs`. So
+//! there is no network request, no build step, and no server. Open it from a
+//! file:// URL, mail it to somebody, or commit it. It is the same page either
+//! way. That is the point of a static output.
 //!
 //! Rust emits final SVG coordinates. The script does three things and no more:
 //! pan and zoom, expand a node's hidden neighbours, and open a node's source
@@ -33,12 +34,12 @@ provisional so the difference stays visible rather than implied.
 //! layout every other format gets.
 //!
 //! Expansion is instant because the whole index ships in the page as a JSON
-//! blob beside the drawn subgraph -- the same dump `--format json` emits. What
-//! the script does with it is a local placement onto the rank grid this layout
-//! already fixed, not a second layout engine: re-running Sugiyama in the
-//! browser would move every box on screen, which is precisely what a reader
-//! following one link does not want. `--depth N+1` is how you get the real
-//! layout of the larger graph, and the expanded boxes are drawn as provisional
+//! blob beside the rendered subgraph. That is the same dump `--format json`
+//! emits. What the script does with it is a local placement onto the rank grid
+//! this layout already fixed, not a second layout engine. Re-running Sugiyama
+//! in the browser would move every box on screen. That is precisely what a
+//! reader following one link does not want. `--depth N+1` is how you get the
+//! real layout of the larger graph. The expanded boxes render as provisional,
 //! so the difference is visible rather than implied.
 
 use super::assets;
@@ -57,18 +58,18 @@ pub struct Page<'a> {
 }
 ```
 
-A zero-sized `viewBox` is not a drawing, it is a browser bug waiting to
-happen, so an empty corpus still gets a real page saying so rather than
-an unusable blank canvas. Both JSON blobs -- the page's own metadata and
-the whole index -- go into inert `<script type="application/json">` tags
-until the script itself reads them; the index blob in particular is the
-*canonical* dump, the same one `--format json` emits, never a bespoke
-shape of its own, so the page and a scripted `--format json` consumer can
-never disagree about what the graph actually is.
+A zero-sized `viewBox` is not a render. It is a browser bug waiting to
+happen. So an empty corpus still gets a real page saying so, rather than
+an unusable blank canvas. Both JSON blobs (the page's own metadata and the
+whole index) go into inert `<script type="application/json">` tags until
+the script itself reads them. The index blob in particular is the
+*canonical* dump, the same one `--format json` emits. It is never a
+bespoke shape of its own. So the page and a scripted `--format json`
+consumer can never disagree about what the graph actually is.
 
 ```rust name=render path=render/html.rs
 pub fn render(view: &Graph, laid: &Layout, index: &Graph, page: &Page<'_>) -> String {
-    // A zero-sized viewBox is not a drawing, it is a browser bug waiting to
+    // A zero-sized viewBox is not a render. It is a browser bug waiting to
     // happen. An empty corpus still gets a page that says so.
     let width = laid.width.max(1);
     let height = laid.height.max(1);
@@ -109,7 +110,7 @@ pub fn render(view: &Graph, laid: &Layout, index: &Graph, page: &Page<'_>) -> St
     );
 
     // Two blobs, both inert until the script reads them. The index is the
-    // canonical dump rather than a bespoke shape, so the page and `--format
+    // canonical dump rather than a bespoke shape. So the page and `--format
     // json` can never disagree about what the graph is.
     let _ = writeln!(
         out,
@@ -177,11 +178,11 @@ fn header(out: &mut String, view: &Graph, index: &Graph, page: &Page<'_>) {
 }
 ```
 
-The box itself is the expand toggle, so opening the source needs its own
-separate hit target -- one click must never mean two things at once. It
-rides the top-right corner, outside the label's own width and inside the
-gap the layout already leaves between boxes, so it costs the title no
-characters of its own space.
+The box itself is the expand toggle. So opening the source needs its own
+separate hit target. One click must never mean two things at once. The hit
+target rides the top-right corner. It sits outside the label's own width
+and inside the gap the layout already leaves between boxes. So it costs
+the title no characters of its own space.
 
 ```rust name=node_svg path=render/html.rs
 fn node_svg(out: &mut String, laid: &layout::LaidNode, node: Option<&Node>, entry: bool) {
@@ -192,9 +193,9 @@ fn node_svg(out: &mut String, laid: &layout::LaidNode, node: Option<&Node>, entr
     if !resolved {
         classes.push_str(" unresolved");
     } else if node.is_some_and(|n| n.kind == NodeKind::Block) {
-        // A named code block reads as code, not prose -- the same
-        // distinction dot.rs draws with fillcolor and tui/draw.rs draws
-        // with a different border glyph.
+        // A named code block reads as code, not prose. dot.rs renders the
+        // same distinction with fillcolor. tui/draw.rs renders it with a
+        // different border glyph.
         classes.push_str(" block");
     }
     if entry {
@@ -230,10 +231,10 @@ fn node_svg(out: &mut String, laid: &layout::LaidNode, node: Option<&Node>, entr
         text(&layout::fit_label(title, laid.width))
     );
 
-    // The box is the expand toggle, so opening the source needs its own
-    // target: one click must never mean two things. It rides the top-right
+    // The box is the expand toggle. So opening the source needs its own
+    // target. One click must never mean two things. It rides the top-right
     // corner, outside the label's width and inside the gap the layout leaves
-    // between boxes, so it costs the title no characters.
+    // between boxes. So it costs the title no characters.
     if let Some(node) = node.filter(|n| n.resolved) {
         let _ = write!(
             out,
@@ -251,15 +252,16 @@ fn node_svg(out: &mut String, laid: &layout::LaidNode, node: Option<&Node>, entr
 }
 ```
 
-The first draft of this page wrote the edge-key separator down twice --
-once here, once in `assets::JS` -- and the two spellings quietly
-differed, so every edge got drawn a second time the instant a reader
-expanded anything. `KEY_SEP` is now sent to the script through the meta
-blob instead of being spelled out independently in both languages, since
-nothing but that agreement prevented the bug the first time. `edge_key`
-is the other half of the same fix: a reciprocated pair is one drawn line,
-so both directed halves have to hash to the identical key or the script
-would draw the second copy right over the first.
+The first draft of this page wrote the edge-key separator down twice: once
+here, once in `assets::JS`. The two spellings quietly differed. So every
+edge rendered a second time the instant a reader expanded anything.
+`KEY_SEP` is now sent to the script through the meta blob, instead of
+being spelled out independently in both languages. Nothing but that
+agreement prevented the bug the first time.
+
+`edge_key` is the other half of the same fix. A reciprocated pair is one
+rendered line. So both directed halves have to hash to the identical key,
+or the script would render the second copy right over the first.
 
 ```rust name=edge_svg_and_key path=render/html.rs
 fn edge_svg(out: &mut String, edge: &layout::LaidEdge, view: &Graph) {
@@ -289,17 +291,17 @@ fn edge_svg(out: &mut String, edge: &layout::LaidEdge, view: &Graph) {
     out.push_str("/>\n");
 }
 
-/// What separates the parts of a line's key. Sent to the script in the meta
-/// blob rather than written down in both languages -- the first version of
-/// this file did write it down twice, the two spellings differed, and the
-/// result was every edge being drawn a second time the moment a reader
-/// expanded anything. Nothing but agreement here prevents that.
+/// What separates the parts of a line's key. It is sent to the script in the
+/// meta blob, rather than written down in both languages. The first version
+/// of this file wrote it down twice. The two spellings differed. The result
+/// was every edge rendering a second time the moment a reader expanded
+/// anything. Nothing but agreement here prevents that.
 pub const KEY_SEP: &str = " ";
 
-/// The identity of a drawn line, which is not the identity of an edge: a
-/// reciprocated pair is one line, so both halves have to hash to the same key
-/// or the script would draw the second over the first. `assets::JS` computes
-/// this the same way, and that agreement is what keeps expansion idempotent.
+/// The identity of a rendered line. This is not the identity of an edge. A
+/// reciprocated pair is one line, so both halves have to hash to the same key,
+/// or the script would render the second over the first. `assets::JS` computes
+/// this the same way. That agreement is what keeps expansion idempotent.
 fn edge_key(edge: &layout::LaidEdge) -> String {
     let (from, to) = (edge.from.to_string(), edge.to.to_string());
     if edge.kind == EdgeKind::Link && edge.reciprocated && from != to {
@@ -318,15 +320,15 @@ fn path_of(points: &[Point]) -> String {
 }
 ```
 
-`meta_json` sends the layout's own geometry constants to the script
+`meta_json` sends the layout's own geometry constants to the script,
 rather than letting the JS carry a second, independently-maintained copy
-of them -- the font-metric fiction the whole layout runs on
-(`layout::label_width`'s own estimate) has exactly one source of truth,
-and the script reads it instead of restating it.
+of them. The font-metric fiction the whole layout runs on
+(`layout::label_width`'s own estimate) has exactly one source of truth.
+The script reads it instead of restating it.
 
 ```rust name=location_and_meta path=render/html.rs
 /// Where to find the node, for the box's tooltip. A placeholder was invented
-/// to catch a dangling link and has no line to point at, so it says that
+/// to catch a dangling link. It has no line to point at. So it says that,
 /// instead of reporting a file it was never read from.
 fn location(node: &Node) -> String {
     if node.resolved {
@@ -336,9 +338,9 @@ fn location(node: &Node) -> String {
     }
 }
 
-/// Geometry the script needs to size and place a box the way Rust did. Sent
-/// rather than duplicated in the JS, so there is one source of truth for the
-/// font-metric fiction the layout runs on.
+/// Geometry the script needs to size and place a box the way Rust did. It is
+/// sent rather than duplicated in the JS. That leaves one source of truth for
+/// the font-metric fiction the layout runs on.
 fn meta_json(width: i32, height: i32, root: &str) -> String {
     format!(
         "{{\"width\": {width}, \"height\": {height}, \"root\": {root}, \
@@ -359,21 +361,21 @@ fn meta_json(width: i32, height: i32, root: &str) -> String {
 }
 ```
 
-Four small escapers, each guarding one specific place untrusted text
-(a heading, most often) lands: JSON inside a `<script>` tag only needs
-`<` neutralized, since `</script` is the one sequence that would break
-out and JSON's own syntax never produces a bare `<` outside a string;
-SVG text content needs the ordinary three; an attribute value needs a
-fourth, the quote character wrapping it; a URL needs percent-encoding
-rather than escaping, since the characters that matter there are the ones
-a *browser* reads as URL syntax, not markup -- `#` above all, since
-`notes/a#b.md` would otherwise open `notes/a` and look for an anchor
-named `b.md`.
+Four small escapers each guard one specific place where untrusted text (a
+heading, most often) lands. JSON inside a `<script>` tag only needs `<`
+neutralized. `</script` is the one sequence that would break out. JSON's
+own syntax never produces a bare `<` outside a string, so nothing else
+needs escaping there. SVG text content needs the ordinary three. An
+attribute value needs a fourth: the quote character wrapping it. A URL
+needs percent-encoding rather than escaping, because the characters that
+matter there are the ones a *browser* reads as URL syntax, not markup.
+`#` matters most: `notes/a#b.md` would otherwise open `notes/a` and look
+for an anchor named `b.md`.
 
 ```rust name=escapers path=render/html.rs
 /// JSON is only inert inside `<script>` while it cannot spell `</script`.
-/// Escaping every `<` is enough and costs nothing: JSON's own syntax has no
-/// `<` in it, so anything replaced here was inside a string literal.
+/// Escaping every `<` is enough, and it costs nothing. JSON's own syntax has
+/// no `<` in it, so anything replaced here was inside a string literal.
 fn script_json(value: &str) -> String {
     value.replace('<', "\\u003c")
 }
@@ -412,8 +414,8 @@ fn text(value: &str) -> String {
 }
 
 /// An attribute value. Every attribute here is double-quoted, so `"` has to go
-/// too -- a heading containing one would otherwise close the attribute and put
-/// the rest of the title into the tag.
+/// too. A heading containing one would otherwise close the attribute. The rest
+/// of the title would land in the tag.
 fn attr(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
@@ -428,9 +430,9 @@ fn attr(value: &str) -> String {
     out
 }
 
-/// A root-relative path as a URL. Percent-encoded rather than escaped: the
+/// A root-relative path as a URL. Percent-encoded rather than escaped. The
 /// characters that matter here are the ones a browser would read as URL
-/// syntax, and `#` is the dangerous one -- `notes/a#b.md` would otherwise open
+/// syntax. `#` is the dangerous one: `notes/a#b.md` would otherwise open
 /// `notes/a` and look for an anchor.
 fn url(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
@@ -457,8 +459,8 @@ mod tests {
     use crate::graph::{graph_of, NodeId};
 
     /// The contents of one `<script type="application/json">`. Sliced rather
-    /// than read line by line: the canonical dump is pretty-printed, so a blob
-    /// is many lines and reading only the first would prove nothing.
+    /// than read line by line. The canonical dump is pretty-printed. A blob
+    /// spans many lines, so reading only the first would prove nothing.
     fn blob<'a>(page: &'a str, id: &str) -> &'a str {
         let open = format!("id=\"{id}\">");
         let start = page.find(&open).expect("the blob") + open.len();
@@ -480,9 +482,9 @@ mod tests {
         assert!(out.contains(&format!("<style>{}</style>", assets::CSS)));
         assert!(out.contains(assets::JS));
 
-        // The SVG namespace is the one URL in the page, and it is an
-        // identifier rather than an address -- no browser ever fetches it.
-        // Anything else spelling a URL would be a second file to ship.
+        // The SVG namespace is the one URL in the page. It is an identifier
+        // rather than an address. No browser ever fetches it. Anything else
+        // spelling a URL would be a second file to ship.
         let page = out.replace("http://www.w3.org/2000/svg", "");
         for fetched in ["http://", "https://", "src=\"", "@import", "url(http"] {
             assert!(!page.contains(fetched), "the page reaches for {fetched}: not self-contained");
@@ -507,7 +509,7 @@ mod tests {
 
     #[test]
     fn the_whole_index_ships_alongside_the_drawing() {
-        // The view is one node; the blob still has to hold both, or expanding
+        // The view is one node. The blob still has to hold both, or expanding
         // would have nothing to expand into.
         let index = graph_of(&[("a.md", "# One\n\n[two](b.md#two)\n"), ("b.md", "# Two\n")]);
         let view = crate::graph::view::select(&index, &[NodeId::new("a", "one")], 0);
@@ -589,10 +591,11 @@ mod tests {
     }
 
     /// This one is not hypothetical. The first draft of `assets.rs` carried
-    /// literal NUL bytes where the key separator should have been -- invisible
-    /// in every diff and every editor, and enough to make the script redraw
-    /// every edge Rust had already drawn. A hand-written asset has no compiler
-    /// looking at it, so this is the only thing that would notice.
+    /// literal NUL bytes where the key separator should have been. That was
+    /// invisible in every diff and every editor. It was enough to make the
+    /// script re-render every edge Rust had already rendered. A hand-written
+    /// asset has no compiler looking at it. This test is the only thing that
+    /// would notice.
     #[test]
     fn the_shipped_assets_carry_no_invisible_characters() {
         for (name, asset) in [("CSS", assets::CSS), ("JS", assets::JS)] {
@@ -606,10 +609,11 @@ mod tests {
         }
     }
 
-    /// The renderer and the script agree on a line's identity or expansion
-    /// duplicates everything, and they are written in different languages, so
-    /// nothing type-checks the agreement. Keeping the separator in the blob is
-    /// what makes it structural; this is what keeps it there.
+    /// The renderer and the script must agree on a line's identity, or
+    /// expansion duplicates everything. They are written in different
+    /// languages, so nothing type-checks the agreement. Keeping the separator
+    /// in the blob is what makes it structural. This test is what keeps it
+    /// there.
     #[test]
     fn the_script_takes_the_key_separator_from_the_page() {
         assert!(

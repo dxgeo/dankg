@@ -2,37 +2,38 @@
 
 The HTML page's stylesheet and script, as string constants. Inlined
 verbatim by [`render::html`](html.md), so the rendered page is one file
-with no network requests, no build step, and no server -- the whole
-reason they live here as `const &str` rather than as files loaded at
-runtime is that a page needing a second file beside it is not a single
-self-contained artefact, and
-[decision 1](../../architecture.md#decision-1-dependency-policy) leaves
-no bundler around to solve that problem for it. Neither string is
-generated: both are hand-written, and both are held to the same rule as
-the Rust around them -- no dependencies, and nothing that phones home.
+with no network requests, no build step, and no server. They live here as
+`const &str` rather than as files loaded at runtime, because a page that
+needs a second file beside it is not a single self-contained artefact.
+[decision 1](../../architecture.md#decision-1-dependency-policy) leaves no
+bundler around to solve that problem. Neither string is generated. Both
+are hand-written. Both are held to the same rule as the Rust around them:
+no dependencies, nothing that phones home.
 
 ```rust name=module_doc path=render/assets.rs
 //! The HTML page's stylesheet and script, as string constants.
 //!
-//! Inlined verbatim by `html.rs`, so the rendered page is one file with no
-//! network requests, no build step and no server. That is the whole reason
-//! they live here as `const &str` rather than as files loaded at runtime: a
-//! page that needs a second file beside it is not a single self-contained
-//! artefact, and decision 1 leaves no bundler to solve that with.
+//! `html.rs` inlines them verbatim. The rendered page is one file with no
+//! network requests, no build step, and no server. They live here as
+//! `const &str` rather than as files loaded at runtime, because a page that
+//! needs a second file beside it is not a single self-contained artefact.
+//! Decision 1 leaves no bundler to solve that.
 //!
-//! Neither string is generated. Both are hand-written, and both are held to
-//! the same rule as the Rust: no dependencies, and nothing that phones home.
+//! Neither string is generated. Both are hand-written. Both follow the same
+//! rule as the Rust: no dependencies, nothing that phones home.
 ```
 
-The one piece of real logic hiding in a stylesheet: arrowhead markers are
-filled, not stroked, and an SVG presentation attribute cannot resolve a
-CSS custom property, so `#tip`/`#tip-contains`'s fill color has to be
-matched here by hand rather than inherited the way everything else on the
-page is. `--block-bg`/`--block-line` draw a named code block's own node
-with the same distinction `render::dot` draws with `fillcolor` and
-`tui/draw.rs` draws with a border glyph -- three renderers, one
-underlying `NodeKind::Block` fact, three different visual vocabularies for
-saying it.
+The stylesheet hides one piece of real logic. Arrowhead markers are
+filled, not stroked. An SVG presentation attribute cannot resolve a CSS
+custom property. So `#tip`/`#tip-contains`'s fill color has to be matched
+here by hand, rather than inherited the way everything else on the page
+is.
+
+`--block-bg`/`--block-line` render a named code block's own node with a
+distinct tint. `render::dot` renders the same distinction with
+`fillcolor`. `tui/draw.rs` renders it with a border glyph. Three
+renderers, one underlying `NodeKind::Block` fact, three different visual
+vocabularies for it.
 
 ```rust name=css path=render/assets.rs
 pub const CSS: &str = r##"
@@ -49,9 +50,9 @@ pub const CSS: &str = r##"
   --contains: #c4c4be;
   --accent: #2f6f4f;
   --accent-soft: #d9e8df;
-  /* A named code block's own node -- distinct from an ordinary heading's
-     --node-bg, the same distinction dot.rs draws with fillcolor and
-     tui/draw.rs draws with a different border glyph. */
+  /* A named code block's own node. Distinct from an ordinary heading's
+     --node-bg. dot.rs renders the same distinction with fillcolor.
+     tui/draw.rs renders it with a different border glyph. */
   --block-bg: #eef2ff;
   --block-line: #3c3c5c;
 }
@@ -177,8 +178,8 @@ svg.canvas.panning { cursor: grabbing; }
 
 .edge.dangling { stroke-dasharray: 4 3; }
 
-/* Arrowheads are filled, not stroked, and a presentation attribute cannot
-   resolve a custom property -- so the colour has to be matched here. */
+/* Arrowheads are filled, not stroked. A presentation attribute cannot
+   resolve a custom property. So the colour has to be matched here. */
 #tip path { fill: var(--edge); }
 #tip-contains path { fill: var(--contains); }
 
@@ -221,9 +222,10 @@ svg.canvas.panning { cursor: grabbing; }
 
 .node[data-expanded="true"] .box { fill: var(--accent-soft); }
 
-/* Grown by the script rather than served by Rust, so it reads as provisional:
-   this is a local placement, not a re-run of the layout. Nothing here touches
-   the dashes -- an expanded placeholder is still a placeholder. */
+/* Grown by the script rather than served by Rust. That is why it reads as
+   provisional. This is a local placement, not a re-run of the layout.
+   Nothing here touches the dashes. An expanded placeholder is still a
+   placeholder. */
 .node.grown .label { font-style: italic; }
 
 .src circle {
@@ -262,20 +264,23 @@ footer b { font-weight: 600; color: var(--fg); }
 "##;
 ```
 
-The script's whole job, stated once at the top of its own source and
-worth repeating here: not a re-run of the layout. The ranks Rust computed
-stay fixed as a grid, and a revealed node is dropped into the nearest
-free slot on the rank its edge puts it on -- `freeSlot` is a direct port
-of `tui::expand::free_slot`'s own algorithm, since both are answering the
-identical question against the identical kind of grid, just in two
-different languages. Running Sugiyama again in the browser would move
-every box already on screen, which is exactly what a reader who just
-clicked one link does not want to see happen. `edgeKey` reads its
-separator from the page's own meta blob (`meta.edgeKeySep`) rather than
-spelling it out independently -- `render::html`'s own module doc explains
-the bug that convention exists to prevent: the two halves of this
-agreement are written in different languages, so nothing but that shared
-value catches a drift between them.
+The script's whole job is stated once at the top of its own source. It is
+worth repeating here: this is not a re-run of the layout. The ranks Rust
+computed stay fixed as a grid. A revealed node drops into the nearest free
+slot on the rank its edge puts it on. `freeSlot` is a direct port of
+`tui::expand::free_slot`'s own algorithm. Both are answering the identical
+question against the identical kind of grid, just in two different
+languages.
+
+Running Sugiyama again in the browser would move every box already on
+screen. That is exactly what a reader who just clicked one link does not
+want to see happen.
+
+`edgeKey` reads its separator from the page's own meta blob
+(`meta.edgeKeySep`), rather than spelling it out independently.
+`render::html`'s own module doc explains the bug that this convention
+prevents. The two halves of this agreement are written in different
+languages. Nothing but that shared value catches a drift between them.
 
 ```rust name=js path=render/assets.rs
 pub const JS: &str = r##"
@@ -309,11 +314,12 @@ pub const JS: &str = r##"
     if (e.to !== e.from) { adjoin(e.to, { other: e.from, out: false, edge: e }); }
   });
 
-  // A reciprocated pair is one line, so both halves have to agree on a key or
-  // the second would be drawn over the first -- and so must this file and the
-  // renderer, which stamps `data-key` on every line it draws. The separator
-  // comes from the page rather than being written down again here: the two
-  // halves are in different languages and nothing else would catch the drift.
+  // A reciprocated pair is one line. Both halves have to agree on a key, or
+  // the second would render over the first. This file and the renderer must
+  // agree too: the renderer stamps `data-key` on every line it renders. The
+  // separator comes from the page rather than being written down again here.
+  // The two halves are in different languages. Nothing else would catch a
+  // drift between them.
   var SEP = meta.edgeKeySep;
   function edgeKey(e) {
     if (e.kind === "link" && e.reciprocated && e.from !== e.to) {
@@ -361,11 +367,11 @@ pub const JS: &str = r##"
 
   // ---- placing a node the reader asked for --------------------------------
   //
-  // Not a re-run of the layout: the ranks Rust computed are kept as a grid, and
-  // a revealed node is dropped into the nearest free slot on the rank its edge
-  // puts it. Sugiyama over the expanded set would move every box on screen,
-  // which is exactly what a reader tracing a link does not want. `--depth N+1`
-  // is how you get the real layout of the larger graph.
+  // This is not a re-run of the layout. The ranks Rust computed stay fixed as
+  // a grid. A revealed node drops into the nearest free slot on the rank its
+  // edge puts it on. Running Sugiyama over the expanded set would move every
+  // box on screen. That is exactly what a reader tracing a link does not want.
+  // `--depth N+1` is how you get the real layout of the larger graph.
 
   function widthOf(title) {
     var estimate = Array.from(title).length * G.charWidth + G.labelPad;
@@ -407,7 +413,7 @@ pub const JS: &str = r##"
       var x = Math.round(tries[i]);
       if (fits(x)) { return x; }
     }
-    // Nothing between the existing boxes was wide enough; go past all of them.
+    // Nothing between the existing boxes was wide enough. Go past all of them.
     var right = boxes.reduce(function (acc, b) { return Math.max(acc, b[1]); }, G.margin);
     return Math.round(right + G.nodeSep + width / 2);
   }
@@ -464,7 +470,7 @@ pub const JS: &str = r##"
         " L" + out + "," + (from.y - half) + " L" + from.x + "," + (from.y - half);
     }
     if (to.y === from.y) {
-      // Same rank: leave and enter the sides, so the line is not swallowed.
+      // Same rank. Leave and enter at the sides. That way the line isn't swallowed.
       var dir = to.x > from.x ? 1 : -1;
       return "M" + (from.x + dir * from.w / 2) + "," + from.y +
         " L" + (to.x - dir * to.w / 2) + "," + to.y;
@@ -488,8 +494,8 @@ pub const JS: &str = r##"
       path.dataset.key = key;
       path.dataset.from = e.from;
       path.dataset.to = e.to;
-      // Reciprocated means mutual, and a mutual link has no one direction to
-      // point in -- the same rule the static half of the drawing follows.
+      // Reciprocated means mutual. A mutual link has no one direction to
+      // point in. The static half of the rendered output follows the same rule.
       if (!(e.kind === "link" && e.reciprocated && e.from !== e.to)) {
         path.setAttribute("marker-end", e.kind === "contains" ? "url(#tip-contains)" : "url(#tip)");
       }
@@ -541,7 +547,7 @@ pub const JS: &str = r##"
       var v = visible.get(other);
       if (!v || v.owner !== id) { return; }
 
-      // Somebody else the reader expanded also reaches it, so it is not this
+      // Somebody else the reader expanded also reaches it. It is not this
       // node's to take away. Hand it over rather than making it vanish.
       var keeper = null;
       expanded.forEach(function (e) {
@@ -569,7 +575,7 @@ pub const JS: &str = r##"
     scene.setAttribute("transform", "translate(" + view.x + " " + view.y + ") scale(" + view.k + ")");
   }
 
-  /// Client coordinates in the viewBox's units, which is what `view` is in.
+  /// Client coordinates in the viewBox's units. `view` uses the same units.
   function inCanvas(event) {
     var box = svg.getBoundingClientRect();
     var scale = Math.min(box.width / meta.width, box.height / meta.height);

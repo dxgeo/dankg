@@ -1,7 +1,7 @@
 # CLI
 
-Argument parsing, hand-rolled like everything else in this crate
-([decision 1](../architecture.md#decision-1-dependency-policy)): the
+Argument parsing is hand-rolled, like everything else in this crate
+([decision 1](../architecture.md#decision-1-dependency-policy)). The
 surface is small enough that a parser crate would cost more than it
 saves.
 
@@ -53,21 +53,21 @@ pub enum Command {
         cache: bool,
         /// Hops from the entry. `None` falls back to `[graph] depth`.
         depth: Option<u32>,
-        /// Skip view selection and draw the whole index.
+        /// Skip view selection. Render the whole index.
         all: bool,
     },
     Index { paths: Vec<String>, cache: bool },
     Fmt { paths: Vec<String>, check: bool },
     Tui { paths: Vec<String>, cache: bool, depth: Option<u32>, all: bool },
-    /// `paths` holds exactly one entry for `Block`/`All`/`Each` -- `deps=`
-    /// only resolves within one file (decision 19) -- but any number for
-    /// `List`, which walks a corpus the way `graph`/`index`/`check` do and
-    /// has no execution to scope.
+    /// `paths` holds exactly one entry for `Block`/`All`/`Each`. `deps=`
+    /// only resolves within one file (decision 19). `List` takes any
+    /// number of paths instead. It walks a corpus the way
+    /// `graph`/`index`/`check` do, with no execution to scope.
     Eval { paths: Vec<String>, target: EvalTarget, yes: bool, no_write: bool, cache: bool },
     Check { paths: Vec<String>, cache: bool },
     /// `dankg tangle <path>... --lang LANG [-o DIR]`: assemble named blocks
     /// into a source tree (decisions 23-28). One file tangles just it,
-    /// unchanged since decisions 23-25; a directory (or several paths)
+    /// unchanged since decisions 23-25. A directory (or several paths)
     /// walks the corpus (decision 26), the same file-or-directory choice
     /// `--list` already offers.
     Tangle { paths: Vec<String>, lang: String, output: Option<String>, cache: bool },
@@ -77,8 +77,8 @@ pub enum Command {
 ```
 
 `USAGE` is both `--help`'s own output and the reference this project's
-`README.md` deliberately does *not* duplicate -- "kept in sync with the
-binary, not duplicated here," as the README itself puts it -- so this
+`README.md` deliberately does *not* duplicate. The README itself puts it
+this way: "kept in sync with the binary, not duplicated here." This
 string is the one canonical description of every command's behavior.
 
 ```rust name=usage path=cli.rs
@@ -194,10 +194,10 @@ Diagnostics go to stderr, so stdout stays pipeable.
 ";
 ```
 
-`parse` dispatches on the first argument, then hands the rest to each
-subcommand's own parser -- `graph`'s own flags stay inline here since
-`graph` has no separate function of its own, being both the default and
-the most-used command.
+`parse` dispatches on the first argument. Then it hands the rest to each
+subcommand's own parser. `graph`'s own flags stay inline here. `graph`
+has no separate function of its own. It is both the default and the
+most-used command.
 
 ```rust name=parse path=cli.rs
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String> {
@@ -278,7 +278,7 @@ fn parse_depth(value: &str) -> Result<u32, String> {
 }
 ```
 
-`index`, `fmt`, and `tui` each get their own small parser, each following
+`index`, `fmt`, and `tui` each get their own small parser. Each follows
 the same shape: collect known flags, collect everything else as a path,
 refuse anything starting with `-` that was not recognised.
 
@@ -362,16 +362,16 @@ fn tui<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
 }
 ```
 
-`eval`'s own target logic is the one genuinely branchy parser here: four
+`eval`'s own target logic is the one genuinely branchy parser here. Four
 mutually exclusive modes collapse into a single `match` on which flags
-were actually set, and `--list` alone gets to default its own path list
-to `.` and accept more than one, since it explores rather than runs.
+were actually set. `--list` alone defaults its own path list to `.` and
+accepts more than one path. It explores rather than evaluates.
 
 ```rust name=eval_parser path=cli.rs
-/// `--block`/`--all` take exactly one path: `deps=` only resolves within
-/// one file (`eval::plan`), so there is no meaning to naming a second.
-/// `--list` explores rather than runs, so it walks a corpus the way
-/// `graph`/`index`/`check` do -- any number of paths, defaulting to `.`.
+/// `--block`/`--all` take exactly one path. `deps=` only resolves within
+/// one file (`eval::plan`). Naming a second path has no meaning.
+/// `--list` explores rather than evaluates. It walks a corpus the way
+/// `graph`/`index`/`check` do, with any number of paths, defaulting to `.`.
 fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     let mut paths: Vec<String> = Vec::new();
     let mut block: Option<String> = None;
@@ -431,17 +431,18 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
 }
 ```
 
-`tangle` and `check` both accept any number of paths or a bare directory,
-for the opposite reasons `eval`'s `--block`/`--all`/`--each` are pinned
-to one: neither reads `deps=` at all (decision 24), and `check` walks the
-whole corpus regardless of what was named (decision 6), so there is no
-single-file DAG in either case forcing a narrower shape.
+`tangle` and `check` both accept any number of paths or a bare directory.
+The reasons are the opposite of why `eval`'s `--block`/`--all`/`--each`
+are pinned to one path. Neither `tangle` nor `check` reads `deps=` at all
+(decision 24). `check` walks the whole corpus regardless of what was
+named (decision 6). Neither case has a single-file DAG forcing a
+narrower shape.
 
 ```rust name=tangle_and_check path=cli.rs
-/// One file tangles just it; a directory (or several paths) walks the
-/// corpus (decision 26), the same choice `--list` already offers -- unlike
-/// `--block`/`--all`/`--each`, tangle never reads `deps=` (decision 24), so
-/// there is no single-file DAG forcing this to stop at one path.
+/// One file tangles just it. A directory (or several paths) walks the
+/// corpus (decision 26), the same choice `--list` already offers. Unlike
+/// `--block`/`--all`/`--each`, tangle never reads `deps=` (decision 24).
+/// There is no single-file DAG forcing this to stop at one path.
 fn tangle<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     let mut paths: Vec<String> = Vec::new();
     let mut lang: Option<String> = None;
@@ -475,8 +476,8 @@ fn tangle<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     Ok(Command::Tangle { paths, lang, output, cache })
 }
 
-/// `check` takes any number of paths, defaulting to `.` -- the corpus you are
-/// standing in is the common case, same as `index`.
+/// `check` takes any number of paths, defaulting to `.`. The corpus you
+/// are standing in is the common case, same as `index`.
 fn check<I: Iterator<Item = String>>(args: I) -> Result<Command, String> {
     let mut paths: Vec<String> = Vec::new();
     let mut cache = true;
