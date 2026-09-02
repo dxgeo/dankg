@@ -2,14 +2,14 @@
 
 //! `.dankg/config`: a minimal INI.
 //!
-//! No serde, so the format is what a hand-written parser can read without
-//! guessing: sections, `key = value`, `#` comments, no nesting and no arrays.
-//! Anything it does not understand warns with a line number and is skipped,
-//! on the same principle as frontmatter -- a config DanKG half-understood
-//! would be worse than one it refused.
+//! There is no serde. The format is what a hand-written parser can read
+//! without guessing: sections, `key = value`, `#` comments, no nesting and
+//! no arrays. Anything it does not understand warns with a line number and
+//! is skipped. This follows the same principle as frontmatter: a config
+//! DanKG half-understood would be worse than one it refused.
 //!
-//! A `[lang.*]` section is also the allowlist: a fenced block in a language
-//! with no configured command is reported and never executed.
+//! A `[lang.*]` section is also the allowlist. A fenced block in a language
+//! with no configured command is reported and never evaluated.
 
 use crate::diag::Diags;
 use crate::hash;
@@ -56,13 +56,13 @@ impl Section {
     }
 }
 
-/// Single-character key bindings for the TUI, read from `[keys]`. Arrow keys
-/// are not represented here: they are physical direction keys rather than
-/// mnemonics, so nothing about them is meaningful to remap, and they always
-/// work alongside whatever a letter is bound to. Enter and Tab are the same
-/// story -- terminal special keys, not letters -- so `[keys]` only ever
-/// touches the seven single-character actions the interaction table already
-/// names by letter.
+/// Single-character key bindings for the TUI, read from `[keys]`. Arrow
+/// keys are not represented here. They are physical direction keys rather
+/// than mnemonics, so nothing about them is meaningful to remap. They
+/// always work alongside whatever a letter is bound to. Enter and Tab are
+/// the same story: terminal special keys, not letters. `[keys]` only ever
+/// touches the seven single-character actions the interaction table
+/// already names by letter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Keymap {
     pub up: char,
@@ -106,16 +106,16 @@ pub struct Lang {
     pub ext: Option<String>,
 }
 
-/// One `[tangle.*]` section (decision 25). `command` is optional: a
-/// language with no separate build step -- tangling a Python module, say --
-/// has nothing to spawn, and materializing the tree already is the whole
+/// One `[tangle.*]` section (decision 25). `command` is optional. Take a
+/// language with no separate build step, like tangling a Python module.
+/// It has nothing to spawn. Materializing the tree already is the whole
 /// operation. `glue` is a second, independent, equally optional command
-/// (decision 26): where `command` builds the assembled tree, `glue` adds to
-/// it first -- an external, per-language extension point for structural
-/// connective tissue (module declarations) that only makes sense as a
-/// separate, swappable step, since it is squarely the kind of thing someone
-/// other than DanKG might want to write for a language DanKG never shipped
-/// one for.
+/// (decision 26). Where `command` builds the assembled tree, `glue` adds
+/// to it first. It is an external, per-language extension point for
+/// structural connective tissue (module declarations). That only makes
+/// sense as a separate, swappable step: it is squarely the kind of thing
+/// someone other than DanKG might want to write, for a language DanKG
+/// never shipped one for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tangle {
     pub name: String,
@@ -169,9 +169,9 @@ impl Config {
             let line = i as u32 + 1;
             let trimmed = raw.trim();
 
-            // A comment marker only counts at the start of a line: `command`
-            // values legitimately contain `#`, and a value is not a place to
-            // start guessing.
+            // A comment marker only counts at the start of a line.
+            // `command` values legitimately contain `#`. A value is not a
+            // place to start guessing.
             if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
                 continue;
             }
@@ -267,9 +267,9 @@ impl Config {
         self.langs().into_iter().find(|l| l.name == name)
     }
 
-    /// `[tangle.<name>]`, if configured. Unlike `[lang.*]`, its absence does
-    /// not refuse anything by itself -- `tangle` still needs a section to
-    /// know `--lang`'s fence tag is real, but a section with no `command`
+    /// `[tangle.<name>]`, if configured. Unlike `[lang.*]`, its absence
+    /// does not refuse anything by itself. `tangle` still needs a section
+    /// to know `--lang`'s fence tag is real. A section with no `command`
     /// is a complete, valid configuration on its own (decision 25).
     pub fn tangle(&self, name: &str) -> Option<Tangle> {
         self.sections.iter().find_map(|s| {
@@ -284,8 +284,8 @@ impl Config {
     }
 
     /// `[editor] command`: the template used to jump to a node's source line,
-    /// with `{file}` and `{line}` substituted. `None` when unconfigured --
-    /// falling back to `$EDITOR`/`$VISUAL` is the caller's decision, not
+    /// with `{file}` and `{line}` substituted. `None` when unconfigured.
+    /// Falling back to `$EDITOR`/`$VISUAL` is the caller's decision, not
     /// this file's, since that is environment rather than config.
     pub fn editor(&self) -> Option<&str> {
         self.get("editor", "command")
@@ -294,8 +294,8 @@ impl Config {
 
 impl Config {
     /// `[keys]`, or the defaults. A value that is not exactly one character
-    /// falls back to its default and warns; so does the whole map at once if
-    /// two actions end up bound to the same character, since applying an
+    /// falls back to its default and warns. So does the whole map at once
+    /// if two actions end up bound to the same character. Applying an
     /// ambiguous binding silently would mean one of the two keys stops
     /// working with no indication which.
     pub fn keymap(&self, diags: &mut Diags) -> Keymap {
@@ -367,8 +367,8 @@ fn section_header(
         diags.warn(line, format!("unknown section `[{name}]`; its keys are ignored"));
     }
 
-    // A repeated header continues the same section, so writing `[graph]` twice
-    // is untidy rather than destructive.
+    // A repeated header continues the same section. This way, writing
+    // `[graph]` twice is untidy rather than destructive.
     Some(match sections.iter().position(|s| s.name == name) {
         Some(i) => i,
         None => {
@@ -389,8 +389,9 @@ fn allowed_keys(name: &str) -> Option<&'static [&'static str]> {
         .map(|(_, keys)| *keys)
 }
 
-/// Quotes are stripped when they wrap the whole value, so a command with
-/// trailing spaces can be written down. They are not otherwise meaningful.
+/// Quotes are stripped when they wrap the whole value. This way, a
+/// command with trailing spaces can be written down. They are not
+/// otherwise meaningful.
 fn unquote(value: &str) -> &str {
     let bytes = value.as_bytes();
     if bytes.len() >= 2 && (bytes[0] == b'"' || bytes[0] == b'\'') && bytes[0] == bytes[bytes.len() - 1]

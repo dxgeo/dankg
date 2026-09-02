@@ -13,19 +13,20 @@ use crate::md::Document;
 use std::fs;
 
 /// Named top-level blocks whose own line falls within `[start_line,
-/// end_line]` -- a node's heading section, exactly the extent
-/// `graph/build.rs` already computes for it -- read fresh from `path` each
-/// time rather than cached, since the file may have changed since the graph
-/// was last loaded. An unreadable or unparsable file yields no blocks
-/// rather than an error: there is nowhere in the grid to show one, and the
-/// editor handoff (`editor.rs`) already treats a spawn failure the same
-/// way, best-effort.
+/// end_line]`: a node's heading section, exactly the extent
+/// `graph/build.rs` already computes for it. Read fresh from `path`
+/// each time, rather than cached, since the file may have changed since
+/// the graph was last loaded. An unreadable or unparsable file yields
+/// no blocks rather than an error: there is nowhere in the grid to
+/// show one, and the editor handoff (`editor.rs`) already treats a
+/// spawn failure the same way, best-effort.
 ///
-/// Each block's position among *all* the file's named top-level blocks is
-/// carried alongside its name, not just the name on its own: a section that
-/// spans a nested sub-heading can legally contain two blocks sharing a
-/// name (decision 22 scopes uniqueness to one heading, not a whole
-/// subtree), and that position is what `run` needs to run the right one.
+/// Each block's position among *all* the file's named top-level blocks
+/// is carried alongside its name, not just the name on its own. A
+/// section that spans a nested sub-heading can legally contain two
+/// blocks sharing a name (decision 22 scopes uniqueness to one
+/// heading, not a whole subtree), and that position is what `run`
+/// needs to run the right one.
 pub fn blocks_in_section(path: &str, start_line: u32, end_line: u32) -> Vec<(usize, String)> {
     let Ok(source) = fs::read_to_string(path) else { return Vec::new() };
     let mut diags = Diags::new(path);
@@ -81,8 +82,8 @@ mod tests {
             "a.md",
             "# One\n\n```sh name=a\n:\n```\n\n# Two\n\n```sh name=b\n:\n```\n",
         );
-        // "One" spans lines 1-5 (up to the blank line before "Two"); "a" sits
-        // inside it, "b" does not.
+        // "One" spans lines 1-5 (up to the blank line before "Two"). "a"
+        // sits inside it, "b" does not.
         let found = blocks_in_section(&path, 1, 5);
         assert_eq!(found, vec![(0, "a".to_string())]);
     }
@@ -94,7 +95,7 @@ mod tests {
 
     #[test]
     fn blocks_in_section_carries_the_right_position_when_a_name_is_reused() {
-        // "setup" appears twice; the section for "Two" (a nested heading
+        // "setup" appears twice. The section for "Two" (a nested heading
         // under "One") must report *its own* setup's position, not One's.
         let path = scratch_file(
             "e.md",

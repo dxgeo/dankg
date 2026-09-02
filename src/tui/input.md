@@ -1,11 +1,11 @@
 # TUI input
 
-Split in two on purpose: `decode` is a pure function over an
+This is split in two on purpose. `decode` is a pure function over an
 already-collected byte slice, fully unit-testable with no real terminal
-involved, unlike everything in `crate::tui::term` (not yet converted);
-`read_key` is the thin, untested I/O wrapper that feeds `decode` one byte
-at a time from a real reader. Every test below exercises `decode` and
-`read_key` directly, with no terminal in the loop at all.
+involved, unlike everything in `crate::tui::term` (not yet converted).
+`read_key` is the thin, untested I/O wrapper that feeds `decode` one
+byte at a time from a real reader. Every test below exercises `decode`
+and `read_key` directly, with no terminal in the loop at all.
 
 ```rust name=module_doc path=tui/input.rs
 //! Raw bytes off stdin, decoded into key events.
@@ -35,27 +35,29 @@ pub enum Key {
 }
 ```
 
-The one genuinely subtle case: a lone `ESC` is indistinguishable from the
-start of `ESC [ <letter>` (an arrow key) without reading one more byte,
-and `decode` never guesses -- it reports exactly how many bytes it
-actually consumed, which can be fewer than it was given, so nothing byte
-gets silently absorbed into the wrong key.
+The one genuinely subtle case is a lone `ESC`, indistinguishable from
+the start of `ESC [ <letter>` (an arrow key) without reading one more
+byte. `decode` never guesses. It reports exactly how many bytes it
+actually consumed, which can be fewer than it was given, so no byte
+ever gets silently absorbed into the wrong key.
 
 ```rust name=decode path=tui/input.rs
-/// Decodes the key event at the front of `bytes`, returning it along with
-/// how many bytes it consumed -- which can be *fewer* than `bytes.len()`:
-/// a lone `ESC` cannot be told apart from the start of `ESC [ <letter>`
-/// without reading one more byte, and when that byte turns out not to be
-/// `[`, it was never part of the Esc and is reported as unused rather than
-/// swallowed. [`read_key`] carries that unused byte forward into the next
-/// call rather than discarding it, which is what makes it safe to bind Esc
-/// to something (`app.rs` does, to cancel an eval cycle or dismiss help)
-/// without silently eating whatever key the reader pressed right after it.
+/// Decodes the key event at the front of `bytes`, returning it along
+/// with how many bytes it consumed. This can be *fewer* than
+/// `bytes.len()`: a lone `ESC` cannot be told apart from the start of
+/// `ESC [ <letter>` without reading one more byte, and when that byte
+/// turns out not to be `[`, it was never part of the Esc and is
+/// reported as unused, rather than swallowed. [`read_key`] carries
+/// that unused byte forward into the next call, rather than discarding
+/// it. That is what makes it safe to bind Esc to something (`app.rs`
+/// does, to cancel an eval cycle or dismiss help) without silently
+/// eating whatever key the reader pressed right after it.
 ///
-/// `None` means `bytes` is a prefix of a longer sequence. [`read_key`] has
-/// no read timeout, so a bare Esc keypress still blocks until another key
-/// arrives before it is recognised -- a bounded latency quirk, not a
-/// correctness one now that no byte is lost either way.
+/// `None` means `bytes` is a prefix of a longer sequence. [`read_key`]
+/// has no read timeout, so a bare Esc keypress still blocks until
+/// another key arrives before it is recognised. This is a bounded
+/// latency quirk, not a correctness one, now that no byte is lost
+/// either way.
 pub fn decode(bytes: &[u8]) -> Option<(Key, usize)> {
     let &first = bytes.first()?;
     match first {
@@ -112,18 +114,19 @@ fn utf8_width(first: u8) -> usize {
 ```
 
 ```rust name=read_key path=tui/input.rs
-/// Blocks until one key event is available on `r`, threading `pending`
-/// across calls for exactly one reason: a standalone Esc is only
-/// disambiguated from the start of `ESC [ <letter>` by reading one byte
-/// past it (see [`decode`]'s doc comment), and when that byte turns out not
-/// to be `[`, `decode` reports it as unused (`Some((Key::Esc, 1))` from a
-/// two-byte buffer) rather than silently absorbing it into the Esc. That
-/// leftover byte is the start of the *next* key the reader actually typed;
-/// dropping it -- which a fresh, unshared buffer on every call would do --
-/// would either fail the `used == buf.len()` assumption below or, worse,
-/// eat whatever they pressed right after Esc. The caller owns `pending`
-/// (an empty `Vec` to start) purely so it survives between calls; nothing
-/// about its contents matters to the caller otherwise.
+/// Blocks until one key event is available on `r`, threading
+/// `pending` across calls for exactly one reason: a standalone Esc is
+/// only disambiguated from the start of `ESC [ <letter>` by reading
+/// one byte past it (see [`decode`]'s doc comment), and when that byte
+/// turns out not to be `[`, `decode` reports it as unused
+/// (`Some((Key::Esc, 1))` from a two-byte buffer) rather than silently
+/// absorbing it into the Esc. That leftover byte is the start of the
+/// *next* key the reader actually typed. Dropping it, which a fresh,
+/// unshared buffer on every call would do, would either fail the
+/// `used == buf.len()` assumption below or, worse, eat whatever they
+/// pressed right after Esc. The caller owns `pending` (an empty `Vec`
+/// to start) purely so it survives between calls. Nothing about its
+/// contents matters to the caller otherwise.
 pub fn read_key<R: Read>(mut r: R, pending: &mut Vec<u8>) -> io::Result<Key> {
     let mut buf = std::mem::take(pending);
     loop {
@@ -196,11 +199,11 @@ mod tests {
 
     #[test]
     fn read_key_does_not_lose_the_byte_after_a_standalone_esc() {
-        // A real standalone Esc keypress followed immediately by another
-        // key ('q' here) arrives as one contiguous read: decode reports the
-        // Esc as using only 1 of the 2 bytes it had to look at, and that
-        // second byte must come back out of the *next* read_key call rather
-        // than being silently dropped.
+        // A real standalone Esc keypress followed immediately by
+        // another key ('q' here) arrives as one contiguous read. decode
+        // reports the Esc as using only 1 of the 2 bytes it had to look
+        // at, and that second byte must come back out of the *next*
+        // read_key call, rather than being silently dropped.
         let mut src: &[u8] = b"\x1bq";
         let mut pending = Vec::new();
         assert_eq!(read_key(&mut src, &mut pending).unwrap(), Key::Esc);
@@ -211,9 +214,9 @@ mod tests {
 
     #[test]
     fn read_key_replays_pending_bytes_without_reading_again_if_they_already_decode() {
-        // If `pending` alone already decodes to a full key, read_key must
-        // not block trying to read more from `r` -- an empty reader here
-        // would hang forever if it did.
+        // If `pending` alone already decodes to a full key, read_key
+        // must not block trying to read more from `r`. An empty reader
+        // here would hang forever if it did.
         let mut empty: &[u8] = b"";
         let mut pending = vec![b'q'];
         assert_eq!(read_key(&mut empty, &mut pending).unwrap(), Key::Char('q'));

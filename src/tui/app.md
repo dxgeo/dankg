@@ -586,13 +586,14 @@ impl App {
 }
 ```
 
-`eval_key`, `cancel_block_select`, and `run_selected_block` are the whole
-of `keys.eval` cycling: first press looks up the selected node's own
-named blocks -- exactly `node.line..=node.end_line`, the extent
-`graph::build` already computes for it -- and starts cycling; a later
-press just advances, wrapping. A node with no named blocks in its section
-is a silent no-op, the same "nowhere to report to" reasoning `enter`'s
-editor spawn already follows for its own best-effort failures. `enter`
+`eval_key`, `cancel_block_select`, and `run_selected_block` are the
+whole of `keys.eval` cycling. The first press looks up the selected
+node's own named blocks (exactly `node.line..=node.end_line`, the
+extent `graph::build` already computes for it) and starts cycling. A
+later press just advances, wrapping. A node with no named blocks in
+its section is a silent no-op, the same "nowhere to report to"
+reasoning `enter`'s editor spawn already follows for its own
+best-effort failures. `enter`
 while cycling needs no separate confirmation, the same way `enter` needs
 none before it spawns the configured editor on a plain selected node --
 cycling to a block and pressing `enter` to run it already *is* the
@@ -717,13 +718,14 @@ impl App {
 }
 ```
 
-The two movement primitives read differently on purpose: within a rank
-there is already an order the layout committed to, so left/right just
-walks it and clamps at either end; across ranks there is no such shared
-order between two different rows, so up/down instead lands on whichever
-node in the target rank sits nearest in `x` -- well-defined without
-inventing a second notion of adjacency, since `x` is already the layout's
-own answer to "where does this node belong horizontally."
+The two movement primitives read differently on purpose. Within a
+rank there is already an order the layout committed to, so left/right
+just walks it and clamps at either end. Across ranks there is no such
+shared order between two different rows, so up/down instead lands on
+whichever node in the target rank sits nearest in `x`. This is
+well-defined without inventing a second notion of adjacency, since `x`
+is already the layout's own answer to "where does this node belong
+horizontally."
 
 ```rust name=movement path=tui/app.rs
 impl App {

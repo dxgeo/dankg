@@ -2,26 +2,26 @@
 
 //! Hashing, the `<!-- dankg:result ... -->` marker, and write-back.
 //!
-//! Write-back is text splicing over the original source, not a second pass
-//! through `md/fmt.rs`: a full AST-to-text rewrite would reformat every
-//! other block in the file on the first `dankg eval`, which is not eval's
-//! job and not what decision 12 ("file stays the source of truth") asks
-//! for. Instead this locates the exact line range to touch -- using the
-//! already-parsed `Document` only to *find* that range -- and replaces
-//! nothing else.
+//! Write-back is text splicing over the original source. It is not a
+//! second pass through `md/fmt.rs`. A full AST-to-text rewrite would
+//! reformat every other block in the file on the first `dankg eval`.
+//! That is not eval's job, and it is not what decision 12 ("file stays
+//! the source of truth") asks for. Instead this locates the exact line
+//! range to touch. It uses the already-parsed `Document` only to *find*
+//! that range, and it replaces nothing else.
 
 use super::plan::BlockRef;
 use super::run;
 use crate::hash;
 use crate::md::{Block, Document};
 
-/// Covers the target's transitive dependency sources, in the order they are
-/// concatenated, and the *template* the language resolved to -- not the
-/// fully-substituted argv, which would embed eval's own ephemeral temp file
-/// path and make every result "stale" the instant it was checked. Editing
-/// `[lang.*] command` in config is exactly the kind of change that should
-/// mark a result stale; a different temp path on every run is not a change
-/// at all.
+/// Covers the target's transitive dependency sources, in the order they
+/// are concatenated, and the *template* the language resolved to. It
+/// does not cover the fully-substituted argv, which would embed eval's
+/// own ephemeral temp file path and make every result "stale" the
+/// instant it was checked. Editing `[lang.*] command` in config is
+/// exactly the kind of change that should mark a result stale. A
+/// different temp path on every run is not a change at all.
 pub fn expected_hash(chain: &[BlockRef], command_template: &str) -> u64 {
     let mut bytes = run::concatenated_source(chain).into_bytes();
     bytes.push(0);
@@ -29,21 +29,21 @@ pub fn expected_hash(chain: &[BlockRef], command_template: &str) -> u64 {
     hash::fnv1a(&bytes)
 }
 
-/// `failed` marks a non-zero exit or a timeout: the output is still stored
-/// (architecture.md, Execution -- "a non-zero exit stores the output and
-/// marks the result failed"), just flagged rather than dropped, so a reader
-/// sees what actually happened last time without `dankg eval` silently
-/// discarding a run that went wrong.
+/// `failed` marks a non-zero exit or a timeout. The output is still
+/// stored (architecture.md, Execution: "a non-zero exit stores the
+/// output and marks the result failed"), just flagged rather than
+/// dropped. This way a reader sees what actually happened last time,
+/// without `dankg eval` silently discarding a run that went wrong.
 pub fn render_marker(name: &str, result_hash: u64, failed: bool) -> String {
     let flag = if failed { " failed" } else { "" };
     format!("<!-- dankg:result name={name} hash={}{flag} -->", hash::hex(result_hash))
 }
 
-/// The inverse of [`render_marker`], tolerant of the exact spacing a hand
-/// edit might introduce but not of a comment that merely happens to start
-/// the same way -- `key=value` order is not fixed, but `name` and `hash`
-/// must both be present, matching how `md/block.rs` reads a fence's own
-/// info string.
+/// The inverse of [`render_marker`]. It tolerates the exact spacing a
+/// hand edit might introduce, but not a comment that merely happens to
+/// start the same way. `key=value` order is not fixed, but `name` and
+/// `hash` must both be present, matching how `md/block.rs` reads a
+/// fence's own info string.
 pub fn parse_marker(line: &str) -> Option<(String, u64, bool)> {
     let inner = line.trim().strip_prefix("<!--")?.strip_suffix("-->")?.trim();
     let inner = inner.strip_prefix("dankg:result")?.trim();
@@ -66,16 +66,18 @@ pub fn parse_marker(line: &str) -> Option<(String, u64, bool)> {
     Some((name?, result_hash?, failed))
 }
 
-/// Looks immediately after the top-level code block at `doc.blocks[code_index]`
-/// for an already-written result marker naming `name`, returning
-/// `(marker_line, result_fence_close_line)` -- both 1-indexed, inclusive --
-/// when one is found. `write_back` uses this to replace a stale result in
-/// place instead of appending a second copy underneath it.
+/// Looks immediately after the top-level code block at
+/// `doc.blocks[code_index]` for an already-written result marker naming
+/// `name`. Returns `(marker_line, result_fence_close_line)` (both
+/// 1-indexed, inclusive) when one is found. `write_back` uses this to
+/// replace a stale result in place, instead of appending a second copy
+/// underneath it.
 pub fn locate_existing(doc: &Document, code_index: usize, name: &str) -> Option<(u32, u32)> {
     let Block::Passthrough { text, line } = doc.blocks.get(code_index + 1)? else { return None };
-    // Our own marker is always a lone line: a comment merged with more
+    // Our own marker is always a lone line. A comment merged with more
     // passthrough text by `gather_passthrough` (no blank line separating
-    // them) is not one we wrote, so it is left alone rather than guessed at.
+    // them) is not one we wrote, so it is left alone rather than guessed
+    // at.
     let mut lines = text.lines();
     let first = lines.next()?;
     if lines.next().is_some() {
@@ -89,13 +91,13 @@ pub fn locate_existing(doc: &Document, code_index: usize, name: &str) -> Option<
     Some((*line, *end_line))
 }
 
-/// Replaces `source`'s bytes from just after `code_end_line` through
-/// `existing`'s end (when there is a prior result for this name) -- or
-/// inserts fresh right after `code_end_line` (when there is not -- `existing`
-/// is `None`) -- with a freshly rendered marker and result fence. Blank-line
-/// spacing around the result is always renormalized to exactly what is
-/// written here, so it self-heals any drift rather than accumulating it
-/// across repeated evals.
+/// Replaces `source`'s bytes with a freshly rendered marker and result
+/// fence. When there is a prior result for this name, it replaces from
+/// just after `code_end_line` through `existing`'s end. When there is
+/// not (`existing` is `None`), it inserts fresh right after
+/// `code_end_line`. Blank-line spacing around the result is always
+/// renormalized to exactly what is written here, so it self-heals any
+/// drift rather than accumulating it across repeated evals.
 pub fn write_back(
     source: &str,
     code_end_line: u32,

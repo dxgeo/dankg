@@ -6,7 +6,7 @@
 //! key-event decoding), `draw` (`Layout` -> character grid), `editor`
 //! (spawning the reader's editor, via [`crate::cmd`]), `expand`
 //! (tab-to-expand's placement logic), `eval` (cycling a node's named
-//! blocks and running one via [`crate::eval::session`]), and `app` (the
+//! blocks and evaluating one via [`crate::eval::session`]), and `app` (the
 //! event loop) are built. `app::run` is the entry point.
 
 mod app;

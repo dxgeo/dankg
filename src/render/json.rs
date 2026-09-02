@@ -2,20 +2,20 @@
 
 //! Canonical JSON graph dump.
 //!
-//! This is the surface that makes DanKG scriptable, and the one the graph logic
-//! is tested through. It is pretty-printed rather than minified because the
-//! output is meant to be committed and diffed.
+//! This is the surface that makes DanKG scriptable. It is also the one the
+//! graph logic is tested through. It is pretty-printed rather than minified
+//! because the output is meant to be committed and diffed.
 //!
-//! Written by hand: DanKG takes no crates, and the shape here is small and
+//! It is written by hand. DanKG takes no crates. The shape here is small and
 //! fully under our control.
 
 use crate::graph::{Graph, Node};
 use std::fmt::Write as _;
 
 /// Bumped whenever the shape changes in a way a consumer would notice.
-/// 2: a node carries `kind` (`"heading"` or `"block"`), now that a named
-/// top-level code block is its own node rather than invisible content
-/// inside its heading's line range.
+/// 2: a node now carries `kind` (`"heading"` or `"block"`). A named
+/// top-level code block is now its own node, not invisible content inside
+/// its heading's line range.
 pub const SCHEMA_VERSION: u32 = 2;
 
 pub fn render(graph: &Graph) -> String {

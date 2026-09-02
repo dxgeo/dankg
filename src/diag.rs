@@ -3,8 +3,8 @@
 //! Diagnostics.
 //!
 //! Every construct DanKG drops, skips, or cannot resolve is reported here with
-//! a source location. stdout is reserved for requested output, so everything in
-//! this module goes to stderr.
+//! a source location. stdout is reserved for requested output. This way,
+//! everything in this module goes to stderr.
 
 use std::fmt;
 
@@ -22,8 +22,9 @@ impl Level {
         }
     }
 
-    /// The inverse of [`Level::as_str`]. The cache stores diagnostics so that a
-    /// cached run reports what a cold one did, and has to read them back.
+    /// The inverse of [`Level::as_str`]. The cache stores diagnostics so
+    /// that a cached run reports what a cold one did. The cache has to read
+    /// them back.
     pub fn parse(text: &str) -> Option<Level> {
         match text {
             "warn" => Some(Level::Warn),
@@ -73,9 +74,9 @@ impl Diags {
         self.push(Level::Warn, line, message);
     }
 
-    /// Warn about a file other than this collector's own. Resolution spans the
-    /// whole corpus, so a diagnostic raised while resolving one file routinely
-    /// concerns another.
+    /// Warn about a file other than this collector's own. Resolution spans
+    /// the whole corpus. This way, a diagnostic raised while resolving one
+    /// file routinely concerns another.
     pub fn warn_in(&mut self, file: impl Into<String>, line: u32, message: impl Into<String>) {
         self.items.push(Diagnostic {
             level: Level::Warn,
@@ -120,10 +121,10 @@ impl Diags {
         self.items.extend(other.items);
     }
 
-    /// Order by location, so that the same corpus reports the same things in
-    /// the same order however the walk or the resolver happened to reach them.
-    /// Stable, so several diagnostics on one line keep the order they were
-    /// raised in.
+    /// Order by location. This way, the same corpus reports the same things
+    /// in the same order however the walk or the resolver happened to reach
+    /// them. Stable ordering keeps several diagnostics on one line in the
+    /// order they were raised in.
     pub fn sort(&mut self) {
         self.items.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     }

@@ -338,12 +338,14 @@ fn find_target(blocks: &[BlockRef], file: &str, target: &str) -> Result<usize, P
 }
 ```
 
-`plan_for` and `plan_for_index` compute the identical result; they only
-differ in how the starting block is identified -- by name, for a reader
-typing `--block foo` at a prompt, or by position, for a caller (`dankg check`'s staleness loop, the TUI's cycle-and-run) that already holds the
-exact block it means from a plan or a cycle it built moments earlier, and
-has no reason to route back through a name lookup that decision 22's
-whole-file uniqueness makes entirely redundant for it.
+`plan_for` and `plan_for_index` compute the identical result. They
+only differ in how the starting block is identified: by name, for a
+reader typing `--block foo` at a prompt, or by position, for a caller
+(`dankg check`'s staleness loop, the TUI's cycle-and-run) that already
+holds the exact block it means from a plan or a cycle it built moments
+earlier. That caller has no reason to route back through a name
+lookup that decision 22's whole-file uniqueness makes entirely
+redundant for it.
 
 ```rust name=plan_for path=eval/plan.rs
 /// `target`'s transitive `deps=`, topologically ordered, `target` itself

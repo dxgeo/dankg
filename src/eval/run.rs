@@ -2,10 +2,11 @@
 
 //! Process spawn, timeout, output capture.
 //!
-//! Decision 11: no PTY, no per-language state protocol -- dependencies and
+//! Decision 11: no PTY, no per-language state protocol. Dependencies and
 //! the target are concatenated into one temporary file and handed to the
-//! configured interpreter in a single spawn, which is what makes this work
-//! uniformly for a scripting language and a compiled one alike.
+//! configured interpreter in a single spawn. This is what makes the
+//! module work uniformly for a scripting language and a compiled one
+//! alike.
 
 use crate::cmd;
 use crate::config::{Config, Lang};
@@ -19,9 +20,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Captured stdout and stderr are each cut off here, with a note appended --
-/// the same limit and treatment architecture.md specifies for a block's
-/// output.
+/// Captured stdout and stderr are each cut off here, with a note
+/// appended. This is the same limit and treatment architecture.md
+/// specifies for a block's output.
 pub const OUTPUT_LIMIT: usize = 64 * 1024;
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -30,37 +31,37 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub struct Output {
     pub stdout: String,
     pub stderr: String,
-    /// `false` for a non-zero exit *or* a timeout kill -- either way the
+    /// `false` for a non-zero exit *or* a timeout kill. Either way the
     /// result is marked failed (architecture.md, Execution).
     pub success: bool,
     pub timed_out: bool,
 }
 
-/// Every source in `chain`, concatenated in order -- exactly what one
-/// spawned interpreter sees, dependencies first, `chain`'s last element
-/// (the target) last. Each block's `source` already ends in exactly one
-/// newline (`md/block.rs` guarantees it), so plain concatenation needs no
-/// separator of its own.
+/// Every source in `chain`, concatenated in order. This is exactly what
+/// one spawned interpreter sees: dependencies first, `chain`'s last
+/// element (the target) last. Each block's `source` already ends in
+/// exactly one newline (`md/block.rs` guarantees it), so plain
+/// concatenation needs no separator of its own.
 pub fn concatenated_source(chain: &[BlockRef]) -> String {
     chain.iter().map(|b| b.source).collect()
 }
 
-/// The interpreter `chain`'s target would run through, or `None` when its
-/// language is unconfigured -- the allowlist rule (decision: a `[lang.*]`
-/// section is also the allowlist) applied at the one point that matters,
-/// since `plan::plan_for` already guarantees every block in `chain` shares
-/// one language.
+/// The interpreter `chain`'s target would run through, or `None` when
+/// its language is unconfigured. This is the allowlist rule (decision:
+/// a `[lang.*]` section is also the allowlist), applied at the one
+/// point that matters, since `plan::plan_for` already guarantees every
+/// block in `chain` shares one language.
 pub fn command_for(config: &Config, chain: &[BlockRef]) -> Option<Lang> {
     let lang = chain.last()?.lang?;
     config.lang(lang)
 }
 
-/// Runs `source` through `lang`'s configured command, honouring `timeout`.
-/// Writes `source` to a fresh temporary file (named for `lang.ext`, if it
-/// has one, since some interpreters dispatch on extension), substitutes it
-/// into `{file}`, spawns, and removes the temp file again -- best-effort,
-/// since a leftover in the OS temp directory costs nothing an editor would
-/// ever see.
+/// Runs `source` through `lang`'s configured command, honouring
+/// `timeout`. Writes `source` to a fresh temporary file (named for
+/// `lang.ext`, if it has one, since some interpreters dispatch on
+/// extension), substitutes it into `{file}`, spawns, and removes the
+/// temp file again. This cleanup is best-effort, since a leftover in
+/// the OS temp directory costs nothing an editor would ever see.
 pub fn run(lang: &Lang, source: &str, timeout: Duration) -> Result<Output, String> {
     let path = temp_path(lang.ext.as_deref());
     fs::write(&path, source).map_err(|e| format!("could not write a temporary file: {e}"))?;
@@ -89,8 +90,8 @@ fn run_at(lang: &Lang, path: &std::path::Path, timeout: Duration) -> Result<Outp
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // A fresh process group (pgid == this child's own pid) is what lets a
-    // timeout kill the whole tree it spawned, not just this one process --
-    // see `kill_tree`.
+    // timeout kill the whole tree it spawned, not just this one process.
+    // See `kill_tree`.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -98,11 +99,12 @@ fn run_at(lang: &Lang, path: &std::path::Path, timeout: Duration) -> Result<Outp
     }
     let mut child = command.spawn().map_err(|e| format!("could not run `{}`: {e}", argv[0]))?;
 
-    // Piped stdout/stderr fill an OS buffer and block the child once it's
-    // full; a timeout loop that only polls `try_wait` would deadlock a
+    // Piped stdout/stderr fill an OS buffer and block the child once it
+    // is full. A timeout loop that only polls `try_wait` would deadlock a
     // chatty process instead of ever reaching its deadline. Reading both
     // streams to completion on their own threads is what lets the main
-    // thread poll for the timeout independently of how much output there is.
+    // thread poll for the timeout independently of how much output there
+    // is.
     let stdout = read_to_channel(child.stdout.take());
     let stderr = read_to_channel(child.stderr.take());
 
@@ -138,19 +140,20 @@ fn read_to_channel(stream: Option<impl Read + Send + 'static>) -> mpsc::Receiver
     rx
 }
 
-/// Kills `child` and, on Unix, everything it spawned. `Child::kill` alone
-/// only reaches the one process it names -- if that process is a shell
-/// running `sleep 5` as an external command, killing the shell leaves
-/// `sleep` orphaned and still holding the output pipes open, so the reader
-/// threads in `run_at` would block until it exits on its own, silently
-/// defeating the timeout that was supposed to bound this call. Spawning
-/// with `process_group(0)` above made this child the leader of its own
-/// process group (pgid == its own pid), so signalling the negated pid
-/// reaches that whole group in one call -- `Child::kill` has no equivalent,
-/// so this shells out to `kill` rather than inventing a raw syscall wrapper
-/// std does not expose. Not available off Unix; a lone `Child::kill` there
-/// is a documented gap rather than a blocked feature, the same call made
-/// for the TUI's termios (architecture.md, Terminal UI).
+/// Kills `child` and, on Unix, everything it spawned. `Child::kill`
+/// alone only reaches the one process it names. If that process is a
+/// shell running `sleep 5` as an external command, killing the shell
+/// leaves `sleep` orphaned and still holding the output pipes open. The
+/// reader threads in `run_at` would then block until it exits on its
+/// own, silently defeating the timeout that was supposed to bound this
+/// call. Spawning with `process_group(0)` above made this child the
+/// leader of its own process group (pgid == its own pid), so signalling
+/// the negated pid reaches that whole group in one call. `Child::kill`
+/// has no equivalent, so this shells out to `kill` rather than
+/// inventing a raw syscall wrapper std does not expose. Not available
+/// off Unix. A lone `Child::kill` there is a documented gap rather than
+/// a blocked feature, the same call made for the TUI's termios
+/// (architecture.md, Terminal UI).
 fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -172,7 +175,7 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> bool {
         match child.try_wait() {
             Ok(Some(_)) => return true,
             Ok(None) => {}
-            Err(_) => return true, // nothing more this loop can do; let the caller's wait() report it
+            Err(_) => return true, // nothing more this loop can do. Let the caller's wait() report it
         }
         if Instant::now() >= deadline {
             return false;
@@ -292,13 +295,13 @@ mod tests {
 
     #[test]
     fn a_timeout_kills_a_grandchild_holding_the_pipes_open_too() {
-        // `sleep` here is `sh`'s *child*, not `run`'s direct child -- killing
+        // `sleep` here is `sh`'s *child*, not `run`'s direct child. Killing
         // only the direct process (as a lone `Child::kill` would) leaves
         // `sleep` orphaned and still holding stdout/stderr open, so the
         // reader threads in `run_at` block until it exits on its own. This
-        // pins the fix (`kill_tree`, a whole-process-group kill) by bounding
-        // wall-clock time: without it this call takes the full 5 seconds
-        // regardless of the 200ms timeout requested.
+        // pins the fix (`kill_tree`, a whole-process-group kill) by
+        // bounding wall-clock time: without it this call takes the full 5
+        // seconds regardless of the 200ms timeout requested.
         let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
         let start = Instant::now();
         let out = run(&lang, "sleep 5 && echo done\n", Duration::from_millis(200)).unwrap();

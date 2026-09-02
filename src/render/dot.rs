@@ -4,13 +4,13 @@
 //!
 //! The layout is DanKG's, not graphviz's. Node positions are emitted as pinned
 //! `pos` attributes, so `neato -n -Tsvg` reproduces exactly what DanKG
-//! computed; plain `dot -Tsvg` ignores them and re-lays the graph out, but the
-//! `rank=same` groups and the containment weights mean it still agrees about
-//! which node belongs on which layer.
+//! computed. Plain `dot -Tsvg` ignores them and re-lays the graph out on its
+//! own. But the `rank=same` groups and the containment weights mean it still
+//! agrees about which node belongs on which layer.
 //!
 //! Edge geometry is deliberately not emitted. Graphviz wants B-spline control
-//! points, DanKG has polylines, and converting between them to satisfy a flag
-//! most people will not pass is not worth a bug in the arithmetic.
+//! points. DanKG has polylines. Converting between them, just to satisfy a
+//! flag most people will not pass, is not worth risking an arithmetic bug.
 
 use crate::graph::{EdgeKind, Graph, Node, NodeKind};
 use crate::layout::Layout;
@@ -97,7 +97,7 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
             attrs.push("dir=none".to_string());
         }
         if edge.kind == EdgeKind::Contains {
-            // Matches the layout's own weighting: containment is the skeleton.
+            // This matches the layout's own weighting. Containment is the skeleton.
             attrs.push("weight=2".to_string());
             attrs.push("color=\"#c0c0c0\"".to_string());
         }
@@ -119,7 +119,7 @@ fn location(node: &Node) -> String {
     }
 }
 
-/// Always quoted. Node ids carry `#` and `/`, and a heading can carry anything.
+/// Always quoted. Node ids carry `#` and `/`. A heading can carry anything.
 fn quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');

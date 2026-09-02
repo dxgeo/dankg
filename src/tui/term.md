@@ -1,30 +1,30 @@
 # TUI term
 
-Raw terminal mode, the alternate screen, and a size query -- the one
-corner of this crate that talks to the platform C library directly rather
-than through anything `std` wraps, because `std` has no termios binding
-and [decision 1](../../architecture.md#decision-1-dependency-policy)
+Raw terminal mode, the alternate screen, and a size query. This is the
+one corner of this crate that talks to the platform C library directly,
+rather than through anything `std` wraps, because `std` has no termios
+binding and [decision 1](../../architecture.md#decision-1-dependency-policy)
 rules out reaching for the `libc` crate to get one. `std` already links
-the system libc on macOS and Linux, so declaring the handful of functions
-and structs this needs (`tcgetattr`/`tcsetattr`/`cfmakeraw`, `ioctl` with
-`TIOCGWINSZ`) costs nothing in `Cargo.toml`.
+the system libc on macOS and Linux, so declaring the handful of
+functions and structs this needs (`tcgetattr`/`tcsetattr`/`cfmakeraw`,
+`ioctl` with `TIOCGWINSZ`) costs nothing in `Cargo.toml`.
 
 ```rust name=module_doc path=tui/term.rs
 //! Raw terminal mode, the alternate screen, and a size query.
 //!
-//! `std` has no termios binding, and decision 1 rules out the `libc` crate
-//! along with every other one, so this talks to the platform C library
-//! directly: `tcgetattr`/`tcsetattr`/`cfmakeraw` for raw mode, `ioctl` with
-//! `TIOCGWINSZ` for size. Both are declared, not linked from a crate --
-//! `std` already pulls in the system libc on macOS and Linux, so no
-//! `Cargo.toml` change is needed to call into it.
+//! `std` has no termios binding, and decision 1 rules out the `libc`
+//! crate along with every other one, so this talks to the platform C
+//! library directly: `tcgetattr`/`tcsetattr`/`cfmakeraw` for raw mode,
+//! `ioctl` with `TIOCGWINSZ` for size. Both are declared, not linked
+//! from a crate. `std` already pulls in the system libc on macOS and
+//! Linux, so no `Cargo.toml` change is needed to call into it.
 //!
 //! `Termios`'s field layout is not portable: macOS/BSD and Linux glibc
 //! disagree on field width and count, so the struct is `cfg`-gated per
 //! platform. `Winsize` and the ioctl request number are also
-//! platform-specific; only macOS has been run against a real terminal so
-//! far; the Linux path is written from the documented struct layout and
-//! constant but is unverified.
+//! platform-specific. Only macOS has been run against a real terminal
+//! so far. The Linux path is written from the documented struct layout
+//! and constant, but is unverified.
 
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
@@ -34,9 +34,9 @@ const TCSANOW: i32 = 0;
 ```
 
 `Termios`'s own field widths and count disagree between macOS/BSD and
-Linux glibc, so the struct itself -- not just a constant inside it -- is
-`cfg`-gated per platform; everything past this point is written against
-whichever one compiled.
+Linux glibc, so the struct itself (not just a constant inside it) is
+`cfg`-gated per platform. Everything past this point is written
+against whichever one compiled.
 
 ```rust name=platform path=tui/term.rs
 #[cfg(target_os = "macos")]
@@ -97,9 +97,9 @@ unsafe extern "C" {
 ```
 
 ```rust name=size_and_is_tty path=tui/term.rs
-/// Terminal rows and columns, via `TIOCGWINSZ`. Fails with the OS error
-/// (typically `ENOTTY`) when stdin is not a real terminal -- a pipe or the
-/// non-interactive shell this was developed under, for instance.
+/// Terminal rows and columns, via `TIOCGWINSZ`. Fails with the OS
+/// error (typically `ENOTTY`) when stdin is not a real terminal: a pipe
+/// or the non-interactive shell this was developed under, for instance.
 pub fn size() -> io::Result<(u16, u16)> {
     let mut ws = Winsize::default();
     let rc = unsafe { ioctl(STDIN_FILENO, TIOCGWINSZ, &mut ws) };
@@ -117,15 +117,17 @@ pub fn is_tty() -> bool {
 ```
 
 `RawMode` is the guard everything else in the TUI milestone is built
-inside of: nothing should touch stdin/stdout in raw mode without one of
-these alive, and its `Drop` restores both raw mode and the normal screen
-buffer even during a panic, since `Drop::drop` still runs while unwinding.
+inside of. Nothing should touch stdin/stdout in raw mode without one
+of these alive. Its `Drop` restores both raw mode and the normal
+screen buffer even during a panic, since `Drop::drop` still runs while
+unwinding.
 
 ```rust name=raw_mode path=tui/term.rs
-/// Raw mode plus the alternate screen, restored on drop -- including on
-/// panic, since `Drop::drop` still runs during unwinding. This is the
-/// guard everything else in the milestone is built inside of: nothing
-/// should touch stdin/stdout in raw mode without one of these alive.
+/// Raw mode plus the alternate screen, restored on drop. This
+/// includes on panic, since `Drop::drop` still runs during unwinding.
+/// This is the guard everything else in the milestone is built inside
+/// of: nothing should touch stdin/stdout in raw mode without one of
+/// these alive.
 pub struct RawMode {
     original: Termios,
 }

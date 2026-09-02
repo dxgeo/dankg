@@ -4,16 +4,16 @@
 //!
 //! The root is the single most load-bearing value in DanKG. Node identity is
 //! taken relative to it, so output is the same wherever the binary was run
-//! from; the link resolver refuses anything that climbs above it. With no root
-//! the boundary silently becomes the working directory, and whether
-//! `../../etc/passwd.md` is refused depends on how deep the path you happened
-//! to type was.
+//! from. The link resolver refuses anything that climbs above it. With no
+//! root the boundary silently becomes the working directory. Whether
+//! `../../etc/passwd.md` is refused then depends on how deep the path you
+//! happened to type was.
 //!
 //! Discovery walks up from the named path looking for a `.dankg/` directory.
 //! Failing that the root is the common ancestor of the paths given, which for
 //! a single file is its own directory.
 //!
-//! The index covers the whole root, always (decision 6): backlinks are only
+//! The index covers the whole root, always (decision 6). Backlinks are only
 //! honest when every file has been seen. The entry sets the view, never the
 //! index.
 
@@ -208,10 +208,10 @@ fn parse_all(
 
 /// Every `*.md` under the root, root-relative and sorted.
 ///
-/// Dot-entries are skipped outright: that is what keeps `.dankg/` and `.git/`
+/// Dot-entries are skipped outright. That is what keeps `.dankg/` and `.git/`
 /// out of the corpus without anyone having to write a pattern for them.
-/// Symlinks are never followed -- they are the one way a walk could leave the
-/// root, and the root is a hard boundary.
+/// Symlinks are never followed. They are the one way a walk could leave the
+/// root. The root is a hard boundary.
 fn walk(root: &Path, ignore: &Ignore, diags: &mut Diags, stats: &mut Stats) -> Vec<String> {
     let mut out = Vec::new();
     walk_dir(root, "", 0, ignore, diags, stats, &mut out);
@@ -291,8 +291,8 @@ fn join(prefix: &str, name: &str) -> String {
 }
 
 /// Length and modification time, the cheap half of a cache key. Both fall back
-/// to zero on a platform or filesystem that will not say, which costs a cache
-/// hit and nothing else -- the content hash still has to agree.
+/// to zero on a platform or filesystem that will not say. That costs a cache
+/// hit and nothing else. The content hash still has to agree.
 fn source_meta(path: &Path) -> (u64, u128) {
     let Ok(meta) = fs::metadata(path) else { return (0, 0) };
     let mtime = meta
@@ -304,7 +304,7 @@ fn source_meta(path: &Path) -> (u64, u128) {
     (meta.len(), mtime)
 }
 
-/// The directory a path sits in; a directory is its own container.
+/// The directory a path sits in. A directory is its own container.
 fn container(path: &Path) -> PathBuf {
     if path.is_dir() {
         path.to_path_buf()
@@ -330,7 +330,7 @@ pub fn common_ancestor(dirs: &[PathBuf]) -> PathBuf {
 }
 
 /// Resolve `.` and `..` textually, without touching the filesystem. Symlinks
-/// are deliberately not followed: `canonicalize` would resolve a link out of
+/// are deliberately not followed. `canonicalize` would resolve a link out of
 /// the root and make the boundary check meaningless.
 pub fn lexical(path: &Path) -> PathBuf {
     let mut out: Vec<Component> = Vec::new();
@@ -354,7 +354,7 @@ pub fn absolute(path: &Path) -> PathBuf {
     lexical(&cwd.join(path))
 }
 
-/// `/`-separated, for a relative path. Node identity is a string, and it must
+/// `/`-separated, for a relative path. Node identity is a string. It must
 /// read the same on every platform.
 pub fn to_slash(path: &Path) -> String {
     path.components()
