@@ -1,11 +1,13 @@
 use dankg::cli::{self, Command, Format};
 use dankg::diag::{Diags, Level};
+use dankg::eval::files as eval_files;
 use dankg::eval::{plan, result, run as eval_run, session};
 use dankg::graph::index::{self, Corpus};
 use dankg::graph::{resolve, view, EdgeKind, Graph};
 use dankg::layout;
 use dankg::md::{fmt, Block, Document};
 use dankg::render::{dot, html, json, mermaid};
+use dankg::tangle;
 use dankg::tui;
 use std::fmt::Write as _;
 use std::fs;
@@ -59,7 +61,29 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Command::Tangle { paths, lang, output, cache } => {
+            report(tangle_cmd(&paths, &lang, output.as_deref(), cache))
+        }
     }
+}
+
+/// `dankg tangle`: never automatic, the same principle as `eval` (decision
+/// 9), but with no confirm prompt -- tangle does not run the reader's
+/// program, only assembles and optionally builds it.
+fn tangle_cmd(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -> Result<(), String> {
+    let report = tangle::run(paths, lang, output, cache)?;
+    if report.files.is_empty() {
+        eprintln!("no `{lang}` blocks found under {}", paths.join(", "));
+        return Ok(());
+    }
+    eprintln!("tangled {} file(s) into {}", report.files.len(), report.dir.display());
+    if report.ran_glue {
+        eprintln!("ran `[tangle.{lang}] glue`");
+    }
+    if report.ran_command {
+        eprintln!("ran `[tangle.{lang}] command`");
+    }
+    Ok(())
 }
 
 fn report(result: Result<(), String>) -> ExitCode {
@@ -124,32 +148,41 @@ fn format_files(paths: &[String], check: bool) -> Result<bool, String> {
 
 /// `dankg check [<path>...]`: the CI gate. Unresolved links come from the
 /// same whole-root index `graph`/`index` build; staleness is checked
-/// separately per file, since `eval`'s dependency DAG (decision: scoped to
-/// one file) has nothing to say across files either.
+/// separately, over one `eval_files::Files` loaded with the *whole* corpus
+/// up front -- unlike `eval` itself (decision 19), `check` already visits
+/// every file for the unresolved-link pass, so there is no "avoid reading
+/// files a target's own chain does not reach" reason to hold back, and
+/// loading everything is what lets a cross-file `deps=` actually resolve
+/// during a staleness recheck regardless of which file is being iterated.
 fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
     let index_graph = resolve::resolve(&corpus.files, &mut diags);
     let unresolved = index_graph.nodes.iter().filter(|n| !n.resolved).count();
 
+    let mut files = eval_files::Files::new(corpus.root.clone());
+    files.load_all(&corpus.paths, &mut diags);
+    let all_blocks = files.all_blocks();
+
     let mut stale = 0usize;
     let mut checked = 0usize;
     for rel_path in &corpus.paths {
-        let full = corpus.root.join(rel_path);
-        let Ok(source) = fs::read_to_string(&full) else { continue };
-        let mut file_diags = Diags::new(rel_path.as_str());
-        let doc = Document::parse(&source, &mut file_diags);
-        diags.absorb(file_diags);
-        let blocks = plan::top_level_blocks(&doc);
+        let Some((_, doc)) = files.get(rel_path) else { continue };
+        let blocks: Vec<&plan::BlockRef> = all_blocks.iter().filter(|b| b.file == rel_path.as_str()).collect();
 
-        for b in &blocks {
-            let Some((marker_line, _)) = result::locate_existing(&doc, b.index, b.name) else { continue };
+        for (i, b) in blocks.iter().enumerate() {
+            let Some((marker_line, _)) = result::locate_existing(doc, b.index, b.name) else { continue };
             let _ = marker_line;
             let Some(Block::Passthrough { text, .. }) = doc.blocks.get(b.index + 1) else { continue };
             let Some((_, stored_hash, _)) = text.lines().next().and_then(result::parse_marker) else { continue };
             checked += 1;
 
-            let Ok(chain) = plan::plan_for(&blocks, b.name) else {
+            // By index, not by name: the loop already holds the exact block
+            // it means, so there is no reason to route back through a name
+            // lookup at all. `plan_for_index` gets the *whole* corpus'
+            // blocks so a cross-file `deps=` resolves here exactly as it
+            // would during a real `dankg eval`.
+            let Ok(chain) = plan::plan_for_index(&all_blocks, rel_path, i) else {
                 stale += 1;
                 eprintln!("stale: {rel_path} `{}` (plan changed since this result was written)", b.name);
                 continue;

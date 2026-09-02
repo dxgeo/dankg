@@ -138,13 +138,13 @@ mod tests {
     #[test]
     fn expected_hash_changes_with_source_or_command() {
         let d = doc("```python name=a\nx=1\n```\n");
-        let blocks = top_level_blocks(&d);
-        let chain = plan_for(&blocks, "a").unwrap();
+        let blocks = top_level_blocks(&d, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
         let h1 = expected_hash(&chain, "python {file}");
 
         let d2 = doc("```python name=a\nx=2\n```\n");
-        let blocks2 = top_level_blocks(&d2);
-        let chain2 = plan_for(&blocks2, "a").unwrap();
+        let blocks2 = top_level_blocks(&d2, "t.md");
+        let chain2 = plan_for(&blocks2, "t.md", "a").unwrap();
         assert_ne!(h1, expected_hash(&chain2, "python {file}"), "different source, different hash");
         assert_ne!(h1, expected_hash(&chain, "python3 {file}"), "different command, different hash");
     }
@@ -152,8 +152,8 @@ mod tests {
     #[test]
     fn expected_hash_is_stable_across_repeated_calls() {
         let d = doc("```sh name=a\necho hi\n```\n");
-        let blocks = top_level_blocks(&d);
-        let chain = plan_for(&blocks, "a").unwrap();
+        let blocks = top_level_blocks(&d, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
         assert_eq!(expected_hash(&chain, "sh {file}"), expected_hash(&chain, "sh {file}"));
     }
 

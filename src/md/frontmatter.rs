@@ -65,6 +65,20 @@ impl Frontmatter {
         v.extend(self.list("aliases"));
         v
     }
+
+    /// `dankg.tangle.public` (decision 27): this file's tangled output
+    /// should be declared publicly visible wherever a `[tangle.<lang>]
+    /// glue` command's generated module declarations would otherwise
+    /// default to private. Per file, not per heading -- frontmatter has no
+    /// finer scope than that -- and consumed only through the sidecar
+    /// manifest a glue command reads; DanKG's own code never branches on
+    /// it. Unset or anything other than exactly `true` means private,
+    /// the same "half-understood is worse than refused" default frontmatter
+    /// already applies elsewhere: a typo here should never silently make a
+    /// module more visible than the author checked for.
+    pub fn tangle_public(&self) -> bool {
+        self.scalar("dankg.tangle.public") == Some("true")
+    }
 }
 
 /// Split leading frontmatter off a document.
@@ -343,5 +357,23 @@ mod tests {
     fn aliases_merge_both_spellings() {
         let (fm, _, _, _) = parse("---\nalias: one\naliases: [two, three]\n---\n");
         assert_eq!(fm.aliases(), vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn tangle_public_defaults_to_false() {
+        let (fm, _, _, _) = parse("# No frontmatter\n");
+        assert!(!fm.tangle_public());
+    }
+
+    #[test]
+    fn tangle_public_reads_the_dotted_key() {
+        let (fm, _, _, _) = parse("---\ndankg.tangle.public: true\n---\n");
+        assert!(fm.tangle_public());
+    }
+
+    #[test]
+    fn tangle_public_rejects_anything_but_exactly_true() {
+        let (fm, _, _, _) = parse("---\ndankg.tangle.public: yes\n---\n");
+        assert!(!fm.tangle_public(), "a typo should never silently widen visibility");
     }
 }

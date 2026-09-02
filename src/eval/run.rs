@@ -212,8 +212,8 @@ mod tests {
             "```sh name=a\necho a\n```\n\n```sh name=b deps=a\necho b\n```\n",
             &mut d,
         );
-        let blocks = top_level_blocks(&doc);
-        let chain = plan_for(&blocks, "b").unwrap();
+        let blocks = top_level_blocks(&doc, "t.md");
+        let chain = plan_for(&blocks, "t.md", "b").unwrap();
         assert_eq!(concatenated_source(&chain), "echo a\necho b\n");
     }
 
@@ -222,8 +222,8 @@ mod tests {
         let c = config("[lang.sh]\ncommand = sh {file}\n");
         let mut d = crate::diag::Diags::new("t.md");
         let doc = Document::parse("```sh name=a\necho a\n```\n", &mut d);
-        let blocks = top_level_blocks(&doc);
-        let chain = plan_for(&blocks, "a").unwrap();
+        let blocks = top_level_blocks(&doc, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
         let lang = command_for(&c, &chain).unwrap();
         assert_eq!(lang.command, "sh {file}");
     }
@@ -233,8 +233,8 @@ mod tests {
         let c = config("");
         let mut d = crate::diag::Diags::new("t.md");
         let doc = Document::parse("```sh name=a\necho a\n```\n", &mut d);
-        let blocks = top_level_blocks(&doc);
-        let chain = plan_for(&blocks, "a").unwrap();
+        let blocks = top_level_blocks(&doc, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
         assert!(command_for(&c, &chain).is_none());
     }
 

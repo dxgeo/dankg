@@ -4,6 +4,7 @@
 //! to end -- is shared with `tui::eval`'s in-grid cycle-and-run, and the TUI
 //! cannot depend on the `main` binary the other way around.
 
+use super::files::Files;
 use super::plan::{self, BlockRef};
 use super::result;
 use super::run as eval_run;
@@ -20,7 +21,12 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalTarget {
     Block(String),
+    /// Decision 21: the DAG's leaves only -- a pure dependency gets no
+    /// redundant standalone spawn just for being named.
     All,
+    /// Decision 21: every named block, dependency or not, each with its
+    /// own recorded result -- the pre-decision-21 meaning of `--all`.
+    Each,
     /// Explore, don't run: name, language, line, containing heading and
     /// configured-or-not for every top-level named block in the file.
     List,
@@ -51,24 +57,42 @@ pub fn run(paths: &[String], target: &EvalTarget, yes: bool, no_write: bool, cac
     run_single(path, target, yes, no_write)
 }
 
-fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Result<(), String> {
-    let source = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let mut diags = Diags::new(path);
-    let doc = Document::parse(&source, &mut diags);
+/// The root and `path`'s own root-relative form -- what `Files` keys
+/// everything on and what a block's `deps=` resolves cross-file references
+/// relative to (the same root-relative shape a written link already
+/// resolves against). Falls back to `path` itself, unchanged, when it
+/// cannot be expressed relative to the discovered root at all; a
+/// cross-file `deps=` would then simply fail to resolve anything, exactly
+/// as if it had named a file that does not exist -- no worse than today's
+/// behaviour, since nothing before this feature ever needed `path` in
+/// root-relative form.
+fn locate(path: &str) -> (PathBuf, String) {
+    let abs = index::absolute(Path::new(path));
+    let root = index::discover_root(&abs)
+        .unwrap_or_else(|| abs.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")));
+    let rel = abs.strip_prefix(&root).map(index::to_slash).unwrap_or_else(|_| path.to_string());
+    (root, rel)
+}
 
-    let root = index::discover_root(Path::new(path))
-        .unwrap_or_else(|| Path::new(path).parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")));
+fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Result<(), String> {
+    let (root, entry_file) = locate(path);
+    let mut diags = Diags::new("dankg");
+
     let mut cfg_diags = Diags::new(".dankg/config");
     let config = Config::load(&root, &mut cfg_diags);
     diags.absorb(cfg_diags);
+
+    let mut files = Files::new(root);
+    files.discover(&entry_file, &mut diags)?;
     diags.sort();
     diags.emit();
 
-    let blocks = plan::top_level_blocks(&doc);
+    let blocks = files.all_blocks();
     let chains: Vec<Vec<BlockRef>> = match target {
         EvalTarget::List => unreachable!("dispatched to list() in run()"),
-        EvalTarget::Block(name) => vec![plan::plan_for(&blocks, name).map_err(|e| e.to_string())?],
-        EvalTarget::All => plan::plan_all(&blocks).map_err(|e| e.to_string())?,
+        EvalTarget::Block(name) => vec![plan::plan_for(&blocks, &entry_file, name).map_err(|e| e.to_string())?],
+        EvalTarget::All => plan::plan_all(&blocks, &entry_file).map_err(|e| e.to_string())?,
+        EvalTarget::Each => plan::plan_each(&blocks, &entry_file).map_err(|e| e.to_string())?,
     };
     if chains.is_empty() {
         eprintln!("nothing to run: {path} has no named top-level blocks");
@@ -98,7 +122,7 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Res
     eprintln!("will run ({total} block(s), in order):");
     for (chain, lang) in chains.iter().zip(&commands) {
         for b in chain {
-            eprintln!("  {} [{}] {path}:{}   via: {}", b.name, b.lang.unwrap_or("?"), b.line, lang.command);
+            eprintln!("  {} [{}] {}:{}   via: {}", b.name, b.lang.unwrap_or("?"), b.file, b.line, lang.command);
         }
     }
 
@@ -113,11 +137,37 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Res
     // it -- is already reflected by the time the next target's own plan is
     // rebuilt. No in-memory copy of the source needs to be threaded through
     // this loop for that to be correct.
-    let target_names: Vec<String> = chains.iter().map(|c| c.last().unwrap().name.to_string()).collect();
+    //
+    // Targets are identified by their position among *`entry_file`'s own*
+    // named top-level blocks, in document order, not by name: decision 22
+    // scoped name uniqueness to a heading, so two different targets in this
+    // very loop can share a literal name, and `run_one` re-resolving by
+    // name alone could not tell them apart, or could even run the wrong
+    // one. That position stays valid across every write-back in this loop,
+    // since a result marker is never itself a named block and so never
+    // changes how many named top-level blocks exist or their relative
+    // order -- only their line numbers, which `run_one` re-derives fresh
+    // from each re-parse anyway. A target is always one of `entry_file`'s
+    // own blocks (`plan_for`/`plan_all`/`plan_each` all scope target
+    // selection to it), never a cross-file dependency pulled into its
+    // chain, so filtering to `entry_file` before counting position is
+    // exactly `plan_for_index`'s own contract.
+    let targets: Vec<(usize, String)> = chains
+        .iter()
+        .map(|c| {
+            let target = c.last().unwrap();
+            let position = blocks
+                .iter()
+                .filter(|b| b.file == entry_file)
+                .position(|b| b.index == target.index)
+                .expect("target came from entry_file's own blocks");
+            (position, target.name.to_string())
+        })
+        .collect();
     let mut any_failed = false;
 
-    for name in &target_names {
-        let summary = run_one(path, &config, name, no_write)?;
+    for (position, name) in &targets {
+        let summary = run_one(path, &config, *position, no_write)?;
         // stderr is shown but never stored (architecture.org, Execution).
         if !summary.stderr.is_empty() {
             eprint!("{}", summary.stderr);
@@ -179,7 +229,7 @@ fn list_corpus_text(paths: &[String], corpus: &Corpus) -> Option<String> {
         let Ok(source) = fs::read_to_string(&full) else { continue };
         let mut file_diags = Diags::new(rel_path.as_str());
         let doc = Document::parse(&source, &mut file_diags);
-        let blocks = plan::top_level_blocks(&doc);
+        let blocks = plan::top_level_blocks(&doc, rel_path);
         if blocks.is_empty() {
             continue;
         }
@@ -219,29 +269,46 @@ fn list_blocks(path: &str, blocks: &[BlockRef], doc: &Document, config: &Config)
     out
 }
 
-/// Runs `name` -- which must be a top-level named block in `path` -- end to
-/// end: rebuilds its plan, resolves its language, spawns its whole chain
-/// once, and (unless `no_write`) writes the result back into `path`. The one
-/// place this sequence is implemented, so `run`'s own multi-target loop and
-/// `tui::eval`'s single-block cycle-and-run agree by construction about what
-/// "run this block" means.
-pub fn run_one(path: &str, config: &Config, name: &str, no_write: bool) -> Result<RunSummary, String> {
-    let source = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let mut diags = Diags::new(path);
-    let doc = Document::parse(&source, &mut diags);
-    let blocks = plan::top_level_blocks(&doc);
-    let chain = plan::plan_for(&blocks, name).map_err(|e| e.to_string())?;
-    let target = chain.last().expect("plan_for never returns an empty chain");
+/// Runs `position` -- an index into `path`'s named top-level blocks, in
+/// document order, *not* a name -- end to end: rebuilds its plan, resolves
+/// its language, spawns its whole chain once, and (unless `no_write`)
+/// writes the result back into `path`. The one place this sequence is
+/// implemented, so `run`'s own multi-target loop and `tui::eval`'s
+/// single-block cycle-and-run agree by construction about what "run this
+/// block" means.
+///
+/// By position rather than by name because decision 22 scoped name
+/// uniqueness to a heading: two different blocks in the same file can
+/// legally share a literal name, and re-resolving one by name alone, from
+/// no heading of its own to search from, is exactly `plan_for`'s
+/// `AmbiguousTarget` case -- the caller already knows which block it means
+/// (the one it just cycled to, or just planned), and that identity should
+/// not have to survive a round trip through a string that might not be
+/// unique. The position stays valid across repeated calls against the same
+/// file even as earlier calls write results back, because a result marker
+/// is never itself a named block and so never changes how many named
+/// top-level blocks exist or their relative order.
+pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> Result<RunSummary, String> {
+    let (root, entry_file) = locate(path);
+    let mut diags = Diags::new("dankg");
+    let mut files = Files::new(root);
+    files.discover(&entry_file, &mut diags)?;
+
+    let blocks = files.all_blocks();
+    let chain = plan::plan_for_index(&blocks, &entry_file, position).map_err(|e| e.to_string())?;
+    let target = chain.last().expect("plan_for_index never returns an empty chain");
+    let name = target.name;
     let lang = eval_run::command_for(config, &chain)
         .ok_or_else(|| format!("`{name}` has no configured language"))?;
     let timeout = Duration::from_secs(target.timeout.unwrap_or(eval_run::DEFAULT_TIMEOUT_SECS));
     let output = eval_run::run(&lang, &eval_run::concatenated_source(&chain), timeout)?;
 
     if !no_write {
+        let (source, doc) = files.get(&entry_file).expect("entry_file was just discovered above");
         let result_hash = result::expected_hash(&chain, &lang.command);
-        let existing = result::locate_existing(&doc, target.index, name);
+        let existing = result::locate_existing(doc, target.index, name);
         let updated =
-            result::write_back(&source, target.end_line, existing, name, result_hash, !output.success, &output.stdout);
+            result::write_back(source, target.end_line, existing, name, result_hash, !output.success, &output.stdout);
         fs::write(path, &updated).map_err(|e| format!("{path}: {e}"))?;
     }
 
@@ -291,7 +358,7 @@ mod tests {
             "# Setup\n\n```sh name=a\n:\n```\n\n# Data\n\n```python name=b\n:\n```\n",
             &mut Diags::new("t"),
         );
-        let blocks = plan::top_level_blocks(&doc);
+        let blocks = plan::top_level_blocks(&doc, "t.md");
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let out = list_blocks("t.md", &blocks, &doc, &config);
         assert!(out.contains("a [sh] t.md:3   under \"Setup\"   configured: sh {file}"), "{out:?}");
@@ -301,7 +368,7 @@ mod tests {
     #[test]
     fn list_blocks_says_so_when_there_are_none() {
         let doc = Document::parse("# Empty\n", &mut Diags::new("t"));
-        let blocks = plan::top_level_blocks(&doc);
+        let blocks = plan::top_level_blocks(&doc, "t.md");
         let config = Config::none();
         let out = list_blocks("t.md", &blocks, &doc, &config);
         assert!(out.contains("no named top-level blocks"));
@@ -348,7 +415,7 @@ mod tests {
     fn run_one_writes_the_result_back_to_disk() {
         let path = scratch_file("a.md", "```sh name=a\necho hi\n```\n");
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
-        let summary = run_one(path.to_str().unwrap(), &config, "a", false).unwrap();
+        let summary = run_one(path.to_str().unwrap(), &config, 0, false).unwrap();
         assert!(summary.success);
         assert_eq!(summary.stdout, "hi\n");
         let written = fs::read_to_string(&path).unwrap();
@@ -361,7 +428,7 @@ mod tests {
         let path = scratch_file("b.md", "```sh name=a\necho hi\n```\n");
         let before = fs::read_to_string(&path).unwrap();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
-        run_one(path.to_str().unwrap(), &config, "a", true).unwrap();
+        run_one(path.to_str().unwrap(), &config, 0, true).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
     }
 
@@ -369,6 +436,6 @@ mod tests {
     fn run_one_reports_an_unconfigured_language() {
         let path = scratch_file("c.md", "```python name=a\n:\n```\n");
         let config = Config::none();
-        assert!(run_one(path.to_str().unwrap(), &config, "a", false).unwrap_err().contains("no configured language"));
+        assert!(run_one(path.to_str().unwrap(), &config, 0, false).unwrap_err().contains("no configured language"));
     }
 }

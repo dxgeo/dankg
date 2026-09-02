@@ -30,8 +30,17 @@ const KNOWN: &[(&str, &[&str])] = &[
 
 /// Section families, named `<prefix><name>`. `db.` is reserved for milestone 8
 /// and parsed now so that a config written ahead of it does not warn.
-const FAMILIES: &[(&str, &[&str])] =
-    &[("lang.", &["command", "ext"]), ("db.", &["command", "path"])];
+/// `tangle.`'s `command` is optional (decision 25): a language with no
+/// separate build step just materializes its tree and stops. `glue` is
+/// independent of `command` and just as optional (decision 26): an external
+/// program, never DanKG's own code, that adds language-specific structural
+/// glue (Rust's `mod` declarations, say) to the assembled tree before
+/// `command` builds it.
+const FAMILIES: &[(&str, &[&str])] = &[
+    ("lang.", &["command", "ext"]),
+    ("db.", &["command", "path"]),
+    ("tangle.", &["command", "ext", "glue"]),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
@@ -92,6 +101,24 @@ impl Keymap {
 pub struct Lang {
     pub name: String,
     pub command: String,
+    pub ext: Option<String>,
+}
+
+/// One `[tangle.*]` section (decision 25). `command` is optional: a
+/// language with no separate build step -- tangling a Python module, say --
+/// has nothing to spawn, and materializing the tree already is the whole
+/// operation. `glue` is a second, independent, equally optional command
+/// (decision 26): where `command` builds the assembled tree, `glue` adds to
+/// it first -- an external, per-language extension point for structural
+/// connective tissue (module declarations) that only makes sense as a
+/// separate, swappable step, since it is squarely the kind of thing someone
+/// other than DanKG might want to write for a language DanKG never shipped
+/// one for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tangle {
+    pub name: String,
+    pub command: Option<String>,
+    pub glue: Option<String>,
     pub ext: Option<String>,
 }
 
@@ -230,6 +257,22 @@ impl Config {
 
     pub fn lang(&self, name: &str) -> Option<Lang> {
         self.langs().into_iter().find(|l| l.name == name)
+    }
+
+    /// `[tangle.<name>]`, if configured. Unlike `[lang.*]`, its absence does
+    /// not refuse anything by itself -- `tangle` still needs a section to
+    /// know `--lang`'s fence tag is real, but a section with no `command`
+    /// is a complete, valid configuration on its own (decision 25).
+    pub fn tangle(&self, name: &str) -> Option<Tangle> {
+        self.sections.iter().find_map(|s| {
+            let n = s.name.strip_prefix("tangle.")?;
+            (n == name).then(|| Tangle {
+                name: n.to_string(),
+                command: s.get("command").map(str::to_string),
+                glue: s.get("glue").map(str::to_string),
+                ext: s.get("ext").map(str::to_string),
+            })
+        })
     }
 
     /// `[editor] command`: the template used to jump to a node's source line,
@@ -417,6 +460,41 @@ mod tests {
         let (c, d) = parse("[db.warehouse]\ncommand = duckdb -csv {db} < {file}\npath = data/w.duckdb\n");
         assert!(d.is_empty(), "{:?}", d.items());
         assert_eq!(c.get("db.warehouse", "path"), Some("data/w.duckdb"));
+    }
+
+    #[test]
+    fn tangle_sections_parse_with_an_optional_command() {
+        let (c, d) = parse("[tangle.rust]\ncommand = cargo build --manifest-path {dir}/Cargo.toml\next = rs\n\n[tangle.python]\next = py\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(
+            c.tangle("rust"),
+            Some(Tangle {
+                name: "rust".into(),
+                command: Some("cargo build --manifest-path {dir}/Cargo.toml".into()),
+                glue: None,
+                ext: Some("rs".into()),
+            })
+        );
+        assert_eq!(
+            c.tangle("python"),
+            Some(Tangle { name: "python".into(), command: None, glue: None, ext: Some("py".into()) })
+        );
+        assert_eq!(c.tangle("ghost"), None);
+    }
+
+    #[test]
+    fn tangle_glue_is_independent_of_command() {
+        let (c, d) = parse("[tangle.rust]\nglue = dankg-glue-rust {dir}\next = rs\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(
+            c.tangle("rust"),
+            Some(Tangle {
+                name: "rust".into(),
+                command: None,
+                glue: Some("dankg-glue-rust {dir}".into()),
+                ext: Some("rs".into()),
+            })
+        );
     }
 
     #[test]

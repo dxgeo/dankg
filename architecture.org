@@ -32,6 +32,15 @@ defence of it.
 | 18 | Keybindings        | =[keys]= remaps letters only; arrows fixed    | Arrows are positional, not mnemonic; nothing about them to remap. |
 | 19 | Eval scope         | One file; =deps=/=--all= never cross files      | No cross-file DAG to walk; matches =plan.rs=' top-level-only view. |
 | 20 | Block nodes        | Node scope == eval scope, exactly (decision 19) | A selectable node that is not eval-able would be a dead end.      |
+| 21 | Eval "all" scope   | =--all= = DAG leaves only; =--each= = every block | A pure dependency needs no redundant standalone spawn just for being named. |
+| 22 | Block name scope   | Whole file, flat; =deps= resolves the same way, any heading to any other | Heading-scoped uniqueness (tried, reverted) broke a plain sequence of sibling sections each depending on the last. |
+| 23 | Tangle block scope | Exactly decision 20's node scope (named, top-level) | A block invisible to the graph and un-eval-able alone is a blind spot in the shipped program. |
+| 24 | Tangle placement   | Heading containment + document order; =deps= not consulted | Placement is presentational structure; =deps= stays eval's own DAG concern. |
+| 25 | Command name       | =dankg tangle=, not =compile=               | DanKG assembles; a configured command does any actual compiling, and some languages compile nothing at all. |
+| 26 | Tangle corpus scope | One file unchanged; a directory (or several paths) walks the corpus, nesting each contributing file under its own subdirectory once more than one is involved | A crate is a whole-corpus artifact; =deps== has no bearing since tangle never reads it. |
+| 27 | Module glue        | An external, per-language, spawned =[tangle.<lang>] glue= command; never DanKG's own code | Matches the spawned-command pattern (decision 1); lets an extension do things DanKG's own code must not (read a block's source). |
+| 28 | Per-file tangle hints | =dankg.tangle.public= frontmatter, surfaced to =glue= only through a sidecar manifest | Visibility is a per-file authorial call; whether the mechanism runs at all stays root-config only (decision 27). |
+| 29 | Cross-file =deps=  | =deps=other.md#name= reaches another file's top-level block; =--block=/=--all=/=--each=' own targets stay one file (decision 19 unchanged) | Concatenation (decision 11) makes "the chain crosses a file" and "the chain crosses a language" the same *kind* of non-problem; only resolution needed widening, not the execution model. |
 
 * Terminology
 
@@ -189,8 +198,11 @@ src/
     assets.rs        CSS + JS as const &str, inlined at build
   eval/
     plan.rs          dep DAG, topological order, "what will run" report
+    files.rs         loads the (usually zero) extra files a cross-file
+                     deps= chain reaches -- never a corpus walk
     run.rs           process spawn, timeout, output capture
     result.rs        hashing, write-back, staleness detection
+  tangle.rs          heading -> file placement, tree assembly, build spawn
 #+END_EXAMPLE
 
 * Markdown subset
@@ -762,18 +774,126 @@ and silently skipping the rest. =--yes= skips the prompt for scripted use; it
 never becomes the default. =--no-write= runs everything but prints the
 captured output instead of writing it back -- a preview of what would change.
 
-=deps= only resolves within the one file named on the command line
+=deps= resolves within the file named on the command line by default
 (decision 19): =plan.rs= walks =doc.blocks= directly rather than the
 recursive walk =Document::named_blocks= uses for the graph, so a named block
-nested inside a list is invisible to eval entirely, and there is no syntax
-for a dependency in another file. Every block reached from one target must
-also share its language -- concatenating a =[sh]= dependency ahead of a
-=[python]= target and running the result through one interpreter is far more
-likely a mistake than an intentional pipeline, so =plan_for= refuses it
-before anything is spawned. =--all= runs every named block in the file, each
-as its own target with its own transitive =deps= re-concatenated from
-scratch, in an order that still respects the DAG: if =b= depends on =a=,
-=a='s own run happens first even though it may be declared later in the file.
+nested inside a list is invisible to eval entirely. Every block reached from
+one target must also share its language -- concatenating a =[sh]=
+dependency ahead of a =[python]= target and running the result through one
+interpreter is far more likely a mistake than an intentional pipeline, so
+=plan_for= refuses it before anything is spawned.
+
+A =deps== entry may also name another file -- =deps=other.md#name=,
+mirroring a written link's own =other.md#heading= shape exactly (decision
+29) -- resolved relative to the *declaring* block's own file, via the same
+=graph::resolve::join_normalize=/=dir_of= a link already uses, refused the
+same way if it would climb above the root. =eval::files::Files= is what
+this actually costs: given the target file, it follows only the cross-file
+=deps== edges any of its blocks declare, transitively, loading exactly
+those files (over-inclusive by *block* rather than by *chain* -- see its
+own doc comment -- but never the whole root); =plan.rs= itself stays a pure
+function of an already-built, multi-file =&[BlockRef]= slice, the same
+"boundary logic lives with the code that touches the filesystem" discipline
+=resolve.rs=/=index.rs= already split the same way. Concatenation (decision
+11) is what makes this cheap: the chain is still one flat file handed to
+one interpreter, so a dependency living in another file is no different,
+mechanically, from one living in another language-compatible heading of the
+same file -- only *which* files must be read changes. Two blocks in
+different files may share a =name= (decision 22's uniqueness is per-file,
+not per-corpus); a local (no =#=) reference inside a cross-file-reached
+block still resolves within *that* block's own file, never back against
+wherever the walk started. =--block=/=--all=/=--each=' own targets stay
+exactly one file (decision 19's original scope, unchanged) -- only a
+target's *chain* may now reach outside it, so a pulled-in dependency from
+another file is never itself treated as one of =--all=/=--each='s targets.
+
+For a language with no real per-file module system reachable from within
+one compiled unit (Rust among them), this is enough to write a genuinely
+multi-file literate program with no =mod=/=use= at all: every file eval
+reaches contributes raw text to the same one concatenated compile, so
+there is exactly one flat item namespace regardless of how many =.md=
+files a chain spans. DanKG still never reads what a block's code means
+(decision 1) -- two blocks defining the same Rust identifier collide
+exactly as they would pasted into one file by hand, and =rustc='s own
+"duplicate definition" is the whole error-reporting story here, on
+purpose.
+
+=dankg check='s staleness loop re-verifies every result against
+=eval::files::Files::load_all=, loaded with the *whole* corpus up front
+rather than =discover='s on-demand, chain-only loading: =check= already
+visits every file for its unresolved-link pass (decision 6), so there is no
+"avoid reading files a target's own chain does not reach" reason to hold
+back the way =eval= itself does, and loading everything is what lets a
+cross-file =deps== resolve during a staleness recheck at all, regardless of
+which file =check='s own loop happens to be iterating at the time. Editing
+only the *dependency* file -- =main.md= untouched, =lib.md= it reaches via
+=deps=lib.md#helper= changed -- correctly marks =main.md='s stored result
+stale.
+
+A named block's uniqueness, and =deps= resolution, are both whole-file and
+flat (decision 22): any block can depend on any other, in any heading,
+without regard for containment. This is a reversal -- the first cut of
+decision 22 scoped a name's uniqueness to its own heading (two blocks
+named =setup=, one under "Parsing" and one under "Rendering", would not
+collide) and resolved =deps= lexically, walking from a block's own heading
+up through its ancestors only, never sideways to a sibling. It shipped,
+and the very first real document written against it broke: a plain
+sequence of sibling sections, each one heading depending on the last --
+arguably *the* standard shape for a literate pipeline -- has no ancestor
+relationship between the sections at all, so a later stage's =deps=
+could never reach an earlier one. The relaxed uniqueness that scoping
+bought was never load-bearing for anything but a nice symmetry with real
+module namespacing; nothing downstream actually needed two blocks to
+share a name, since =tangle= (decisions 23-25) groups by heading directly
+and never consults a block's name to do it. Flat resolution is what
+"any block can depend on any other" actually requires, so that is what
+shipped instead. =containing_heading=/=root_heading= (=plan.rs=) survive
+the reversal unchanged -- they were always =tangle='s placement helpers,
+never eval's, and eval's own naming/resolution code needs neither.
+
+=--each= and =--all= (decision 21) both run every target as its own spawn
+with its own transitive =deps= re-concatenated from scratch (decision 11's
+one-process-per-chain model is unchanged either way), in an order that
+respects the DAG -- if =b= depends on =a=, =a='s own run happens first even
+though it may be declared later in the file -- and they differ only in
+/which/ blocks get that treatment. =--each= is every named block in the
+file: the original =--all= behaviour, kept under its own name because it is
+still the right tool for smoke-testing every block in isolation, dependency
+or not, each with its own recorded result. =--all= is narrower: only the
+DAG's /leaves/ -- blocks nothing else in the file names in a =deps= -- each
+still pulling its own full transitive chain exactly as =--each= would, so a
+pure dependency like =setup= is no longer /also/ given a standalone spawn
+merely because it happens to be named. That standalone spawn was pure waste
+under the old =--all=: its result was never anything a reader asked to see
+independently, only a side effect of treating every named block uniformly.
+
+Nothing about decision 11 changes to make this possible, which is also why
+it does not fully eliminate repetition: a block depended on by two different
+leaves still runs twice in one =--all= invocation, once inside each leaf's
+own chain, because nothing here shares process state across spawns. =--all=
+removes the /wasted/ standalone run, not the DAG's own real repetition --
+that repetition is decision 11's consequence, stated plainly above, not a
+bug =--all= owes a fix to. A pure dependency also gets no
+=<!-- dankg:result -->= of its own under =--all=, since there is no
+standalone run to hang one on; =--each= is what still gives every block a
+recorded result, dependency or not.
+
+=run_one= (=session.rs=), the one place "run this block" is implemented
+(see /Terminal UI/'s /Eval in the TUI/), identifies its target by
+*position* -- where it sits among the file's named top-level blocks, in
+document order -- rather than re-resolving it by name on every call.
+=run_single='s own multi-target loop (=--block=/=--all=/=--each= alike)
+and =tui::eval::run= both already hold the exact block they mean, from a
+plan or a cycle list built moments earlier; routing that back through a
+name lookup would be strictly weaker information for no benefit, a habit
+worth keeping regardless of whether names happen to be unique at the
+moment. That position stays valid across every write-back =run_single='s
+loop makes against the same file, because a result marker is never itself
+a named block and so never changes how many named top-level blocks exist
+or their relative order, only their line numbers -- which every call
+re-derives fresh from its own re-parse regardless. =dankg check='s
+per-file staleness loop uses the same positional entry point
+(=plan_for_index=) for the same reason.
 
 ** Execution
 
@@ -861,6 +981,267 @@ reported and both able to fail the exit code on their own:
   re-verified and is not counted stale on that account alone; a plan error
   (a dependency renamed or removed, a cycle introduced) *is* counted stale,
   since the result can no longer be reproduced from what the file says now.
+
+* Tangle
+
+Milestone 9's precedent, pointed at a directory instead of a database: a
+markdown file's named blocks are, collectively, a real program, and
+=dankg tangle= materializes it as one. "Tangle" rather than "compile"
+(decision 25) because DanKG's own job is assembly, not compilation --
+DanKG never touches a compiler, it writes a source tree and hands it to a
+configured command (=rustc=, =cargo=, or nothing at all for a language
+with no separate build step) the same way =[lang.*]= is spawned for
+=eval=. It is also the term literate programming itself already uses for
+exactly this operation -- extracting and reassembling code chunks into
+compilable source, as opposed to "weaving" them into typeset
+documentation -- so it costs no new vocabulary once =project.org='s own
+framing is taken seriously.
+
+#+BEGIN_EXAMPLE
+dankg tangle <path>... --lang <lang> [-o DIR]
+#+END_EXAMPLE
+
+** Scope
+
+A tangled block is exactly an eval-able one (decision 23): named,
+top-level, not nested in a list -- =eval::plan::top_level_blocks='s own
+definition, unchanged. Decision 20 already made "is this a node" and "is
+this eval-able" the same question so that nothing selectable could be
+un-runnable; extending that equivalence to tangle keeps every block that
+ships in a compiled program visible to the graph, listable via
+=eval --list=, and individually eval-able on its own -- a block that
+compiled into the real artifact but could not be seen or run any other
+way would be exactly the blind spot decision 20 already refused to
+create. =Document::named_blocks= -- the recursive, list-descending walk
+that already exists and is already tested (=tests/parsing.rs=) -- is
+deliberately not what tangle uses, for the same reason =eval= does not
+use it either.
+
+A block not written in =--lang='s language is skipped; a file with no
+blocks in that language tangles to an empty tree, which is reported
+rather than treated as an error, on the same "half a plan is still a real
+answer" principle as an empty =--list=.
+
+One file tangles just it, unchanged from decisions 23-25; a directory (or
+several paths) walks the corpus instead (decision 26), the same choice
+=--list= already offers and via the same distinction =session::list_corpus_text=
+already draws: naming only files tangles exactly those, naming a directory
+tangles everything under it. Unlike =--block=/=--all=/=--each=, nothing
+about =deps== forces this to stop at one file -- tangle never reads that
+attribute (see /Placement/), so there is no single-file DAG standing in
+the way, and a real compiled program is a whole-corpus artifact in a way a
+disposable eval script never has to be: a crate is built once, not once
+per source file. A single named file still skips the whole-root walk
+=index::load= would otherwise do, and the graph build that comes with it,
+for the same reason =eval='s own single-file path already avoids both
+(decision 19) -- nothing here needs to know about any file but the one
+named.
+
+** Placement
+
+Structure comes from containment, never from =deps= (decision 24): the
+heading with no parent of its own -- the top of a block's own ancestor
+chain, usually but not necessarily level 1, since a document that opens
+straight at level 2 still has a well-defined top -- becomes one file, and a
+block under a more deeply nested heading folds into it, attaching in
+document order. Finding a block's immediate heading reuses the same
+approximation =eval::session::list_blocks= already computes ("the nearest
+heading at or above" a block's line); walking from there to the top reuses
+the containing heading's own containment, the same shape =graph/build.rs='s
+=current=-heading stack tracks, over bare line numbers rather than
+=NodeId=s (=plan::containing_heading=, =plan::root_heading=). Blocks within
+one generated file are
+emitted in document order, not DAG order: =deps= is eval's own concept
+for concatenating a disposable, throwaway script, and has nothing to say
+about how a persistent, structured source file should be laid out. A
+block with no =deps= at all tangles exactly the same as one with several
+-- tangle never reads the attribute in the first place.
+
+Corpus-wide (decision 26), each contributing source file's own heading
+placement gets nested under one more directory: its own root-relative
+path, extension stripped (=graph::build::strip_extension=, the same
+convention a =NodeId='s own =key= already uses), so =notes/lexer.md='s
+"Tokenize" heading tangles to =notes/lexer/tokenize.rs= rather than
+colliding with an unrelated file's identically-titled heading. That
+nesting only appears once more than one file actually contributes a
+matching block -- naming a single file, even one sitting inside a larger
+corpus with nothing else in =--lang='s language, tangles exactly as if it
+had been named alone, with no directory to explain that was not already
+there for a reason.
+
+DanKG's own code does not write =use=/=import= statements, or infer what
+one block's code means well enough to name a specific item from another --
+that stops being placement and starts being a small compiler, in tension
+with decision 1 in spirit if not in the letter, and it would eventually
+guess wrong about some reference in a way decision 1's zero-crates policy
+was never at risk of. The author writes those themselves, the same way
+they write the rest of a block's source, and corpus-wide placement
+(decision 26) is exactly as deterministic as single-file placement always
+was, so the author has everything needed to get a cross-file reference
+right by hand: =notes/lexer.md='s "Tokenize" heading always tangles to
+=notes/lexer/tokenize.rs=, corpus-wide or not.
+
+Purely /structural/ connective tissue is a different question, and
+decision 27 answers it differently: some languages (Rust) will not
+compile a directory tree at all unless something declares =mod x;= for
+every file and subdirectory, and that declaration needs no understanding
+of what a block's code means -- only the shape of the tree tangle already
+computed, which is exactly the kind of thing a tool that owns the whole
+tree can safely do. But *that* safely-mechanical property does not hold
+for every language: Java's =package= declaration has to sit inside each
+=.java= file, first line, and the filename has to match the public class
+name the block defines -- which DanKG cannot know without reading the
+code, the same reading it must not do for a =use= statement either. So
+this is never DanKG's own generator, for any language, no matter how
+mechanical the case looks: it is =[tangle.<lang>] glue=, a second,
+independent, optional command (alongside =command=, which builds; =glue=
+prepares) spawned against the already-materialized =\{dir\}=, exactly the
+way every other per-language capability in DanKG is a spawned external
+program rather than linked-in code (decision 1). An extension is free to
+do what DanKG's own code must not -- read a block's source to find a
+class name, say -- because it is the reader's own configured, opted-in
+program, the same trust model =[lang.*] command= already has (decision 9:
+the risk was accepted the moment it was configured). DanKG ships a
+documented reference =glue= script for Rust, because the mechanical case
+holds there; Python needs none, since a directory of =.py= files is
+already an importable namespace package with nothing to generate; anyone
+wanting Java support writes their own external program -- no change to
+DanKG itself required, ever, to add a language this way.
+
+A block wants a path outside the heading-derived tree entirely more often
+than it wants to be reassigned to a different heading's file -- a
+=Cargo.toml=, a =pyproject.toml= -- so the fence info string grows one
+more optional key: =path==, an explicit output path that overrides the
+heading-derived default, the same way =db= already names a target
+distinct from a block's language. A block naming =path= still needs a
+=name= (decision 23 does not relax for it) and is still a node the graph
+and =eval --list= can show; =path= changes only where its tangled content
+is written, not whether it is one.
+
+Identifiers are derived from the same per-file =Slugger= a heading's slug
+already comes from, then run through one more, language-specific pass
+that narrows a slug (already lowercase, already =[a-z0-9_-]=) into a
+valid identifier for the target language. Two slug-and-sanitize passes
+sharing one =Slugger= is the same "the escaper and the parser must agree"
+reasoning that keeps =fmt='s emphasis-escaping logic calling into
+=inline.rs= rather than reimplementing it, applied to a second consumer
+of slugs instead of a second consumer of flanking rules.
+
+** Per-file hints and the glue manifest
+
+=dankg.tangle.public= (decision 28), frontmatter's own way into this: a
+per-file hint that this file's tangled output should be declared publicly
+visible wherever a =glue= command's generated declarations would
+otherwise default to private. Frontmatter has no scope finer than a whole
+file, so this is a whole-file decision -- a source file wanting different
+visibility for different sections is outside what it can express, and
+would need those sections split into separate files instead. Unset, or
+anything other than exactly =true=, means private: a typo here must never
+silently widen visibility, the same "half-understood is worse than
+refused" reasoning frontmatter and config both already apply elsewhere.
+
+Whether *the mechanism* runs at all stays root config's call, never
+frontmatter's (decision 27's own principle, applied here): two files
+cannot coherently disagree about whether the one shared output tree gets
+glue at all, so that decision has to live above any single file. What
+frontmatter narrows is how *this file's own* contribution to a mechanism
+root config already turned on gets declared -- the same "may narrow but
+never widen" shape =dankg.*= frontmatter keys already have for =[lang.*]=
+(see /Config/, below).
+
+A =glue= command only ever sees a plain directory of already-written
+files, which is deliberate -- the simplest possible glue script needs
+nothing more than that to work. A richer one that wants to honour
+per-file visibility reads an optional sidecar,
+=\{dir\}/.dankg-tangle-manifest.json=, written only when =glue= is
+actually configured (a language with none gets no extra file cluttering
+its output) and listing every tangled file's own output path, source
+=.md= path, and =public= flag. Hand-rolled JSON, the same reasoning as
+=render/json.rs=: DanKG takes no crates, and the shape here is small and
+fully under our control -- small enough that the escaper is literally
+shared (=render::json::string=) rather than reimplemented a second time
+for one more, equally small, JSON writer.
+
+** Config
+
+#+BEGIN_EXAMPLE
+[tangle.rust]
+glue    = dankg-glue-rust {dir}
+command = cargo build --manifest-path {dir}/Cargo.toml
+ext     = rs
+
+[tangle.python]
+ext     = py
+#+END_EXAMPLE
+
+=command= is optional, spawned once against the whole assembled tree via
+a new =\{dir\}= substitution alongside =[lang.*]='s =\{file\}= -- Python
+has nothing to compile, so materializing the module tree /is/ the whole
+operation, and a =[tangle.python]= with no =command= simply stops there,
+successfully. =glue= is a second, equally optional command, using the
+same =\{dir\}= substitution, spawned first: it exists to add structural
+connective tissue (decision 27) before =command= tries to build the
+result, so a build command that needs it never has to ask for it itself.
+=ext= identifies which fence language tag the section gathers, the same
+role it already plays for =[lang.*]=; the two sections are independent --
+an =eval=-configured language needs no =[tangle.*]= entry and vice versa,
+since a block can be exercised as a disposable script, tangled into a
+persistent program, both, or neither. Unconfigured, =ext= falls back to
+the =--lang= value itself rather than guessing a per-language table --
+serviceable for a first, config-free invocation, but in practice anyone
+naming a real =command= (needing a real compiler to find real files) sets
+=ext= alongside it anyway.
+
+** Output
+
+Tangled output goes to =-o DIR=, defaulting to =.dankg/build/<lang>/=,
+and is never written back into the markdown -- unlike an eval result, a
+tangled tree is wholly derived and disposable, and the markdown stays the
+one thing worth committing (decision 12's reasoning, from the other side
+of the same principle: the file is the source of truth, so nothing
+generated from it gets to also claim that title). The build directory is
+excluded from the corpus walk the same structural way =.dankg/= and
+=.git/= already are, not via =.dankgignore=, so a tangled tree sitting
+under the root never becomes something =dankg graph= tries to read as
+notes. Every generated file opens with a banner comment naming the
+heading and source file it came from and saying it is generated --
+=fmt='s "nothing unverified reaches the disk" guard has no equivalent
+here, since the generated tree is not the thing being trusted; the
+markdown that produced it is.
+
+** Trigger
+
+Never automatic, the same principle as decision 9: =graph=/=check= never
+invoke tangle, and tangling requires its own explicit command. Unlike
+=eval=, there is no interactive plan/confirm prompt -- tangle does not
+run the reader's program, only assembles and (optionally) builds it, and
+build-time code execution (a =build.rs=, a setup script, or =glue= itself,
+decision 27's own external program) is a risk the reader already accepted
+the moment they configured that =command= or =glue=, the same way
+configuring =[lang.*]= is what authorizes =eval= to run anything at all.
+=glue= runs before =command=, so a build failure and a glue failure are
+both reported the same way -- tangle already wrote every file either
+would need; only whichever spawned step comes next can still fail.
+
+** Open questions
+
+- Should a named, eval-able block be excludable from tangle specifically
+  -- a demo or scratch snippet that should stay runnable and visible
+  without shipping in the built artifact? No such escape hatch exists
+  yet; =path= is an override for /where/ a block lands, not an opt-out.
+- Whether to run a target language's own compile-check (=py_compile=,
+  =rustc --crate-type= with no output) when no =[tangle.*] command= is
+  configured, versus leaving "no command" to mean "materialize only,"
+  full stop, as written above.
+- The manifest schema (decision 28) is =version: 1= and has exactly the
+  three fields a Rust =glue= script needs today. Whether a richer glue
+  implementation ever needs more (declaration order across a directory,
+  say, rather than whatever order tangle happened to write files in) is
+  unanswered until one is actually written.
+- =dankg.tangle.public= is the one frontmatter hint that exists. Whether
+  other purely-authorial, per-file glue preferences ever justify their own
+  =dankg.tangle.*= key, versus staying a =glue= script's own problem to
+  solve by reading the block source it is free to read, is open.
 
 * Literate database management
 
@@ -1009,7 +1390,12 @@ at pointing it at the right line (decision 17).
 A =[lang.*]= section is also the allowlist: a fenced block in a language with no
 configured command is never executed, only reported. Per-file overrides go in
 frontmatter under =dankg.*= keys and may narrow but never widen what the root
-config permits.
+config permits. Not every =dankg.*= key fits that "permission" framing --
+=dankg.tangle.public= (decision 28) is a per-file authorial preference, not
+something to narrow or widen, but it keeps the same prefix and the same
+principle in spirit: it can only ever change what happens to *this* file
+within a mechanism root config already turned on, never turn the
+mechanism on itself.
 
 A =#= or =;= starts a comment only as the first non-blank character of a line.
 A =command= value legitimately contains a =#=, and a value is not a place to
@@ -1025,8 +1411,9 @@ config written ahead of the code does not warn.
 
 #+BEGIN_EXAMPLE
 dankg graph <path> [--format html|json|dot|mermaid] [--depth N] [--all] [-o FILE]
-dankg eval  <path> [--block NAME | --all] [--yes] [--no-write]
+dankg eval  <path> [--block NAME | --all | --each] [--yes] [--no-write]
 dankg eval  [<path>...] --list [--no-cache]
+dankg tangle <path>... --lang LANG [-o DIR] [--no-cache]   assemble named blocks into a source tree
 dankg fmt   <path>... [--check]   rewrite to normal form; --check only reports
 dankg check [<path>...]       exit non-zero on unresolved links or stale results
 dankg index [<path>]          corpus statistics, cache state
@@ -1036,25 +1423,36 @@ scriptable surface: a consumer that asked for the graph should not silently get
 a fragment of it. =--depth= and =--all= shape the drawn formats only, and
 passing =--depth= alongside =json= warns rather than being quietly ignored.
 
-=--no-cache= applies to =graph=, =index=, =check=, and =eval --list=. =index=
+=--no-cache= applies to =graph=, =index=, =check=, =eval --list=, and
+=tangle= when it is walking a corpus rather than reading one named file
+directly (which never opens a cache to begin with). =index=
 and =check= both default to the working directory, because "tell me about the
 corpus I am standing in" is the common case for either. =index= is the
 command to run when the graph is not what you expected, since that produces
 exactly two questions -- which root am I in, and which files did it decide
 were mine.
 
-=--block= and =--all= take exactly one path: =deps== resolves within one file
-only (decision 19), so a second path would have nothing to mean. =--block=,
-=--all= and =--list= are mutually exclusive and one of them is required --
-there is no default target to fall back to, on the same "never automatic"
-principle as decision 9 itself. =--list= is the odd one out in every
-direction at once: it explores rather than runs, needs no confirm prompt,
-prints to stdout as the requested output rather than to stderr the way the
-plan/confirm/result messages of the other two do, and -- since it has no
-execution to scope the way =--block=/=--all= do -- takes any number of paths,
-defaulting to =.=, and walks a whole directory as a corpus exactly like
+=--block=, =--all= and =--each= take exactly one path: =deps== resolves
+within one file only (decision 19), so a second path would have nothing to
+mean. =--block=, =--all=, =--each= and =--list= are mutually exclusive and
+one of them is required -- there is no default target to fall back to, on
+the same "never automatic" principle as decision 9 itself. =--all= and
+=--each= differ only in which blocks get run, not in how (decision 21).
+=--list= is the odd one out in every direction at once: it explores rather
+than runs, needs no confirm prompt, prints to stdout as the requested output
+rather than to stderr the way the plan/confirm/result messages of the others
+do, and -- since it has no execution to scope the way
+=--block=/=--all=/=--each= do -- takes any number of paths, defaulting to
+=.=, and walks a whole directory as a corpus exactly like
 =graph=/=index=/=check= (decision 6).
 #+END_EXAMPLE
+
+=tangle='s =--lang= is required, but unlike =--block=/=--all=/=--each=
+(decision 19's file-only scope), it takes any number of paths: naming
+files tangles just them, naming a directory walks the whole corpus
+(decision 26), the same split =--list= already has. There is nothing to
+confirm: =-o DIR= names where the assembled tree lands, defaulting to
+=.dankg/build/<lang>/= (see /Tangle/, /Output/).
 
 =check= is the CI gate. It is deliberately separate from =graph= so that drafting
 a half-written note never fails.
@@ -1406,6 +1804,33 @@ invariant the first one enforced only by construction.
   the TUI's heavy border -- and =eval --list= is checked to list only the
   named file's blocks when given one, and every file's when given a
   directory.
+- =--each=/=--all= (decision 21): =--each= still gives every block its own
+  chain, dependency or not, and =--all= reports only DAG leaves, still
+  pulling a leaf's full transitive chain. Whole-file, flat naming and
+  =deps= resolution (decision 22, after its reversal): a dependency across
+  sibling headings, with no ancestor relationship between them, still
+  plans; two blocks anywhere in the file sharing a name are refused
+  (=DuplicateName=) rather than allowed to coexist; =plan_for_index= runs
+  the block at a given position directly, which is what =run_one= (both
+  =run_single='s loop and =tui::eval::run=) and =dankg check='s staleness
+  loop use rather than a name lookup.
+- Tangle (decisions 23-28): a level-one heading (or the topmost heading of
+  one with no level-one wrapper) becomes one file; two headings become two
+  files; a nested heading folds into its top-level ancestor; a block before
+  any heading goes to =main.<ext>=; a block nested in a list or in another
+  language is not tangled; =path== overrides the heading-derived path; the
+  default output directory is =.dankg/build/<lang>/=; =ext= falls back to
+  the =--lang= value when unconfigured; a configured =[tangle.*] command=
+  runs against the assembled directory via =\{dir\}=, and no command
+  configured stops at materializing files. A directory walks the whole
+  corpus, nesting each contributing file under its own subdirectory;
+  naming one file out of a larger corpus, or several files explicitly,
+  tangles only what was named, with no extra nesting for a single
+  contributor. =glue= runs before =command= and can see what =command=
+  will (a file =glue= created is still there when =command= runs); the
+  sidecar manifest is written only when =glue= is configured, never
+  otherwise, and carries each tangled file's =dankg.tangle.public=
+  frontmatter hint, defaulting to =false= with none.
 
 * Milestones
 
@@ -1479,6 +1904,27 @@ invariant the first one enforced only by construction.
 9. Literate database management, over DuckDB. Depends on 8: it is the same
    plan-run-write-back machinery pointed at a database instead of a process.
 10. =dankg serve= -- deferred, opt-in, only if the static path proves insufficient.
+11. [DONE] =dankg tangle= (=src/tangle.rs=). Block scope reuses
+    =eval::plan::top_level_blocks= exactly (decision 23), independent of
+    naming: tangle never reads a block's name for anything but display, so
+    decision 22's later reversal (whole-file, flat naming and =deps=
+    resolution -- see /Code evaluation/) changed nothing here.
+    Placement groups by the nearest heading with no parent of its own
+    (=plan::root_heading=, a small generalization of "level-1 heading" that
+    also handles a document with no level-1 wrapper), in document order,
+    never consulting =deps=; =path== overrides it per block. Identifiers
+    reuse =graph::slug::Slugger= so a tangled file's name matches the graph
+    node's own anchor for that heading. =[tangle.<lang>]= configures two
+    independent, optional commands against the whole assembled tree via a
+    new =\{dir\}= substitution -- =glue= (decision 27, structural
+    connective tissue, run first) and =command= (build, run second);
+    unconfigured, =ext= falls back to the =--lang= value itself. A
+    directory (or several paths) walks the corpus (decision 26), nesting
+    each contributing file under its own root-relative-path subdirectory
+    once more than one is involved, and a per-file =dankg.tangle.public=
+    frontmatter hint reaches a =glue= command through an optional sidecar
+    manifest (decision 28) rather than DanKG's own code ever branching on
+    it. See /Tangle/.
 
 * Open questions
 
@@ -1487,3 +1933,6 @@ invariant the first one enforced only by construction.
 - Do containment edges count against =--depth=, or only link edges? Currently
   both, which may make depth 2 feel shallow in deeply nested files.
 - Cross-root links: refused today. Is a multi-root mode ever wanted?
+- Cross-file tangle, an eval-able-but-not-tangled escape hatch, and
+  whether a language with no configured =[tangle.*] command= should still
+  get a compile-check: see /Tangle/'s own /Open questions/.

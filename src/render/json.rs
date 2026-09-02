@@ -79,8 +79,10 @@ fn array(items: &[String]) -> String {
     out
 }
 
-/// A JSON string literal, with the escapes the spec requires.
-fn string(value: &str) -> String {
+/// A JSON string literal, with the escapes the spec requires. `pub(crate)`
+/// so `tangle`'s sidecar manifest (also hand-rolled JSON, also small and
+/// fully under our control) has one escaper to agree with instead of two.
+pub(crate) fn string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for c in value.chars() {

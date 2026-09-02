@@ -1,0 +1,237 @@
+//! Loads the files a cross-file `deps=` chain actually reaches -- and only
+//! those, never the whole root (decision 19's minimalism, extended one
+//! file at a time rather than given up). A cross-file `deps=other.md#name`
+//! entry resolves its path exactly the way a written link's own
+//! `other.md#heading` target does (`graph::resolve::join_normalize`,
+//! reused rather than reimplemented): relative to the *declaring* file's
+//! own directory, refused if it would climb above the root.
+//!
+//! `plan.rs` itself never touches the filesystem -- it stays a pure
+//! function of an already-built `&[BlockRef]`, the same discipline
+//! `resolve.rs` already follows for links (architecture.org's
+//! "Implementation notes": the boundary check belongs with the code that
+//! touches the filesystem). This module is the impure half: it decides
+//! *which* files that slice needs to include, then hands `plan.rs` a flat,
+//! multi-file list to plan over.
+
+use super::plan::{self, BlockRef};
+use crate::diag::Diags;
+use crate::graph::resolve;
+use crate::md::Document;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
+
+struct Loaded {
+    source: String,
+    doc: Document,
+}
+
+/// Every file reached so far, root-relative path to its source and parsed
+/// `Document`. Only ever grows: a file already loaded is never re-read
+/// within one `Files`, so a dependency reached through two different
+/// chains -- or an entry file `run_one` both plans against and writes a
+/// result back into -- costs one read no matter how many things need it.
+pub struct Files {
+    root: PathBuf,
+    loaded: HashMap<String, Loaded>,
+}
+
+impl Files {
+    pub fn new(root: PathBuf) -> Self {
+        Files { root, loaded: HashMap::new() }
+    }
+
+    /// Reads and parses `rel_path` the first time it is reached; a later
+    /// call is a no-op. `Err` only for a read failure -- markdown parsing
+    /// never fails, only warns, and those warnings are absorbed into
+    /// `diags` under `rel_path`'s own name exactly the way `graph::index`
+    /// already aggregates one diagnostic stream from several files.
+    fn load(&mut self, rel_path: &str, diags: &mut Diags) -> Result<(), String> {
+        if self.loaded.contains_key(rel_path) {
+            return Ok(());
+        }
+        let full = self.root.join(rel_path);
+        let source = fs::read_to_string(&full).map_err(|e| format!("{rel_path}: {e}"))?;
+        let mut file_diags = Diags::new(rel_path);
+        let doc = Document::parse(&source, &mut file_diags);
+        diags.absorb(file_diags);
+        self.loaded.insert(rel_path.to_string(), Loaded { source, doc });
+        Ok(())
+    }
+
+    /// A loaded file's own source and parsed `Document`, for a caller (only
+    /// `session::run_one` today) that needs to splice a result back into
+    /// the exact text a chain was planned against, without a second,
+    /// independent read of the same file.
+    pub fn get(&self, rel_path: &str) -> Option<(&str, &Document)> {
+        self.loaded.get(rel_path).map(|l| (l.source.as_str(), &l.doc))
+    }
+
+    /// Loads every one of `paths` (root-relative), silently skipping any
+    /// that cannot be read -- the same tolerance `graph::index::walk`
+    /// already has for an unreadable file, not a distinct policy invented
+    /// here. For `dankg check`, which already walks the whole corpus
+    /// (decision 6) to find unresolved links: unlike `discover`, there is
+    /// no "avoid reading files a target's own chain does not reach" reason
+    /// to hold back, since every file is already being visited anyway --
+    /// loading all of them up front is what lets a staleness check resolve
+    /// a cross-file `deps=` at all, regardless of which file `check`
+    /// happens to be iterating at the time.
+    pub fn load_all(&mut self, paths: &[String], diags: &mut Diags) {
+        for p in paths {
+            let _ = self.load(p, diags);
+        }
+    }
+
+    /// Loads `entry` and, transitively, every file any of its own top-level
+    /// blocks' `deps=` reach -- following only the edges actually declared,
+    /// never a corpus walk. `Err` when `entry` itself -- the file the reader
+    /// actually named -- cannot be read; a *dependency* that cannot be read
+    /// is silently left unloaded instead, since `plan.rs`'s own
+    /// `PlanError::UnknownDep` already reports that clearly, by name, if and
+    /// when planning actually reaches it -- a second, redundant warning here
+    /// would say the same thing twice, and for a dependency no reached
+    /// target actually needs, it would say something nobody asked about.
+    ///
+    /// Over-inclusive by *block* rather than by *chain*: a file reached by
+    /// any block's `deps=` is loaded even if the eventual target's own
+    /// chain never uses it. The alternative -- discovering only what one
+    /// specific target's chain reaches -- would need to interleave loading
+    /// with `plan.rs`'s own DAG walk, and `plan.rs` stays a pure function of
+    /// already-loaded data on purpose (see the module doc). The handful of
+    /// extra files a `--all`/`--each` run's *other* targets also need costs
+    /// nothing an eval invocation would notice.
+    pub fn discover(&mut self, entry: &str, diags: &mut Diags) -> Result<(), String> {
+        self.load(entry, diags)?;
+        let mut seen: HashSet<String> = HashSet::new();
+        self.discover_from(entry, diags, &mut seen);
+        Ok(())
+    }
+
+    fn discover_from(&mut self, file: &str, diags: &mut Diags, seen: &mut HashSet<String>) {
+        if !seen.insert(file.to_string()) {
+            return;
+        }
+        let Some(loaded) = self.loaded.get(file) else { return };
+        // Cloned to owned strings so the borrow on `self.loaded` ends here
+        // -- `load`/`discover_from` below need `&mut self` again.
+        let cross_file_deps: Vec<String> = plan::top_level_blocks(&loaded.doc, file)
+            .iter()
+            .flat_map(|b| b.deps.iter().copied())
+            .filter_map(|raw| plan::split_dep(raw).0.map(str::to_string))
+            .collect();
+
+        for rel in cross_file_deps {
+            let Some(resolved) = resolve::join_normalize(resolve::dir_of(file), &rel) else {
+                // Escapes the root -- `plan.rs`'s own resolution reports
+                // this properly (`PlanError::DepEscapesRoot`) once planning
+                // actually reaches this dependency; discovery just has
+                // nothing to load.
+                continue;
+            };
+            if self.load(&resolved, diags).is_ok() {
+                self.discover_from(&resolved, diags, seen);
+            }
+        }
+    }
+
+    /// Every loaded file's top-level named blocks, tagged with their own
+    /// file, sorted by path first so the result -- and everything `plan.rs`
+    /// derives from it -- does not depend on `HashMap`'s iteration order
+    /// (architecture.org's blanket determinism requirement). Any one file's
+    /// own blocks are already in document order among themselves regardless
+    /// of this; sorting is what keeps the *file-to-file* ordering
+    /// deterministic too.
+    pub fn all_blocks(&self) -> Vec<BlockRef<'_>> {
+        let mut paths: Vec<&String> = self.loaded.keys().collect();
+        paths.sort();
+        paths.into_iter().flat_map(|p| plan::top_level_blocks(&self.loaded[p].doc, p)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn scratch_dir(files: &[(&str, &str)]) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("dankg-eval-files-test-{}-{n}", std::process::id()));
+        for (name, content) in files {
+            let path = dir.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, content).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn discover_loads_only_the_entry_file_when_nothing_crosses_a_boundary() {
+        let dir = scratch_dir(&[("a.md", "```sh name=a\n:\n```\n")]);
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("a.md", &mut diags).unwrap();
+        assert_eq!(files.all_blocks().len(), 1);
+    }
+
+    #[test]
+    fn discover_follows_a_cross_file_dependency() {
+        let dir = scratch_dir(&[
+            ("a.md", "```sh name=go deps=lib.md#helper\n:\n```\n"),
+            ("lib.md", "```sh name=helper\n:\n```\n"),
+        ]);
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("a.md", &mut diags).unwrap();
+        let names: Vec<&str> = files.all_blocks().iter().map(|b| b.name).collect();
+        assert!(names.contains(&"go") && names.contains(&"helper"), "{names:?}");
+    }
+
+    #[test]
+    fn discover_follows_a_chain_transitively() {
+        let dir = scratch_dir(&[
+            ("a.md", "```sh name=go deps=b.md#mid\n:\n```\n"),
+            ("b.md", "```sh name=mid deps=c.md#base\n:\n```\n"),
+            ("c.md", "```sh name=base\n:\n```\n"),
+        ]);
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("a.md", &mut diags).unwrap();
+        let names: Vec<&str> = files.all_blocks().iter().map(|b| b.name).collect();
+        assert!(names.contains(&"base"), "{names:?}: c.md was never reached");
+    }
+
+    #[test]
+    fn discover_does_not_loop_forever_on_a_cross_file_cycle() {
+        let dir = scratch_dir(&[
+            ("a.md", "```sh name=go deps=b.md#back\n:\n```\n"),
+            ("b.md", "```sh name=back deps=a.md#go\n:\n```\n"),
+        ]);
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("a.md", &mut diags).unwrap(); // must return
+        assert_eq!(files.all_blocks().len(), 2);
+    }
+
+    #[test]
+    fn a_dependency_file_that_does_not_exist_is_silently_left_unloaded() {
+        // `plan.rs`'s own `UnknownDep` is what reports this, once (and only
+        // if) planning actually reaches it -- see `discover`'s own doc
+        // comment for why this module does not also warn.
+        let dir = scratch_dir(&[("a.md", "```sh name=go deps=ghost.md#x\n:\n```\n")]);
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("a.md", &mut diags).unwrap();
+        assert_eq!(files.all_blocks().len(), 1, "only a.md's own block");
+    }
+
+    #[test]
+    fn discovering_an_unreadable_entry_is_a_hard_error() {
+        let dir = scratch_dir(&[]);
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        assert!(files.discover("nope.md", &mut diags).is_err());
+    }
+}

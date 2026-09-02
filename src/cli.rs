@@ -49,12 +49,18 @@ pub enum Command {
     Index { paths: Vec<String>, cache: bool },
     Fmt { paths: Vec<String>, check: bool },
     Tui { paths: Vec<String>, cache: bool, depth: Option<u32>, all: bool },
-    /// `paths` holds exactly one entry for `Block`/`All` -- `deps=` only
-    /// resolves within one file (decision 19) -- but any number for `List`,
-    /// which walks a corpus the way `graph`/`index`/`check` do and has no
-    /// execution to scope.
+    /// `paths` holds exactly one entry for `Block`/`All`/`Each` -- `deps=`
+    /// only resolves within one file (decision 19) -- but any number for
+    /// `List`, which walks a corpus the way `graph`/`index`/`check` do and
+    /// has no execution to scope.
     Eval { paths: Vec<String>, target: EvalTarget, yes: bool, no_write: bool, cache: bool },
     Check { paths: Vec<String>, cache: bool },
+    /// `dankg tangle <path>... --lang LANG [-o DIR]`: assemble named blocks
+    /// into a source tree (decisions 23-28). One file tangles just it,
+    /// unchanged since decisions 23-25; a directory (or several paths)
+    /// walks the corpus (decision 26), the same file-or-directory choice
+    /// `--list` already offers.
+    Tangle { paths: Vec<String>, lang: String, output: Option<String>, cache: bool },
     Help,
     Version,
 }
@@ -67,25 +73,28 @@ usage:
   dankg index [<path>]  [--no-cache]
   dankg fmt   <path>... [--check]
   dankg tui   <path>... [--depth N | --all] [--no-cache]
-  dankg eval  <path> [--block <name> | --all] [--yes] [--no-write]
+  dankg eval  <path> [--block <name> | --all | --each] [--yes] [--no-write]
   dankg eval  [<path>...] --list [--no-cache]
   dankg check [<path>...] [--no-cache]
+  dankg tangle <path>... --lang <lang> [-o <dir>] [--no-cache]
   dankg --help
   dankg --version
 
 options:
   --format <fmt>   json (default), html, dot, mermaid
   --depth <n>      hops from the entry to draw; default from [graph] depth
-  --all            draw the whole index (graph/tui), or every named block (eval)
-  -o, --output     write to a file instead of stdout
+  --all            draw the whole index (graph/tui), or every eval DAG leaf
+  -o, --output     write to a file instead of stdout, or a directory (tangle)
   --no-cache       ignore .dankg/cache/ and write nothing back to it
   --check          report files not in normal form; write nothing
   --block <name>   the named block eval should run, with its dependencies
+  --each           run every named block, dependency or not, each on its own
   --list           list every named block instead of running one -- a file
                    lists just its own, a directory (or several paths, the
                    default being \".\") walks the whole corpus
   --yes            skip eval's \"proceed?\" prompt
   --no-write       run and print output, but do not write results back
+  --lang <lang>    which fence language tangle assembles
 
 `tui` needs a real terminal and draws the same view `graph` would, with the
 selected node's source line handed to `[editor] command` on enter (arrows or
@@ -121,20 +130,44 @@ destroy a note.
 named block plus its transitive `deps=`, in order) and asks before running,
 unless `--yes`. A block's language must have a configured `[lang.*] command`
 or nothing runs. Results are written back into the source, hash-tagged;
-`--no-write` prints the captured output instead of writing it. `deps=` only
-resolves within the one named file eval was given, so `--block`/`--all`
-take exactly one path. `--list` shows every named block -- name, language,
-source line, containing heading, and whether its language is configured --
-without running anything, which is how to find a block's name in the first
-place before naming it to `--block`. Unlike `--block`/`--all`, `--list` has
-no execution to scope: naming a file lists just that file's blocks, naming
-a directory (or several paths, or nothing -- defaulting to `.`) walks the
-whole corpus and lists every file's.
+`--no-write` prints the captured output instead of writing it. A block's
+name only needs to be unique among its own heading's other blocks, not the
+whole file; `deps=` resolves lexically, from a block's own heading upward
+through its ancestors. `deps=` only resolves within the one named file eval
+was given, so `--block`/`--all`/`--each` take exactly one path. `--all` runs
+only the blocks nothing else in the file depends on; `--each` runs every
+named block, dependency or not, each with its own recorded result -- the two
+differ only in which blocks run, never in how. `--list` shows every named
+block -- name, language, source line, containing heading, and whether its
+language is configured -- without running anything, which is how to find a
+block's name in the first place before naming it to `--block`. Unlike
+`--block`/`--all`/`--each`, `--list` has no execution to scope: naming a file
+lists just that file's blocks, naming a directory (or several paths, or
+nothing -- defaulting to `.`) walks the whole corpus and lists every file's.
 
 `check` is the CI gate: exits non-zero when the corpus has an unresolved
 link or a written eval result whose hash no longer matches its current
 source, dependencies, or configured command. Deliberately separate from
 `graph`, so drafting a half-written note never fails a build.
+
+`tangle` assembles named, top-level blocks -- exactly the ones eval can
+run -- into a source tree, grouped by their containing top-level heading
+(each becomes one file) rather than by `deps=`, which tangle never
+consults. One file tangles just it; a directory (or several paths) walks
+the corpus, nesting each contributing file under its own subdirectory once
+more than one is involved. A block wanting a path outside that
+heading-derived layout (a `Cargo.toml`) names one explicitly with `path=`.
+`-o` names the output directory, defaulting to `.dankg/build/<lang>/`. Two
+independent commands may run against the assembled tree, both substituting
+`{dir}`: a configured `[tangle.<lang>] glue` first, an external,
+per-language extension point for structural connective tissue (Rust's
+`mod` declarations, say) that DanKG's own code deliberately never
+generates itself; then `[tangle.<lang>] command`, for a language with a
+real build step. Either, both, or neither may be configured -- omit both
+and tangle stops at materializing the files, which is the whole operation
+for a language with no separate compile step. Never automatic, the same as
+`eval`, but with no confirm prompt: tangle does not run the reader's
+program, only assembles and optionally builds it.
 
 Diagnostics go to stderr, so stdout stays pipeable.
 ";
@@ -155,12 +188,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         "tui" => return tui(args),
         "eval" => return eval(args),
         "check" => return check(args),
+        "tangle" => return tangle(args),
         other if other.starts_with('-') => {
             return Err(format!("unknown option `{other}`"));
         }
         other => {
             return Err(format!(
-                "unknown command `{other}` (expected `graph`, `index`, `fmt`, `tui`, `eval`, or `check`)"
+                "unknown command `{other}` (expected `graph`, `index`, `fmt`, `tui`, `eval`, `check`, or `tangle`)"
             ));
         }
     }
@@ -301,6 +335,7 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     let mut paths: Vec<String> = Vec::new();
     let mut block: Option<String> = None;
     let mut all = false;
+    let mut each = false;
     let mut list = false;
     let mut yes = false;
     let mut no_write = false;
@@ -312,6 +347,7 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
                 block = Some(args.next().ok_or("`--block` needs a value")?);
             }
             "--all" | "-a" => all = true,
+            "--each" => each = true,
             "--list" | "-l" => list = true,
             "--yes" | "-y" => yes = true,
             "--no-write" => no_write = true,
@@ -327,12 +363,15 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
         }
     }
 
-    let target = match (block, all, list) {
-        (Some(name), false, false) => EvalTarget::Block(name),
-        (None, true, false) => EvalTarget::All,
-        (None, false, true) => EvalTarget::List,
-        (None, false, false) => return Err("`eval` needs `--block <name>`, `--all`, or `--list`".to_string()),
-        _ => return Err("`--block`, `--all`, and `--list` ask for different things".to_string()),
+    let target = match (block, all, each, list) {
+        (Some(name), false, false, false) => EvalTarget::Block(name),
+        (None, true, false, false) => EvalTarget::All,
+        (None, false, true, false) => EvalTarget::Each,
+        (None, false, false, true) => EvalTarget::List,
+        (None, false, false, false) => {
+            return Err("`eval` needs `--block <name>`, `--all`, `--each`, or `--list`".to_string())
+        }
+        _ => return Err("`--block`, `--all`, `--each`, and `--list` ask for different things".to_string()),
     };
 
     if matches!(target, EvalTarget::List) {
@@ -348,6 +387,43 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
         }
     }
     Ok(Command::Eval { paths, target, yes, no_write, cache })
+}
+
+/// One file tangles just it; a directory (or several paths) walks the
+/// corpus (decision 26), the same choice `--list` already offers -- unlike
+/// `--block`/`--all`/`--each`, tangle never reads `deps=` (decision 24), so
+/// there is no single-file DAG forcing this to stop at one path.
+fn tangle<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut lang: Option<String> = None;
+    let mut output = None;
+    let mut cache = true;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--lang" => {
+                lang = Some(args.next().ok_or("`--lang` needs a value")?);
+            }
+            "-o" | "--output" => {
+                output = Some(args.next().ok_or("`--output` needs a value")?);
+            }
+            "--no-cache" => cache = false,
+            "-h" | "--help" => return Ok(Command::Help),
+            other if other.starts_with("--lang=") => {
+                lang = Some(other["--lang=".len()..].to_string());
+            }
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown option `{other}`"));
+            }
+            other => paths.push(other.to_string()),
+        }
+    }
+
+    if paths.is_empty() {
+        return Err("`tangle` needs a path".to_string());
+    }
+    let lang = lang.ok_or("`tangle` needs `--lang <lang>`")?;
+    Ok(Command::Tangle { paths, lang, output, cache })
 }
 
 /// `check` takes any number of paths, defaulting to `.` -- the corpus you are
@@ -558,7 +634,7 @@ mod tests {
     fn eval_needs_a_target() {
         assert!(parse(args(&["eval", "a.md"]))
             .unwrap_err()
-            .contains("`--block <name>`, `--all`, or `--list`"));
+            .contains("`--block <name>`, `--all`, `--each`, or `--list`"));
     }
 
     #[test]
@@ -634,6 +710,73 @@ mod tests {
     #[test]
     fn eval_needs_a_path() {
         assert!(parse(args(&["eval", "--all"])).unwrap_err().contains("needs a path"));
+    }
+
+    #[test]
+    fn eval_collects_each() {
+        assert_eq!(
+            parse(args(&["eval", "a.md", "--each"])).unwrap(),
+            Command::Eval {
+                paths: vec!["a.md".into()],
+                target: EvalTarget::Each,
+                yes: false,
+                no_write: false,
+                cache: true,
+            }
+        );
+    }
+
+    #[test]
+    fn eval_each_conflicts_with_all_and_block_and_list() {
+        assert!(parse(args(&["eval", "a.md", "--each", "--all"]))
+            .unwrap_err()
+            .contains("different things"));
+        assert!(parse(args(&["eval", "a.md", "--each", "--block", "x"]))
+            .unwrap_err()
+            .contains("different things"));
+        assert!(parse(args(&["eval", "a.md", "--each", "--list"]))
+            .unwrap_err()
+            .contains("different things"));
+    }
+
+    #[test]
+    fn tangle_collects_path_lang_and_output() {
+        assert_eq!(
+            parse(args(&["tangle", "a.md", "--lang", "rust"])).unwrap(),
+            Command::Tangle { paths: vec!["a.md".into()], lang: "rust".into(), output: None, cache: true }
+        );
+        assert_eq!(
+            parse(args(&["tangle", "a.md", "--lang=rust", "-o", "build"])).unwrap(),
+            Command::Tangle {
+                paths: vec!["a.md".into()],
+                lang: "rust".into(),
+                output: Some("build".into()),
+                cache: true,
+            }
+        );
+    }
+
+    #[test]
+    fn tangle_accepts_a_directory_or_several_paths() {
+        assert_eq!(
+            parse(args(&["tangle", "notes", "--lang", "rust"])).unwrap(),
+            Command::Tangle { paths: vec!["notes".into()], lang: "rust".into(), output: None, cache: true }
+        );
+        assert_eq!(
+            parse(args(&["tangle", "a.md", "b.md", "--lang", "rust", "--no-cache"])).unwrap(),
+            Command::Tangle {
+                paths: vec!["a.md".into(), "b.md".into()],
+                lang: "rust".into(),
+                output: None,
+                cache: false,
+            }
+        );
+    }
+
+    #[test]
+    fn tangle_needs_a_path_and_a_lang() {
+        assert!(parse(args(&["tangle", "--lang", "rust"])).unwrap_err().contains("needs a path"));
+        assert!(parse(args(&["tangle", "a.md"])).unwrap_err().contains("needs `--lang"));
     }
 
     #[test]

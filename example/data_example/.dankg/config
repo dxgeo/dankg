@@ -1,0 +1,22 @@
+# Marks data_example/ as its own DanKG root, separate from ../example_1.
+
+[graph]
+depth = 2
+
+[lang.uv]
+command = uv run {file}
+ext     = py
+
+# `[lang.uv]` (above) and `[tangle.uv]` are independent config families --
+# eval and tangle don't have to agree on a language, so tangle needs its
+# own `ext` even though it is the same "py" either way. No `command`: a
+# tangled Python file has nothing to build, so materializing it is the
+# whole operation.
+[tangle.uv]
+ext = py
+
+# Used by `dankg tui`: enter on a selected node spawns this at its source
+# line. Unconfigured, enter falls back to $EDITOR/$VISUAL, and does
+# nothing if neither is set either -- a documented gap, not a crash.
+[editor]
+command = nvim +{line} {file}

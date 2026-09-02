@@ -32,7 +32,12 @@ use std::path::PathBuf;
 /// cannot silently point a stale cycle at the wrong file.
 struct BlockSelect {
     file: String,
-    names: Vec<String>,
+    /// (position among the file's named top-level blocks, display name) --
+    /// the position is what actually runs the block; the name is display
+    /// only, since decision 22 means two entries here can legally share one
+    /// (a section spanning a nested sub-heading with its own same-named
+    /// block).
+    blocks: Vec<(usize, String)>,
     cursor: usize,
 }
 
@@ -222,10 +227,10 @@ fn term_dimensions(size: io::Result<(u16, u16)>) -> (usize, usize) {
 /// bracketed. What `render` shows as the status line while cycling.
 fn block_select_status(sel: &BlockSelect) -> String {
     let parts: Vec<String> = sel
-        .names
+        .blocks
         .iter()
         .enumerate()
-        .map(|(i, n)| if i == sel.cursor { format!("[{n}]") } else { n.clone() })
+        .map(|(i, (_, n))| if i == sel.cursor { format!("[{n}]") } else { n.clone() })
         .collect();
     format!("eval: {}   enter=run esc=cancel", parts.join(" "))
 }
@@ -487,17 +492,17 @@ impl App {
     /// follows for its own best-effort failures.
     fn eval_key(&mut self) {
         if let Some(sel) = &mut self.block_select {
-            sel.cursor = (sel.cursor + 1) % sel.names.len();
+            sel.cursor = (sel.cursor + 1) % sel.blocks.len();
             self.status = Some(block_select_status(sel));
             return;
         }
         let Some(node) = self.graph.node(&self.selected) else { return };
         let file = self.root.join(&node.file).to_string_lossy().into_owned();
-        let names = eval::blocks_in_section(&file, node.line, node.end_line);
-        if names.is_empty() {
+        let blocks = eval::blocks_in_section(&file, node.line, node.end_line);
+        if blocks.is_empty() {
             return;
         }
-        let sel = BlockSelect { file, names, cursor: 0 };
+        let sel = BlockSelect { file, blocks, cursor: 0 };
         self.status = Some(block_select_status(&sel));
         self.block_select = Some(sel);
     }
@@ -519,8 +524,8 @@ impl App {
     /// it spawns the configured editor on a selected node.
     fn run_selected_block(&mut self) {
         let Some(sel) = self.block_select.take() else { return };
-        let name = sel.names[sel.cursor].clone();
-        let outcome = eval::run(&sel.file, &self.config, &name);
+        let (position, name) = sel.blocks[sel.cursor].clone();
+        let outcome = eval::run(&sel.file, &self.config, position);
         self.status = Some(match outcome {
             eval::Outcome::Ok => format!("{name}: ok"),
             eval::Outcome::Failed => format!("{name}: failed"),

@@ -280,7 +280,11 @@ fn split_fragment(dest: &str) -> (&str, &str) {
     }
 }
 
-fn dir_of(path: &str) -> &str {
+/// The root-relative directory a root-relative file path sits in. Shared
+/// with `eval::plan`'s cross-file `deps=` resolution, so a dependency and a
+/// written link agree about what a relative path means without a second
+/// implementation of "relative to this file" to keep in step.
+pub(crate) fn dir_of(path: &str) -> &str {
     match path.rfind('/') {
         Some(i) => &path[..i],
         None => "",
@@ -288,8 +292,11 @@ fn dir_of(path: &str) -> &str {
 }
 
 /// Join a relative link onto the linking file's directory and normalize it.
-/// Returns `None` when the result climbs above the root.
-fn join_normalize(base_dir: &str, rel: &str) -> Option<String> {
+/// Returns `None` when the result climbs above the root. Also `eval::plan`'s
+/// only way to turn a cross-file `deps=other.md#name` entry into the file it
+/// names -- the same boundary refusal a written link already gets, reused
+/// rather than reimplemented.
+pub(crate) fn join_normalize(base_dir: &str, rel: &str) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
 
     let segments = if rel.starts_with('/') {

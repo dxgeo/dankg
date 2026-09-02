@@ -163,7 +163,7 @@ pub struct InfoString {
 }
 
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
-pub const KNOWN_ATTRS: &[&str] = &["name", "deps", "timeout"];
+pub const KNOWN_ATTRS: &[&str] = &["name", "deps", "timeout", "path"];
 
 impl InfoString {
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -172,6 +172,13 @@ impl InfoString {
 
     pub fn name(&self) -> Option<&str> {
         self.get("name")
+    }
+
+    /// `tangle`'s escape hatch: an explicit output path overriding the
+    /// heading-derived default, for a block (a `Cargo.toml`, a
+    /// `pyproject.toml`) that does not belong under any heading's module.
+    pub fn path(&self) -> Option<&str> {
+        self.get("path")
     }
 
     /// Dependency names, in declaration order. Empty when `deps` is absent.
