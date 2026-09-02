@@ -2,7 +2,7 @@
 
 This is split in two on purpose. `decode` is a pure function over an
 already-collected byte slice, fully unit-testable with no real terminal
-involved, unlike everything in `crate::tui::term` (not yet converted).
+involved, unlike everything in [`crate::tui::term`](term.md).
 `read_key` is the thin, untested I/O wrapper that feeds `decode` one
 byte at a time from a real reader. Every test below exercises `decode`
 and `read_key` directly, with no terminal in the loop at all.

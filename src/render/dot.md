@@ -2,7 +2,7 @@
 
 The layout is DanKG's own, not graphviz's. Node positions come out as
 pinned `pos` attributes. So `neato -n -Tsvg` reproduces exactly what
-`crate::layout` (not yet converted) computed. Plain `dot -Tsvg` ignores
+[`crate::layout`](../layout/mod.md) computed. Plain `dot -Tsvg` ignores
 pinned positions and re-lays the graph out on its own. But this renderer
 also writes `rank=same` groups and containment edge weights. Even that
 re-layout still agrees with DanKG about which node belongs on which

@@ -2,12 +2,12 @@
 
 Tab-to-expand reveals a selected node's hidden neighbours onto the
 existing grid, per architecture.md's "Expansion is a placement, not a
-second layout." `render/assets.rs`'s HTML renderer script (not yet
-converted) solves the identical problem, and this module mirrors its
+second layout." [`render/assets.rs`](../render/assets.md)'s HTML renderer
+script solves the identical problem, and this module mirrors its
 own `around`/`freeSlot`/`expand` functions. It cannot reuse them
 directly: one runs in the browser against a DOM it edits incrementally,
 and this rebuilds a `Layout` from scratch every time, because that is
-what `tui/draw.rs` (not yet converted) already does every frame anyway,
+what [`tui/draw.rs`](draw.md) already does every frame anyway,
 with no diffing at all.
 
 Rebuilding from scratch, rather than mutating in place, also buys

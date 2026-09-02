@@ -4,8 +4,8 @@ This is the binary entry point: `src/main.rs`. It is not part of the
 `dankg` library crate `src/lib.md` declares, so it is hand-placed with
 `path=`, exactly the way every other crate/binary root in this corpus is
 (`src/lib.md`, *Crate root*). `dispatch` is the whole job: parse argv
-into a `cli::Command` (not yet converted to its own literate source),
-run the one function each variant maps to, and turn its `Result` into
+into a [`cli::Command`](cli.md), run the one function each variant
+maps to, and turn its `Result` into
 the right `ExitCode`. Every command's own logic lives in the library
 crate (`session::run`, `tangle::run`, `tui::run`), never here.
 

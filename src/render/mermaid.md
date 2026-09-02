@@ -2,8 +2,8 @@
 
 Mermaid runs its own layout engine. It refuses coordinates. So what this
 renderer hands it is only ordering and direction. Nodes are emitted rank
-by rank, left to right, in the same order `crate::layout` (not yet
-converted) already computed. Edges point the way DanKG's own
+by rank, left to right, in the same order [`crate::layout`](../layout/mod.md)
+already computed. Edges point the way DanKG's own
 cycle-breaking ([`layout::acyclic`](../layout/acyclic.md)) decided. So a
 rendered Mermaid diagram and DanKG's own HTML/dot output always agree
 about which edge points where, even around a cycle one of them had to
