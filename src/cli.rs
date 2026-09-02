@@ -131,19 +131,23 @@ named block plus its transitive `deps=`, in order) and asks before running,
 unless `--yes`. A block's language must have a configured `[lang.*] command`
 or nothing runs. Results are written back into the source, hash-tagged;
 `--no-write` prints the captured output instead of writing it. A block's
-name only needs to be unique among its own heading's other blocks, not the
-whole file; `deps=` resolves lexically, from a block's own heading upward
-through its ancestors. `deps=` only resolves within the one named file eval
-was given, so `--block`/`--all`/`--each` take exactly one path. `--all` runs
-only the blocks nothing else in the file depends on; `--each` runs every
-named block, dependency or not, each with its own recorded result -- the two
-differ only in which blocks run, never in how. `--list` shows every named
-block -- name, language, source line, containing heading, and whether its
-language is configured -- without running anything, which is how to find a
-block's name in the first place before naming it to `--block`. Unlike
-`--block`/`--all`/`--each`, `--list` has no execution to scope: naming a file
-lists just that file's blocks, naming a directory (or several paths, or
-nothing -- defaulting to `.`) walks the whole corpus and lists every file's.
+name is unique across its whole file, and `deps=` resolves flat against
+that same file -- any block, under any heading, can depend on any other.
+`deps=other.md#name` reaches a block in another file, resolved relative to
+the file that wrote it, the same way a written link's `other.md#heading`
+resolves; a plain `deps=name` always stays local to whichever file declared
+it. `--block`/`--all`/`--each` still take exactly one path -- only a
+target's own name is looked up there, though its chain may then reach
+outside it. `--all` runs only the blocks nothing else in the file depends
+on; `--each` runs every named block, dependency or not, each with its own
+recorded result -- the two differ only in which blocks run, never in how.
+`--list` shows every named block -- name, language, source line, containing
+heading, and whether its language is configured -- without running
+anything, which is how to find a block's name in the first place before
+naming it to `--block`. Unlike `--block`/`--all`/`--each`, `--list` has no
+execution to scope: naming a file lists just that file's blocks, naming a
+directory (or several paths, or nothing -- defaulting to `.`) walks the
+whole corpus and lists every file's.
 
 `check` is the CI gate: exits non-zero when the corpus has an unresolved
 link or a written eval result whose hash no longer matches its current
