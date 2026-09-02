@@ -9,9 +9,18 @@
 
 [tangle.rust]
 ext = rs
-# No `glue`/`command` yet: `src/hash.md` (the first real module) is one
-# flat file with no subdirectory to declare `mod` for, and its own
-# regenerate step is manual (src/hash.md, *Literate source*) rather than
-# wired to run `cargo build` on every tangle -- add both once a second
-# module needs the directory-declaring glue `literate/layout-pilot/`
-# already proved.
+# Structural only (mod.rs generation, decision 27): every existing src/
+# subdirectory's mod.rs is hand-authored as its own mod.md instead (each
+# carries a real module doc comment, not just a bare list), so `rust.py`
+# backs off and writes nothing for any of them -- this is a safety net for
+# a future directory added without one, not something the current corpus
+# exercises. `rust-doclint.py` was tried too, but this corpus's own style
+# always doubles a block's introducing sentence as its doc comment, so it
+# flags nearly every module and adds only noise here; skipped.
+glue = python3 glue/rust.py {dir}
+
+# Used by `dankg tui`: enter on a selected node spawns this at its source
+# line. Unconfigured, enter falls back to $EDITOR/$VISUAL, and does
+# nothing if neither is set either -- a documented gap, not a crash.
+[editor]
+command = nvim +{line} {file}
