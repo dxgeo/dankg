@@ -11,3 +11,8 @@ __pycache__/
 # from (architecture.org, Tangle > Output); the markdown is what's
 # committed, never the generated tree.
 **/.dankg/build/
+
+# Sidecar manifest `dankg tangle` writes into src/ now that [tangle.rust]
+# glue is configured (decision 28) -- consumed only by that glue command,
+# never something to commit.
+/src/.dankg-tangle-manifest.json
