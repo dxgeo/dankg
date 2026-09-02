@@ -111,7 +111,8 @@ fn reorder(dag: &mut Dag, rank: usize, direction: Direction) {
         // A node with nothing in the reference layer has no opinion, so it
         // keeps the position it already had.
         match (ma < 0, mb < 0) {
-            (true, true) | (false, false) => (ma, &dag.key[layer[a.0]]).cmp(&(mb, &dag.key[layer[b.0]])),
+            (true, true) => a.1.cmp(&b.1),
+            (false, false) => (ma, &dag.key[layer[a.0]]).cmp(&(mb, &dag.key[layer[b.0]])),
             (true, false) => (a.1 as i64).cmp(&mb),
             (false, true) => ma.cmp(&(b.1 as i64)),
         }
