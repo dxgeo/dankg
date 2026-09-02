@@ -2,35 +2,34 @@
 
 `dankg tangle`: decisions 22-28. Assembles named, top-level blocks in one
 target language into a source tree, grouped by *containment* rather than
-`deps=` -- tangle never reads that attribute at all -- and hands the
-result to a configured build command if one exists. This very file is
-tangled by exactly the mechanism it implements: `src/tangle.rs` is
-generated from this literate source the same way `src/hash.rs` is from
-`src/hash.md`.
+`deps=`. Tangle never reads that attribute at all. It hands the result to
+a configured build command if one exists. This very file is tangled by
+exactly the mechanism it implements: `src/tangle.rs` is generated from
+this literate source the same way `src/hash.rs` is from `src/hash.md`.
 
 Scoped to one file or a whole corpus (decision 26), the same file-or-
-directory choice `--list` already offers: naming one file tangles just
-it, exactly as it always has; naming a directory (or several paths) walks
+directory choice `--list` already offers. Naming one file tangles just
+it, exactly as it always has. Naming a directory (or several paths) walks
 the corpus the way `graph`/`index`/`check` do. A single named file skips
-`index::load` entirely and never triggers the whole-root walk or graph
-build `index::load` does -- the same reason `eval`'s own single-file path
-avoids it (decision 19): nothing here needs to know about any file but
+`index::load` entirely. It never triggers the whole-root walk or graph
+build `index::load` does. `eval`'s own single-file path avoids it for the
+same reason (decision 19): nothing here needs to know about any file but
 the one asked for.
 
 ```rust name=module_doc path=tangle.rs
-//! `dankg tangle`: decisions 22-28. Assembles named, top-level blocks in one
-//! target language into a source tree, grouped by containment rather than
-//! `deps=` -- tangle never reads that attribute at all -- and hands the
+//! `dankg tangle`: decisions 22-28. Assembles named, top-level blocks in
+//! one target language into a source tree, grouped by containment rather
+//! than `deps=`. Tangle never reads that attribute at all. It hands the
 //! result to a configured build command if one exists.
 //!
 //! Scoped to one file or a whole corpus (decision 26), the same file-or-
-//! directory choice `--list` already offers: naming one file tangles just
-//! it, exactly as before; naming a directory (or several paths) walks the
+//! directory choice `--list` already offers. Naming one file tangles just
+//! it, exactly as before. Naming a directory (or several paths) walks the
 //! corpus the way `graph`/`index`/`check` do. A single named file skips
-//! `index::load` entirely and never triggers the whole-root walk or graph
-//! build `index::load` does -- the same reason `eval`'s own single-file
-//! path avoids it (decision 19): nothing here needs to know about any file
-//! but the one asked for.
+//! `index::load` entirely. It never triggers the whole-root walk or graph
+//! build `index::load` does. `eval`'s own single-file path avoids it for
+//! the same reason (decision 19): nothing here needs to know about any
+//! file but the one asked for.
 
 use crate::cmd;
 use crate::config::Config;
@@ -63,11 +62,11 @@ struct Source {
 ```
 
 `run` opens with the same single-file-versus-corpus branch `--list`
-already draws, then narrows to exactly the blocks `dankg eval` could run
-\-- `plan::top_level_blocks`, never `Document::named_blocks`'s
+already makes. Then it narrows to exactly the blocks `dankg eval` could
+evaluate: `plan::top_level_blocks`, never `Document::named_blocks`'s
 list-descending walk, for the identical reason eval itself does not use
 it. Nesting only ever appears once more than one file actually
-contributes to the same target language's tree; naming a single file,
+contributes to the same target language's tree. Naming a single file,
 even out of a much larger corpus with nothing else in that language,
 tangles exactly as it always did, with no extra subdirectory to explain.
 
@@ -94,9 +93,9 @@ pub fn run(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -> R
             diags.sort();
             diags.emit();
 
-            // A directory names a corpus; several explicit files name just
-            // themselves -- the same distinction `session::list_corpus_text`
-            // already draws for `eval --list`.
+            // A directory names a corpus. Several explicit files name
+            // just themselves. `session::list_corpus_text` already makes
+            // the same distinction for `eval --list`.
             let only_files = paths.iter().all(|p| !Path::new(p).is_dir());
             let targets: Vec<String> = if only_files { corpus.entries } else { corpus.paths };
 
@@ -112,9 +111,10 @@ pub fn run(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -> R
         }
     };
 
-    // Decision 23: exactly the blocks eval could run, further narrowed to
-    // one language -- never `Document::named_blocks`'s list-descending walk,
-    // for the same reason eval does not use it either.
+    // Decision 23: exactly the blocks eval could evaluate, further
+    // narrowed to one language. Never `Document::named_blocks`'s
+    // list-descending walk, for the same reason eval does not use it
+    // either.
     let mut wanted: Vec<(&Source, Vec<&BlockRef>, Vec<plan::Heading>)> = Vec::new();
     let all_blocks: Vec<Vec<BlockRef>> = sources.iter().map(|s| plan::top_level_blocks(&s.doc, &s.display)).collect();
     for (source, blocks) in sources.iter().zip(&all_blocks) {
@@ -136,7 +136,7 @@ pub fn run(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -> R
     }
 
     // A file's own subdirectory only appears once more than one file is
-    // actually contributing to this tree -- naming one file, even out of a
+    // actually contributing to this tree. Naming one file, even out of a
     // larger corpus with nothing else in this language, tangles exactly as
     // it always has, with no extra nesting to explain.
     let multi = wanted.len() > 1;
@@ -205,16 +205,16 @@ fn spawn_against_dir(template: &str, out_dir: &Path, key: &str) -> Result<(), St
 }
 ```
 
-The manifest is never read by DanKG's own code -- only ever produced, for
-an external `glue` program that chooses to consume it (decision 28). Its
-`blocks` field carries only line ranges, straight off the same
-`BlockRef` fields `eval::result` already uses for write-back positioning
-\-- never the prose those lines sit near, which stays a glue script's own
-judgment to make (decision 27), never DanKG's.
+The manifest is never read by DanKG's own code. It is only ever
+produced, for an external `glue` program that chooses to consume it
+(decision 28). Its `blocks` field carries only line ranges, straight off
+the same `BlockRef` fields `eval::result` already uses for write-back
+positioning. It never carries the prose those lines sit near. A glue
+script decides that on its own (decision 27), never DanKG.
 
 ```rust name=manifest_types_and_write path=tangle.rs
 /// One tangled file, for the sidecar manifest a `glue` command may read
-/// (decision 28). Never read by DanKG's own code -- only ever produced, for
+/// (decision 28). Never read by DanKG's own code. Only ever produced, for
 /// an external program that chooses to consume it.
 struct ManifestEntry {
     /// Relative to the tangle output directory.
@@ -225,13 +225,13 @@ struct ManifestEntry {
     public: bool,
     /// This file's own contributing blocks, in document order (version 2).
     /// Line ranges only, straight off the same `BlockRef` fields
-    /// `result.rs` already uses for write-back positioning -- not the
-    /// prose those lines sit near, which stays a glue script's own
-    /// judgment to make (decision 27), never DanKG's.
+    /// `result.rs` already uses for write-back positioning. Not the prose
+    /// those lines sit near. A glue script decides that on its own
+    /// (decision 27), never DanKG.
     blocks: Vec<BlockEntry>,
 }
 
-/// One block's position in its *source* file -- `line`/`end_line` are the
+/// One block's position in its *source* file. `line`/`end_line` are the
 /// opening and closing fence lines, exactly as `plan::BlockRef` carries
 /// them, unchanged by wherever tangle placed the block's own output.
 struct BlockEntry {
@@ -242,9 +242,9 @@ struct BlockEntry {
 
 const MANIFEST_NAME: &str = ".dankg-tangle-manifest.json";
 
-/// Written only when a `glue` command is configured: a language with no
-/// glue step never gets an extra file cluttering its output, and nothing
-/// in DanKG itself ever reads this back.
+/// Written only when a `glue` command is configured. A language with no
+/// glue step never gets an extra file cluttering its output. Nothing in
+/// DanKG itself ever reads this back.
 fn write_manifest(out_dir: &Path, entries: &[ManifestEntry]) -> Result<(), String> {
     let mut out = String::from("{\n  \"version\": 2,\n  \"files\": [\n");
     for (i, e) in entries.iter().enumerate() {
@@ -271,14 +271,14 @@ fn write_manifest(out_dir: &Path, entries: &[ManifestEntry]) -> Result<(), Strin
 ```
 
 ```rust name=comment_and_extension path=tangle.rs
-/// A file-extension comment marker, for the "generated, do not edit" banner
-/// every tangled file opens with. Keyed by the *output file's* extension,
-/// not `--lang`: a `path=` block can redirect anywhere -- a `rust`-fenced
-/// block naming `path=Cargo.toml` still has to open with a `#`, since the
-/// destination is TOML, whatever fence produced it. A short,
-/// hand-maintained table rather than a guess: an unlisted extension falls
-/// back to `#`, which is at least a comment in more languages than any
-/// other single choice.
+/// A file-extension comment marker, for the "generated, do not edit"
+/// banner every tangled file opens with. Keyed by the *output file's*
+/// extension, not `--lang`. A `path=` block can redirect anywhere. A
+/// `rust`-fenced block naming `path=Cargo.toml` still has to open with a
+/// `#`, since the destination is TOML, whatever fence produced it. This is
+/// a short, hand-maintained table rather than a guess. An unlisted
+/// extension falls back to `#`, which is at least a comment in more
+/// languages than any other single choice.
 fn comment_prefix(ext: &str) -> &'static str {
     match ext {
         "rs" | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "java" | "go" | "js" | "jsx" | "ts" | "tsx" => "//",
@@ -287,15 +287,16 @@ fn comment_prefix(ext: &str) -> &'static str {
 }
 
 /// The part of `rel_path` after its last `.`, or "" for an extensionless
-/// path -- which just means [`comment_prefix`] falls back to `#`.
+/// path. This just means [`comment_prefix`] falls back to `#`.
 fn extension(rel_path: &str) -> &str {
     rel_path.rsplit('/').next().unwrap_or(rel_path).rsplit_once('.').map(|(_, ext)| ext).unwrap_or("")
 }
 
-/// Every heading's assigned slug, by line -- the same per-file `Slugger`
-/// `graph/build.rs` runs, so a tangled file's name matches the graph node's
-/// own anchor for that heading, and two same-titled headings still tangle
-/// to two distinct files instead of silently merging.
+/// Every heading's assigned slug, by line. This is the same per-file
+/// `Slugger` `graph/build.rs` runs. This way, a tangled file's name
+/// matches the graph node's own anchor for that heading. Two same-titled
+/// headings still tangle to two distinct files, instead of silently
+/// merging.
 fn heading_slugs(headings: &[plan::Heading]) -> HashMap<u32, String> {
     let mut slugger = Slugger::new();
     headings.iter().map(|(_, inlines, line)| (*line, slugger.assign(&Inline::plain(inlines)))).collect()
@@ -310,14 +311,14 @@ fn heading_title(headings: &[plan::Heading], line: u32) -> String {
 }
 ```
 
-`placement` is decision 24 made concrete: containment decides where a
-block lands, `deps=` is never even consulted. An explicit `path=` always
+`placement` is decision 24 made concrete. Containment decides where a
+block lands. `deps=` is never even consulted. An explicit `path=` always
 lands directly under the output directory, ignoring `file_prefix`
-entirely -- an escape hatch that only escaped *partway* (still nested
-under this file's own subdirectory) would not be much of one for
-something like a corpus-wide `Cargo.toml`, which needs to sit at the true
-root of the assembled tree regardless of how many other files are
-tangling alongside it.
+entirely. An escape hatch that only escaped *partway* (still nested under
+this file's own subdirectory) would not be much of one for something like
+a corpus-wide `Cargo.toml`. That file needs to sit at the true root of
+the assembled tree, regardless of how many other files are tangling
+alongside it.
 
 ```rust name=placement path=tangle.rs
 /// `b`'s output path, relative to the tangle output directory, and the
@@ -325,7 +326,7 @@ tangling alongside it.
 /// for a block naming its own `path=`, since neither has one heading to
 /// credit). Decision 24: containment decides this, never `deps=`. An
 /// explicit `path=` always lands directly under the output directory,
-/// ignoring `file_prefix` entirely -- an escape hatch that only escaped
+/// ignoring `file_prefix` entirely. An escape hatch that only escaped
 /// partway (still nested under this file's own subdirectory) would not be
 /// much of one for something like a corpus-wide `Cargo.toml`.
 fn placement(
@@ -352,8 +353,9 @@ fn placement(
 }
 
 /// Groups `blocks` by [`placement`], preserving the order each distinct
-/// path was first seen in -- document order, since `blocks` is already in
-/// document order and this only ever appends to an existing group.
+/// path was first seen in. This is document order, since `blocks` is
+/// already in document order. This only ever appends to an existing
+/// group.
 fn group_by_file<'a>(
     blocks: &[&'a BlockRef<'a>],
     headings: &[plan::Heading],
@@ -381,12 +383,13 @@ fn group_by_file<'a>(
 ```
 
 ```rust name=render_file path=tangle.rs
-/// A block's own `source` (`plan::block_ref`) already ends in exactly one
-/// `\n` -- `block.rs` pushes one after every content line, including the
-/// last -- so joining consecutive blocks with one more reproduces the same
-/// "exactly one blank line" shape `result.rs`'s write-back already commits
-/// to, rather than butting two blocks' code directly against each other
-/// with nothing to mark where one substitution ends and the next begins.
+/// A block's own `source` (`plan::block_ref`) already ends in exactly
+/// one `\n`. `block.rs` pushes one after every content line, including
+/// the last. This way, joining consecutive blocks with one more
+/// reproduces the same "exactly one blank line" shape `result.rs`'s
+/// write-back already commits to, rather than butting two blocks' code
+/// directly against each other with nothing to mark where one
+/// substitution ends and the next begins.
 fn render_file(source_path: &str, heading_title: Option<&str>, rel_path: &str, blocks: &[&BlockRef]) -> String {
     let comment = comment_prefix(extension(rel_path));
     let mut out = String::new();
@@ -518,7 +521,7 @@ mod tests {
     #[test]
     fn the_banner_comment_follows_the_destination_extension_not_lang() {
         // A `rust`-fenced block naming `path=Cargo.toml` still lands in a
-        // TOML file: the banner has to open with `#`, not `//`, regardless
+        // TOML file. The banner has to open with `#`, not `//`, regardless
         // of which fence produced it.
         let dir = scratch(&[(
             "a.md",
@@ -613,9 +616,10 @@ mod tests {
 
     #[test]
     fn naming_one_file_out_of_a_larger_corpus_does_not_nest_it() {
-        // Only `a.md` has rust blocks -- tangling it directly, even though
-        // `sub/b.md` exists alongside it, should look exactly like tangling
-        // it alone: no per-file subdirectory for a single contributor.
+        // Only `a.md` has rust blocks. Tangling it directly, even though
+        // `sub/b.md` exists alongside it, should look exactly like
+        // tangling it alone. No per-file subdirectory for a single
+        // contributor.
         let dir = scratch(&[
             (".dankg/config", "[tangle.rust]\next = rs\n"),
             ("a.md", "# One\n\n```rust name=a\nfn a() {}\n```\n"),
@@ -705,13 +709,15 @@ mod tests {
         run(&one(dir.join("a.md").to_str().unwrap()), "rust", Some(out.to_str().unwrap()), true).unwrap();
         let manifest = fs::read_to_string(out.join(MANIFEST_NAME)).unwrap();
         assert!(manifest.contains("\"version\": 2"), "{manifest}");
-        // `a`'s fence opens at line 3 (after the heading and a blank line)
-        // and closes at line 5; `b`'s opens at 7, closes at 9. Wrong here
-        // means glue would window against the wrong prose entirely.
+        // `a`'s fence opens at line 3 (after the heading and a blank
+        // line) and closes at line 5. `b`'s opens at 7, closes at 9.
+        // Wrong here means glue would window against the wrong prose
+        // entirely.
         assert!(manifest.contains("\"name\": \"a\", \"line\": 3, \"end_line\": 5"), "{manifest}");
         assert!(manifest.contains("\"name\": \"b\", \"line\": 7, \"end_line\": 9"), "{manifest}");
-        // Both appearing is not enough -- `a` must be listed before `b`
-        // (document order), not whatever order a HashMap happened to keep.
+        // Both appearing is not enough. `a` must be listed before `b`
+        // (document order), not whatever order a HashMap happened to
+        // keep.
         let pos_a = manifest.find("\"name\": \"a\"").unwrap();
         let pos_b = manifest.find("\"name\": \"b\"").unwrap();
         assert!(pos_a < pos_b, "{manifest}");
@@ -746,7 +752,7 @@ mod tests {
         assert!(manifest.contains("\"source\": \"a.md\""), "{manifest}");
         assert!(manifest.contains("\"source\": \"b.md\""), "{manifest}");
         // `b.md` has one extra blank line before its fence than `a.md`
-        // does -- if per-file line tracking leaked across files (e.g. a
+        // does. If per-file line tracking leaked across files (e.g. a
         // shared counter, or an offset from the other file's length),
         // this is exactly where it would show up.
         assert!(manifest.contains("\"name\": \"one\", \"line\": 3, \"end_line\": 5"), "{manifest}");

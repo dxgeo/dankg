@@ -5,9 +5,9 @@ with it: `term` (raw mode, alternate screen, size query), `input` (byte ->
 key-event decoding), `draw` (`Layout` -> character grid), `editor`
 (spawning the reader's editor, via \[`crate::cmd`\]), `expand` (tab-to-
 expand's placement logic), `eval` (cycling a node's named blocks and
-running one via \[`crate::eval::session`\]), and `app` (the event loop).
-`app` alone is private -- nothing outside this module needs `app::*`
-directly, only the one function this file re-exports from it.
+evaluating one via \[`crate::eval::session`\]), and `app` (the event loop).
+`app` alone is private. Nothing outside this module needs `app::*`
+directly. Only the one function this file re-exports from it does.
 
 ```rust name=tui_mod path=tui/mod.rs
 //! Terminal UI. See `architecture.md`, "Terminal UI" (milestone 7).
@@ -16,7 +16,7 @@ directly, only the one function this file re-exports from it.
 //! key-event decoding), `draw` (`Layout` -> character grid), `editor`
 //! (spawning the reader's editor, via [`crate::cmd`]), `expand`
 //! (tab-to-expand's placement logic), `eval` (cycling a node's named
-//! blocks and running one via [`crate::eval::session`]), and `app` (the
+//! blocks and evaluating one via [`crate::eval::session`]), and `app` (the
 //! event loop) are built. `app::run` is the entry point.
 
 mod app;

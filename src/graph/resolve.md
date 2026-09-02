@@ -1,10 +1,10 @@
 # Graph resolve
 
 Resolution runs only once the *whole* corpus is parsed, for two reasons
-that both trace back to the same fact: a link's target may live in a file
-that had not been read yet when the link itself was found, and backlinks
+that both trace back to the same fact. A link's target may live in a file
+that had not been read yet when the link itself was found. Backlinks
 are only honest once every file has been seen ([decision 6](../../architecture.md#decision-6-index-scope)).
-The root is a hard boundary here too -- a link that would escape it is
+The root is a hard boundary here too. A link that would escape it is
 refused rather than followed, never even attempted, because "an LLM can
 run it for you" means the markdown being graphed is frequently untrusted
 input, not a file the reader necessarily wrote themselves.
@@ -13,11 +13,11 @@ input, not a file the reader necessarily wrote themselves.
 //! Link resolution and root containment.
 //!
 //! Resolution runs once the whole corpus is parsed, because a link's target may
-//! live in a file that had not been read when the link was found -- and because
+//! live in a file that had not been read when the link was found, and because
 //! backlinks are only honest when every file has been seen.
 //!
 //! The root is a hard boundary. A link that escapes it is refused rather than
-//! followed: "an LLM can run it for you" means the markdown being graphed is
+//! followed. "an LLM can run it for you" means the markdown being graphed is
 //! frequently untrusted input.
 
 use super::build::{file_stem, strip_extension, ParsedFile, RawLink, Target};
@@ -67,15 +67,15 @@ pub fn resolve(files: &[ParsedFile], diags: &mut Diags) -> Graph {
 }
 ```
 
-Every link resolves to one of exactly three outcomes, and a dangling
-target still *becomes* a node rather than just a warning -- that is the
-entire mechanism behind seeing what a corpus references but has not yet
-written: the placeholder is the visible trace of the gap.
+Every link resolves to one of exactly three outcomes. A dangling target
+still *becomes* a node rather than just a warning. That is the entire
+mechanism behind seeing what a corpus references but has not yet written.
+The placeholder is the visible trace of the gap.
 
 ```rust name=resolution_and_path path=graph/resolve.rs
 enum Resolution {
     Found(NodeId),
-    /// The target does not exist. It still becomes a node: a dangling link is
+    /// The target does not exist. It still becomes a node. A dangling link is
     /// how you see what you have referenced but not yet written.
     Dangling(Node),
     /// Outside the root. Not followed, and not graphed.
@@ -155,12 +155,12 @@ fn resolve_path(
 }
 ```
 
-Wikilinks resolve differently from a written path on purpose: `[[Heading]]`
-searches heading slugs across the *whole* corpus first, since the wikilink
-form exists specifically to address headings by name rather than by file
-\-- only when nothing slugifies to a match does it fall back to a file of
-that name, so `[[ideas]]` still finds `ideas.md` even when no heading in
-it happens to slugify to "ideas".
+Wikilinks resolve differently from a written path on purpose.
+`[[Heading]]` searches heading slugs across the *whole* corpus first,
+since the wikilink form exists specifically to address headings by name
+rather than by file. Only when nothing slugifies to a match does it fall
+back to a file of that name, so `[[ideas]]` still finds `ideas.md` even
+when no heading in it happens to slugify to "ideas".
 
 ```rust name=resolve_wiki path=graph/resolve.rs
 fn resolve_wiki(
@@ -289,7 +289,7 @@ fn find_slug(file: &ParsedFile, fragment: &str) -> Option<NodeId> {
 }
 ```
 
-A dangling placeholder is always drawn as a heading, never a block --
+A dangling placeholder is always created as a heading, never a block.
 `[text](file#name)` can only ever address a heading, so whatever it
 failed to find would have had to be one too.
 
@@ -307,8 +307,8 @@ fn placeholder(key: &str, slug: &str, path: &str) -> Node {
         tags: Vec::new(),
         external: Vec::new(),
         resolved: false,
-        // A dangling link always points at a heading-shaped target -- a
-        // block is never something `[text](file#name)` can name -- so a
+        // A dangling link always points at a heading-shaped target. A
+        // block is never something `[text](file#name)` can name. So a
         // placeholder invented to receive one is a placeholder heading.
         kind: NodeKind::Heading,
     }
@@ -323,8 +323,8 @@ fn split_fragment(dest: &str) -> (&str, &str) {
 ```
 
 `join_normalize` is shared with `eval::plan`'s cross-file `deps=`
-resolution rather than reimplemented there -- a dependency and a written
-link agree about what a relative path means and about the root boundary
+resolution rather than reimplemented there. A dependency and a written
+link agree about what a relative path means and about the root boundary,
 because they are, quite literally, the same function.
 
 ```rust name=dir_of_and_join_normalize path=graph/resolve.rs

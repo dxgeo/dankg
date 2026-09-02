@@ -3,32 +3,34 @@
 Phase 2, once [`layout::acyclic`](acyclic.md) has handed back a DAG:
 assign each node to a layer, then split every edge that ends up spanning
 more than one layer into a chain of one-layer segments joined by virtual
-nodes. Longest-path layering -- a node sits one layer below the lowest of
-everything that points at it -- is what makes a heading appear directly
-under its parent, and it is both cheap and exact; the cost it defers is
-that an edge can end up spanning several layers, which the ordering and
-coordinate phases downstream cannot reason about, so this phase closes
-that gap before either of them runs. The virtual nodes a long edge grows
-become that edge's bend points once it is finally drawn as a polyline.
+nodes. Longest-path layering means a node sits one layer below the lowest of
+everything that points at it. That is what makes a heading appear
+directly under its parent. It is both cheap and exact. The cost it
+defers is that an edge can end up spanning several layers. The ordering
+and coordinate phases downstream cannot reason about that. This phase
+closes the gap before either of them runs. The virtual nodes a long
+edge grows become that edge's bend points, once it is finally rendered
+as a polyline.
 
 ```rust name=module_doc path=layout/rank.rs
 //! Phase 2: assign each node to a layer, and split the edges that skip one.
 //!
 //! Longest-path layering: a node sits one layer below the lowest of everything
 //! that points at it. That is what makes a heading appear directly under its
-//! parent, and it is cheap and exact. It can leave an edge spanning several
-//! layers, which the ordering and coordinate phases cannot reason about, so
-//! such an edge is split into a chain of one-layer segments joined by virtual
-//! nodes. Those become the bend points of the drawn polyline.
+//! parent. It is cheap and exact. It can leave an edge spanning several
+//! layers. The ordering and coordinate phases cannot reason about that. As a
+//! result, such an edge is split into a chain of one-layer segments joined by
+//! virtual nodes. Those become the bend points of the rendered polyline.
 
 use super::acyclic::{self, Role};
 use super::{Dag, Route, Segment};
 ```
 
-Kahn's algorithm, but always taking the *lowest* ready index rather than
-whichever the queue happens to offer next -- the same determinism
-[`layout::acyclic::break_cycles`](acyclic.md) commits to for the same
-reason: the same input graph must lay out identically on every run.
+This is Kahn's algorithm, but it always takes the *lowest* ready index,
+rather than whichever the queue happens to offer next. This is the same
+determinism [`layout::acyclic::break_cycles`](acyclic.md) commits to,
+for the same reason. The same input graph must lay out identically on
+every run.
 
 ```rust name=assign path=layout/rank.rs
 /// Longest-path layering over the acyclic orientation.
@@ -92,8 +94,8 @@ pub(crate) fn split_long_edges(
         };
 
         let mut path = vec![source];
-        // Every intermediate layer gets a bend point, so no segment ever skips
-        // a layer and the ordering phase only compares neighbouring ranks.
+        // Every intermediate layer gets a bend point. No segment ever skips
+        // a layer. The ordering phase only compares neighbouring ranks.
         for rank in (dag.rank[source] + 1)..dag.rank[target] {
             let bend = dag.rank.len();
             dag.rank.push(rank);

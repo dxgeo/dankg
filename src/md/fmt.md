@@ -1,35 +1,36 @@
 # Markdown fmt
 
-`dankg fmt` exists so a knowledge base stays diffable and a graph never
-changes just because someone indented a list differently. That makes
-losslessness the whole problem this module has to solve: formatting is a
-pure function of the AST, so anything the AST does not record cannot be
-reproduced, and two rules follow directly from that constraint.
-Constructs outside the subset are re-emitted byte for byte -- both
-`Passthrough` blocks and the raw frontmatter block -- since the formatter
+`dankg fmt` exists so a knowledge base stays diffable. It also exists so
+a graph never changes just because someone indented a list differently.
+That makes losslessness the whole problem this module has to solve.
+Formatting is a pure function of the AST. Anything the AST does not
+record cannot be reproduced. Two rules follow directly from that
+constraint. Constructs outside the subset are re-emitted byte for byte:
+both `Passthrough` blocks and the raw frontmatter block. The formatter
 never rewrites a construct it does not fully model. Text is escaped on
-the way *out*, not merely copied: a `Text` node holds the character the
-author meant, not the bytes they originally typed, so anything that would
+the way *out*, not merely copied. A `Text` node holds the character the
+author meant, not the bytes they originally typed. Anything that would
 be re-read as markup on the next parse has to be escaped back in.
 
 ```rust name=module_doc path=md/fmt.rs
 //! The formatter: AST back to markdown, in normal form.
 //!
-//! `dankg fmt` exists so that a knowledge base stays diffable and a graph never
-//! changes because someone indented a list differently. That makes losslessness
-//! the whole problem: this is a pure function of the AST, so anything the AST
-//! does not record cannot be reproduced. Two rules follow.
+//! `dankg fmt` exists so that a knowledge base stays diffable. It also
+//! exists so a graph never changes because someone indented a list
+//! differently. That makes losslessness the whole problem. This is a pure
+//! function of the AST. Anything the AST does not record cannot be
+//! reproduced. Two rules follow.
 //!
-//! Constructs outside the subset are re-emitted byte for byte -- `Passthrough`
-//! blocks and the frontmatter block both. The formatter never rewrites a
-//! construct it does not model.
+//! Constructs outside the subset are re-emitted byte for byte:
+//! `Passthrough` blocks and the frontmatter block both. The formatter never
+//! rewrites a construct it does not model.
 //!
-//! Text is escaped on the way out, not merely copied. A `Text` node holds the
-//! character the author meant, not the bytes they typed, so anything that would
-//! be re-read as markup has to be escaped back. `escape` therefore mirrors the
-//! parser's own decisions -- `can_open_close` is shared with `inline.rs` rather
-//! than reimplemented, because an escaper that disagrees with the parser about
-//! flanking silently mangles emphasis.
+//! Text is escaped on the way out, not merely copied. A `Text` node holds
+//! the character the author meant, not the bytes they typed. Anything that
+//! would be re-read as markup has to be escaped back. `escape` therefore
+//! mirrors the parser's own decisions. `can_open_close` is shared with
+//! `inline.rs` rather than reimplemented, because an escaper that disagrees
+//! with the parser about flanking silently mangles emphasis.
 
 use super::{Block, Document, Inline, InfoString, List, KNOWN_ATTRS};
 use crate::diag::Diags;
@@ -51,17 +52,17 @@ pub fn format(doc: &Document) -> String {
 ```
 
 `verify` is what actually makes `dankg fmt`'s safety guarantee real
-rather than assumed: round-tripping is the strongest test this parser
-has, so the formatter re-runs it on every file it is about to overwrite,
-not just in the test suite -- a failure here means a formatter or parser
-bug, and `main.rs`'s own caller must not write the file when it happens.
+rather than assumed. Round-tripping is the strongest test this parser
+has. The formatter re-runs it on every file it is about to overwrite, not
+just in the test suite. A failure here means a formatter or parser bug.
+`main.rs`'s own caller must not write the file when it happens.
 
 ```rust name=verify_and_strip path=md/fmt.rs
 /// Check that formatting changed the text of the document but not its meaning.
 ///
-/// Round-tripping is the strongest test this parser has, so the formatter runs
+/// Round-tripping is the strongest test this parser has. The formatter runs
 /// it on every file it is about to rewrite rather than trusting the suite. A
-/// failure here is a formatter or parser bug, and the caller must not write.
+/// failure here is a formatter or parser bug. The caller must not write.
 pub fn verify(original: &Document, formatted: &str) -> Result<(), String> {
     let mut scratch = Diags::new("<formatted>");
     let reparsed = Document::parse(formatted, &mut scratch);
@@ -79,7 +80,7 @@ pub fn verify(original: &Document, formatted: &str) -> Result<(), String> {
 /// A copy with every source line number zeroed.
 ///
 /// Line numbers are the one part of the AST that formatting is *expected* to
-/// change, so they have to come out before two documents can be compared.
+/// change. They have to come out before two documents can be compared.
 pub fn without_lines(doc: &Document) -> Document {
     Document {
         frontmatter: doc.frontmatter.clone(),
@@ -118,15 +119,15 @@ fn strip_block(b: &Block) -> Block {
 }
 ```
 
-Every block's own rendering already ends in exactly one newline, so the
-only decision `blocks` has to make is whether a blank line goes *between*
-two of them -- which, not coincidentally, is also exactly the difference
-between a tight and a loose list item, so this one function serves both
-callers.
+Every block's own rendering already ends in exactly one newline. The
+only decision `blocks` has to make is whether a blank line goes
+*between* two of them. This, not coincidentally, is also exactly the
+difference between a tight and a loose list item. This one function
+serves both callers.
 
 ```rust name=blocks_and_heading path=md/fmt.rs
-/// Blocks in sequence. Every block's text ends in exactly one newline, so the
-/// only decision here is whether a blank line goes between them -- which is
+/// Blocks in sequence. Every block's text ends in exactly one newline. The
+/// only decision here is whether a blank line goes between them. This is
 /// also the difference between a tight and a loose list item.
 fn blocks(list: &[Block], blank_between: bool) -> String {
     let mut out = String::new();
@@ -146,7 +147,7 @@ fn block(b: &Block) -> String {
         Block::Code { info, text, fence, .. } => code(info, text, *fence),
         Block::List(l) => list(l),
         // `---` would be read back as frontmatter at the top of a file and as a
-        // bullet inside a list item; `***` is a thematic break everywhere.
+        // bullet inside a list item. `***` is a thematic break everywhere.
         Block::ThematicBreak { .. } => "***\n".to_string(),
         Block::Passthrough { text, .. } => format!("{text}\n"),
     }
@@ -158,8 +159,8 @@ fn heading(level: u8, inlines: &[Inline]) -> String {
     if text.is_empty() {
         return format!("{hashes}\n");
     }
-    // A trailing run of hashes is a closing sequence, so the run has to be
-    // escaped or the heading loses its last word.
+    // A trailing run of hashes is a closing sequence. The run has to be
+    // escaped. Otherwise the heading loses its last word.
     let mut text = text;
     if text.ends_with('#') {
         let run = text.len() - text.trim_end_matches('#').len();
@@ -169,14 +170,14 @@ fn heading(level: u8, inlines: &[Inline]) -> String {
 }
 ```
 
-A fence's own length is always the shortest run that clears its body --
+A fence's own length is always the shortest run that clears its body:
 three characters, unless the content contains a longer run of the fence
 character itself and would close the block early. `info_text`'s ordering
 (language, then known attributes in `KNOWN_ATTRS`'s own declared order,
 then whatever the parser did not recognise) makes the canonical form
-independent of whatever order the author originally typed keys in, while
-still never deleting a word it does not understand -- doing so would make
-`fmt` lossy, which the module doc rules out categorically.
+independent of whatever order the author originally typed keys in. It
+still never deletes a word it does not understand. Doing so would make
+`fmt` lossy. The module doc rules that out categorically.
 
 ```rust name=code_and_info path=md/fmt.rs
 fn code(info: &InfoString, text: &str, fence: char) -> String {
@@ -197,8 +198,8 @@ fn code(info: &InfoString, text: &str, fence: char) -> String {
 
 /// Canonical info string: language, then known attributes in the order
 /// `KNOWN_ATTRS` declares them, then anything the parser did not recognise, in
-/// the order it was written. Unknown words are ignored everywhere else, but
-/// deleting them would make `fmt` lossy.
+/// the order it was written. Unknown words are ignored everywhere else.
+/// Deleting them would make `fmt` lossy.
 fn info_text(info: &InfoString) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(lang) = &info.lang {
@@ -273,8 +274,8 @@ fn item_text(marker: &str, body: &str, width: usize) -> String {
 ```
 
 `Writer.prev` deliberately tracks the previous *semantic* character, not
-the previous output byte -- an inserted escape backslash must never
-itself become the "previous character" the flanking rules see, or the
+the previous output byte. An inserted escape backslash must never itself
+become the "previous character" the flanking rules see. Otherwise the
 escaper would start reacting to its own output instead of to the
 document's real content.
 
@@ -294,8 +295,8 @@ struct Writer {
 }
 
 impl Writer {
-    /// `after` is the character that will follow the last inline -- a closing
-    /// emphasis delimiter, say. Flanking is decided by neighbours, so the last
+    /// `after` is the character that will follow the last inline, a closing
+    /// emphasis delimiter, say. Flanking is decided by neighbours. The last
     /// child has to know what its parent is about to write.
     fn run(&mut self, inlines: &[Inline], after: char) {
         for (i, item) in inlines.iter().enumerate() {
@@ -332,13 +333,13 @@ impl Writer {
 }
 ```
 
-`text` is where escaping actually happens, and it leans on two different
-sources of truth depending on position: a character at the very start of
+`text` is where escaping actually happens. It leans on two different
+sources of truth depending on position. A character at the very start of
 a line gets escaped if it would otherwise *open a block* (`#`, `>`, a
 list marker), using the same recognisers `md/block.rs` itself parses
-with; a `*`/`_` anywhere gets escaped using `inline::can_open_close`
+with. A `*`/`_` anywhere gets escaped using `inline::can_open_close`
 directly, the identical function `md/inline.rs` uses to decide whether a
-delimiter run is live -- sharing it here, rather than re-deriving the
+delimiter run is live. Sharing it here, rather than re-deriving the
 rule, is what keeps the escaper from ever disagreeing with the parser
 about which character would actually become emphasis on the next read.
 
@@ -370,8 +371,8 @@ impl Writer {
             let before = if i == 0 { self.prev } else { chars[i - 1] };
             let after = chars.get(i + 1).copied().unwrap_or(next);
             match c {
-                // `]` matters even though a bare one is inert: a real link
-                // writes an unescaped `[`, and a stray `]` in its text would
+                // `]` matters even though a bare one is inert. A real link
+                // writes an unescaped `[`. A stray `]` in its text would
                 // close it early.
                 '\\' | '`' | '[' | ']' => self.out.push('\\'),
                 '*' | '_' => {
@@ -499,9 +500,9 @@ fn longest_run(s: &str, ch: char) -> usize {
     best
 }
 
-/// A link destination. Whitespace forces the `<...>` form, which is the only
-/// way to write it; otherwise parentheses and backslashes are escaped so that
-/// the destination cannot end early.
+/// A link destination. Whitespace forces the `<...>` form. This is the
+/// only way to write it. Otherwise parentheses and backslashes are
+/// escaped. This way, the destination cannot end early.
 fn destination(dest: &str) -> String {
     if dest.is_empty() || dest.chars().any(|c| c.is_ascii_whitespace()) {
         let mut s = String::from("<");

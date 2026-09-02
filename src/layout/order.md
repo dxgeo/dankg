@@ -2,28 +2,28 @@
 
 Phase 3, over the layers [`layout::rank`](rank.md) already assigned:
 order the nodes within each layer to reduce edge crossings. Minimizing
-crossings exactly is NP-hard, so this is the standard median heuristic --
-sweep down the layers putting each node at the median position of its
-neighbours above, then sweep up doing the same with the neighbours below,
-four times total, keeping the best ordering seen so a sweep can never
-leave things worse than where it started. Two determinism rules make the
-whole thing reproducible rather than merely plausible: the starting order
-comes from a depth-first walk in index order, never from whatever the
-graph happened to hand back, and every tie anywhere in the sweep is broken
-by a node's own stable key.
+crossings exactly is NP-hard. This is the standard median heuristic
+instead: sweep down the layers, putting each node at the median
+position of its neighbours above, then sweep up doing the same with
+the neighbours below. Four passes total. The best ordering seen is
+kept, so a sweep can never leave things worse than where it started.
+Two determinism rules make the whole thing reproducible, not merely
+plausible. The starting order comes from a depth-first walk in index
+order, never from whatever the graph happened to hand back. Every tie
+anywhere in the sweep is broken by a node's own stable key.
 
 ```rust name=module_doc path=layout/order.rs
 //! Phase 3: order the nodes within each layer, to reduce edge crossings.
 //!
-//! Minimising crossings exactly is NP-hard, so this is the standard median
-//! heuristic: sweep down the layers putting each node at the median position
-//! of its neighbours above, then sweep up doing the same with the neighbours
-//! below, four times. The best ordering seen is kept, so a sweep can never
-//! make things worse than where it started.
+//! Minimising crossings exactly is NP-hard. This is the standard median
+//! heuristic instead: sweep down the layers putting each node at the median
+//! position of its neighbours above, then sweep up doing the same with the
+//! neighbours below, four times. The best ordering seen is kept. A sweep
+//! can never make things worse than where it started.
 //!
-//! Two determinism rules. The starting order comes from a depth-first walk in
-//! index order, not from whatever the graph happened to hand us, and every tie
-//! is broken by the node's stable key.
+//! Two determinism rules. The starting order comes from a depth-first walk
+//! in index order, not from whatever the graph happened to hand us. Every
+//! tie is broken by the node's stable key.
 
 use super::{Dag, Segment};
 
@@ -95,8 +95,8 @@ fn initial_order(dag: &Dag) -> Vec<Vec<usize>> {
             }
             seen[node] = true;
             layers[dag.rank[node] as usize].push(node);
-            // Reversed, so the lowest-numbered successor comes off the stack
-            // first and the walk reads left to right.
+            // Reversed. This way, the lowest-numbered successor comes off the
+            // stack first. The walk then reads left to right.
             for &next in out[node].iter().rev() {
                 if !seen[next] {
                     stack.push(next);
@@ -117,11 +117,11 @@ fn renumber(dag: &mut Dag) {
 }
 ```
 
-A containment segment counts twice toward a node's median -- the
-mechanism that pulls a heading into line with its own children rather
-than with whatever else happens to link to it, matching the weight
-`layout::rank` already gives containment when it lays out layers in the
-first place.
+A containment segment counts twice toward a node's median. This is the
+mechanism that pulls a heading into line with its own children, rather
+than with whatever else happens to link to it. It matches the weight
+`layout::rank` already gives containment, when it lays out layers in
+the first place.
 
 ```rust name=reorder_and_median path=layout/order.rs
 fn reorder(dag: &mut Dag, rank: usize, direction: Direction) {
@@ -271,8 +271,8 @@ mod tests {
 
     #[test]
     fn a_worse_sweep_never_replaces_a_better_ordering() {
-        // A deliberately awkward bipartite graph; the result only has to be no
-        // worse than the depth-first starting point.
+        // A deliberately awkward bipartite graph. The result only has to be
+        // no worse than the depth-first starting point.
         let edges: Vec<(usize, usize, i32)> =
             vec![e(0, 5), e(1, 4), e(2, 6), e(3, 5), e(0, 6), e(1, 7)];
         let d = build(8, &edges);
@@ -286,8 +286,8 @@ mod tests {
 
     #[test]
     fn a_node_with_no_neighbours_above_keeps_its_place() {
-        // 3 has nothing pointing at it, so the down sweep has no opinion about
-        // it and it must not be shuffled to an end.
+        // Node 3 has nothing pointing at it. The down sweep has no opinion
+        // about it. It must not be shuffled to an end.
         let d = build(4, &[e(0, 1), e(0, 2)]);
         assert!(d.layers.iter().flatten().any(|&n| n == 3));
         assert_eq!(d.layers.iter().flatten().count(), 4, "no node is lost");
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn crossings_counts_a_known_tangle() {
         // 0 -> 3 and 1 -> 2. With the lower layer as [2, 3] the two edges
-        // cross; swapping it to [3, 2] untangles them.
+        // cross. Swapping it to [3, 2] untangles them.
         let mut d = build(4, &[e(0, 3), e(1, 2)]);
         d.layers[0] = vec![0, 1];
 

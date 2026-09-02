@@ -1,16 +1,16 @@
 # Graph cache
 
-Strictly an optimisation, and the module doc's own claim is deliberately
-testable rather than merely asserted: deleting `.dankg/cache/` changes
-nothing but runtime, every failure in this module is a warning at worst,
-and `--no-cache` exists specifically so "a cache that can break a build is
+Strictly an optimisation. The module doc's own claim is deliberately
+testable rather than merely asserted. Deleting `.dankg/cache/` changes
+nothing but runtime. Every failure in this module is a warning at worst.
+`--no-cache` exists specifically so "a cache that can break a build is
 worse than no cache" is a property a reader can actually check, not
 something they have to take on faith.
 
 An entry is keyed on `(mtime, len)` and verified by a content hash. The
 first pair is the cheap rejection that catches almost every real miss
-without touching file contents at all; the hash is what closes the one
-window that leaves -- a file rewritten within a single filesystem
+without touching file contents at all. The hash is what closes the one
+window that leaves: a file rewritten within a single filesystem
 timestamp tick, where `mtime`/`len` alone could lie. The config hash is
 stamped in too, since editing `.dankg/config` can change what the very
 same file means.
@@ -19,20 +19,20 @@ same file means.
 //! The parse cache.
 //!
 //! Strictly an optimisation. Deleting `.dankg/cache/` changes nothing but
-//! runtime, and every failure in this module is a warning at worst -- a cache
+//! runtime. Every failure in this module is a warning at worst. A cache
 //! that can break a build is worse than no cache. `--no-cache` exists so that
 //! claim is testable rather than merely asserted.
 //!
 //! An entry is keyed on `(mtime, len)` and verified by a content hash. The
-//! first pair is a cheap rejection; the hash is what closes the window where a
+//! first pair is a cheap rejection. The hash is what closes the window where a
 //! file is rewritten within one filesystem timestamp tick. The config hash is
 //! stamped in too, because a config change can change what a file means.
 //!
 //! What is stored is the *index* contribution of a file -- its nodes,
 //! containment edges, raw links and aliases -- rather than the markdown AST.
-//! That is exactly what steps 4-6 of the pipeline consume, and it is a far
+//! That is exactly what steps 4-6 of the pipeline consume. It is also a far
 //! smaller thing to write a codec for. `dankg fmt`, which needs the whole AST,
-//! does not use the cache and does not want to: it reads every file it is
+//! does not use the cache and does not want to. It reads every file it is
 //! given anyway.
 
 use super::build::{ParsedFile, RawLink, Target};
@@ -72,12 +72,13 @@ pub struct Cache {
 
 `lookup` always returns both the file's index contribution *and* the
 diagnostics its original parse raised -- never just the former. A cached
-run has to say exactly what a cold run said, or a reader could not tell
-which kind of run they got just by reading the output, defeating the
-whole point of caching being invisible to correctness. `store` writes to
-a temp file and renames rather than writing the real path directly: a
-half-written entry must never be readable as a whole one, and two
-concurrent `dankg` invocations must not interleave into a corrupt file.
+run has to say exactly what a cold run said. Otherwise a reader could not
+tell which kind of run they got just by reading the output. That would
+defeat the whole point of caching being invisible to correctness. `store`
+writes to a temp file and renames rather than writing the real path
+directly. A half-written entry must never be readable as a whole one.
+Two concurrent `dankg` invocations must not interleave into a corrupt
+file.
 
 ```rust name=cache_impl path=graph/cache.rs
 impl Cache {
@@ -145,8 +146,8 @@ impl Cache {
         let stamp = Stamp { config: self.config_hash, len, mtime, content: content_hash(content) };
         let text = encode(&stamp, file, diags);
         let path = entry_path(&dir, rel);
-        // Write then rename: a half-written entry must never be readable as a
-        // whole one, and two concurrent runs must not interleave.
+        // Write then rename. A half-written entry must never be readable as a
+        // whole one. Two concurrent runs must not interleave.
         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
 
         match fs::write(&tmp, text).and_then(|()| fs::rename(&tmp, &path)) {
@@ -159,7 +160,7 @@ impl Cache {
     }
 
     /// Entries on disk that no longer correspond to a file in the corpus.
-    /// Reported by `dankg index`; never deleted behind the user's back.
+    /// Reported by `dankg index`. Never deleted behind the user's back.
     pub fn orphans(&self, live: &[String]) -> usize {
         let Some(dir) = &self.dir else { return 0 };
         let Ok(entries) = fs::read_dir(dir) else { return 0 };
@@ -199,9 +200,9 @@ struct Stamp {
 ```
 
 `encode` writes one line per record, tab-delimited, in a fixed field
-count per kind that `decode` checks strictly -- an entry with the wrong
+count per kind that `decode` checks strictly. An entry with the wrong
 number of fields for its own row kind is treated exactly like one from a
-stale `VERSION`, a miss rather than a crash.
+stale `VERSION`. It is a miss rather than a crash.
 
 ```rust name=encode path=graph/cache.rs
 fn encode(stamp: &Stamp, file: &ParsedFile, diags: &[Diagnostic]) -> String {
@@ -296,10 +297,10 @@ fn encode(stamp: &Stamp, file: &ParsedFile, diags: &[Diagnostic]) -> String {
 ```
 
 `decode` returns `None` for anything stale, malformed, or from another
-version, uniformly -- every caller already treats "cannot use this entry"
+version, uniformly. Every caller already treats "cannot use this entry"
 as "parse it properly instead," so there is no separate failure path to
-report and no reason for one: a corrupt cache entry is not a build error,
-it is just a miss.
+report and no reason for one. A corrupt cache entry is not a build error.
+It is just a miss.
 
 ```rust name=decode path=graph/cache.rs
 /// `None` for anything stale, malformed, or from another version. Every caller
@@ -392,7 +393,7 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
 ```
 
 Row-writing, flags, and lists are small enough to earn no comment of
-their own beyond what is here; `escape`/`unescape` are the one place that
+their own beyond what is here. `escape`/`unescape` are the one place that
 matters, since a value containing a tab, a newline, or the list separator
 itself has to survive the round trip byte for byte.
 
@@ -461,7 +462,7 @@ fn unescape(value: &str) -> String {
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
             Some('u') => out.push(UNIT),
-            // Unknown escapes are kept verbatim rather than dropped: the
+            // Unknown escapes are kept verbatim rather than dropped. The
             // decoder's job is to round-trip, not to editorialise.
             Some(other) => {
                 out.push('\\');

@@ -21,14 +21,14 @@ pub use model::{Edge, EdgeKind, Graph, Node, NodeId, NodeKind};
 
 ## Test helper
 
-Shared, not duplicated: the layout and render test suites need a `Graph`
-built straight from in-memory files exactly as much as the graph tests
-themselves do, so the one function that does it -- parse each file, build
-its nodes and containment/raw-link edges, then resolve the whole set --
-lives here rather than in any one of them.
+Shared, not duplicated. The layout and render test suites need a `Graph`
+built straight from in-memory files exactly as much as the graph tests do.
+The one function that does it lives here rather than in any one of them.
+It parses each file, builds its nodes and containment/raw-link edges, then
+resolves the whole set.
 
 ```rust name=graph_of path=graph/mod.rs
-/// Parse and resolve a corpus held in memory. Test-only, and shared because
+/// Parse and resolve a corpus held in memory. Test-only. Shared because
 /// the layout and render tests need graphs as much as the graph tests do.
 #[cfg(test)]
 pub(crate) fn graph_of(files: &[(&str, &str)]) -> Graph {

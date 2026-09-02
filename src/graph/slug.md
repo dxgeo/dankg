@@ -15,7 +15,7 @@ lookup-table-free, in keeping with
 //! GitHub-compatible so that `[text](file.md#slug)` written for DanKG still
 //! jumps to the right place when the file is viewed anywhere else.
 //!
-//! Unicode works without lookup tables: `char::to_lowercase` and
+//! Unicode works without lookup tables. `char::to_lowercase` and
 //! `char::is_alphanumeric` are both Unicode-aware in std.
 
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub fn slugify(title: &str) -> String {
 
     for c in title.chars() {
         if c.is_whitespace() {
-            // Whitespace runs collapse to a single dash, and leading runs are
+            // Whitespace runs collapse to a single dash. Leading runs are
             // dropped entirely.
             pending_dash = !out.is_empty();
             continue;
@@ -50,7 +50,7 @@ pub fn slugify(title: &str) -> String {
 }
 ```
 
-A raw slug is only unique within the heading that produced it; a whole
+A raw slug is only unique within the heading that produced it. A whole
 document can repeat a title, so `Slugger` is the stateful half that keeps
 every slug it hands out distinct, suffixing repeats in the order they
 appear.
@@ -70,7 +70,7 @@ impl Slugger {
 
     pub fn assign(&mut self, title: &str) -> String {
         let base = slugify(title);
-        // A heading of only punctuation slugifies to nothing; it still needs an
+        // A heading of only punctuation slugifies to nothing. It still needs an
         // addressable identity.
         let base = if base.is_empty() { "section".to_string() } else { base };
 

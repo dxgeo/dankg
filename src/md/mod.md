@@ -2,19 +2,20 @@
 
 DanKG implements a documented subset of CommonMark, not the whole spec
 (architecture.md, *Markdown subset*). A construct outside that subset is
-never silently dropped -- it survives as `Block::Passthrough`, verbatim,
-so a file DanKG cannot fully understand is still a file DanKG never
-corrupts. Parsing runs in three passes: frontmatter first, then block
-structure, then inlines within whichever blocks can contain them --
-`md/frontmatter.rs`, `md/block.rs`, `md/inline.rs` (none yet converted to
-their own literate sources), in that order, every time.
+never silently dropped. It survives as `Block::Passthrough`, verbatim. A
+file DanKG cannot fully understand is still a file DanKG never corrupts.
+Parsing runs in three passes: frontmatter first, then block structure,
+then inlines within whichever blocks can contain them. That's
+`md/frontmatter.rs`, `md/block.rs`, and `md/inline.rs`, in that order,
+every time. None of the three is yet converted to its own literate
+source.
 
 ```rust name=module_doc path=md/mod.rs
 //! Markdown parsing.
 //!
 //! DanKG implements a documented subset of CommonMark rather than the whole
-//! spec; see architecture.md. Constructs outside the subset are preserved as
-//! `Block::Passthrough` so that nothing in a source file is ever silently lost.
+//! spec. See architecture.md. Constructs outside the subset are preserved as
+//! `Block::Passthrough`. Nothing in a source file is ever silently lost.
 //!
 //! Parsing runs in three passes: frontmatter, then block structure, then
 //! inlines within each block that can contain them.
@@ -59,11 +60,11 @@ impl Document {
 }
 ```
 
-Both walks descend into list items -- a heading or a named block can sit
-inside a list the same way it can sit anywhere else in the document tree
-\-- which is also exactly the reason `tangle.rs` does *not* reuse
-`named_blocks` for its own selection (`plan::top_level_blocks` walks only
-the top level on purpose; a block nested in a list is data, not a module).
+Both walks descend into list items. A heading or a named block can sit
+inside a list the same way it can sit anywhere else in the document tree.
+This is exactly why `tangle.rs` does *not* reuse `named_blocks` for its
+own selection. `plan::top_level_blocks` walks only the top level on
+purpose. A block nested in a list is data, not a module.
 
 ```rust name=collect_and_normalize path=md/mod.rs
 fn collect_headings<'a>(blocks: &'a [Block], out: &mut Vec<(u8, &'a [Inline], u32)>) {
@@ -94,9 +95,9 @@ fn collect_blocks<'a>(blocks: &'a [Block], out: &mut Vec<(&'a InfoString, &'a st
     }
 }
 
-/// Normalize line endings. CRLF and lone CR both become LF so that every
-/// downstream byte offset and line number means the same thing on every
-/// platform.
+/// Normalize line endings. CRLF and lone CR both become LF. This way,
+/// every downstream byte offset and line number means the same thing on
+/// every platform.
 fn normalize(source: &str) -> String {
     if !source.contains('\r') {
         return source.to_string();
@@ -117,11 +118,11 @@ fn normalize(source: &str) -> String {
 }
 ```
 
-`Block::Code`'s own `end_line` exists purely for `eval`'s write-back: it
+`Block::Code`'s own `end_line` exists purely for `eval`'s write-back. It
 needs to know exactly where a block ends in the *source* without
-re-deriving fence-matching a second time, which is also why the fence
-character is kept but its length is not -- `dankg fmt` always normalizes
-to the shortest run that clears the body, so a stored length would only
+re-deriving fence-matching a second time. This is also why the fence
+character is kept but its length is not. `dankg fmt` always normalizes
+to the shortest run that clears the body. A stored length would only
 ever be thrown away again.
 
 ```rust name=block_enum path=md/mod.rs
@@ -129,12 +130,12 @@ ever be thrown away again.
 pub enum Block {
     Heading { level: u8, inlines: Vec<Inline>, line: u32 },
     /// `fence` is the `` ` `` or `~` the author opened with. The *length* is
-    /// not recorded: it is normalized to the shortest run that clears the
-    /// body, so anything stored would only be thrown away again. `end_line`
-    /// is the closing fence's own line (or the last line of the file, for
-    /// one the parser never found a close for) -- `eval`'s write-back needs
-    /// to know exactly where a block ends in the source without
-    /// re-deriving fence-matching a second time.
+    /// not recorded. It is normalized to the shortest run that clears the
+    /// body. Anything stored would only be thrown away again. `end_line`
+    /// is the closing fence's own line, or the last line of the file when
+    /// the parser never found a close for one. `eval`'s write-back needs to
+    /// know exactly where a block ends in the source without re-deriving
+    /// fence-matching a second time.
     Code { info: InfoString, text: String, fence: char, line: u32, end_line: u32 },
     Paragraph { inlines: Vec<Inline>, line: u32 },
     List(List),
@@ -162,8 +163,8 @@ pub struct List {
     pub start: u64,
     pub tight: bool,
     /// The bullet character for an unordered list, or the delimiter (`.` or
-    /// `)`) for an ordered one. Authorial, and a change of it starts a new
-    /// list, so the parser records it rather than the formatter guessing.
+    /// `)`) for an ordered one. This is authorial. A change of it starts a
+    /// new list. The parser records it rather than the formatter guessing.
     pub marker: char,
     pub items: Vec<ListItem>,
     pub line: u32,
@@ -175,27 +176,27 @@ pub struct ListItem {
 }
 ```
 
-`InfoString`'s three fields -- `lang`, the recognised `attrs`, and
-`unknown` -- are chosen so the original text can always be rebuilt without
-loss, which is exactly why the raw info string itself is never separately
-stored: it would just be a fourth, redundant copy of what these three
-already reconstruct.
+`InfoString` has three fields: `lang`, the recognised `attrs`, and
+`unknown`. They are chosen so the original text can always be rebuilt
+without loss. This is exactly why the raw info string itself is never
+separately stored. It would just be a fourth, redundant copy of what
+these three already reconstruct.
 
 ```rust name=info_string path=md/mod.rs
 /// A fenced code block's info string.
 ///
-/// The first word is the language; everything after it is `key=value` DanKG
-/// metadata. Other markdown renderers ignore everything past the language, so
-/// files carrying DanKG attributes stay portable.
+/// The first word is the language. Everything after it is `key=value` DanKG
+/// metadata. Other markdown renderers ignore everything past the language.
+/// This way, files carrying DanKG attributes stay portable.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InfoString {
     pub lang: Option<String>,
     pub attrs: Vec<(String, String)>,
     /// Words the parser did not recognise. Warned about and ignored for every
-    /// other purpose, but kept so that `dankg fmt` never deletes them.
+    /// other purpose. Kept anyway. `dankg fmt` must never delete them.
     ///
-    /// Between `lang`, `attrs` and this, the info string can be rebuilt without
-    /// loss -- which is why the raw text is not also stored.
+    /// Between `lang`, `attrs`, and this, the info string can be rebuilt
+    /// without loss. This is why the raw text is not also stored.
     pub unknown: Vec<String>,
 }
 
@@ -233,22 +234,22 @@ impl InfoString {
 ```
 
 `Inline::plain` is the one place emphasis, links, and wikilinks all
-collapse to bare text -- heading titles and slug generation both need
-"what does this heading actually say," not its markup, and this is the
-single function both go through so they never disagree.
+collapse to bare text. Heading titles and slug generation both need
+"what does this heading actually say," not its markup. This is the
+single function both go through. That way they never disagree.
 
 ```rust name=inline_enum path=md/mod.rs
 #[derive(Debug, Clone, PartialEq)]
 pub enum Inline {
     Text(String),
     Code(String),
-    /// `delim` is the `*` or `_` the author wrote. Both render identically, so
-    /// only the formatter cares -- but it cares enough that dropping it would
+    /// `delim` is the `*` or `_` the author wrote. Both render identically.
+    /// Only the formatter cares. It cares enough that dropping it would
     /// rewrite every emphasis in a corpus on first run.
     Emph { delim: char, inner: Vec<Inline> },
     Strong { delim: char, inner: Vec<Inline> },
     Link { dest: String, title: Option<String>, text: Vec<Inline> },
-    /// `[[target]]` or `[[target|label]]`. Not standard markdown; resolved
+    /// `[[target]]` or `[[target|label]]`. Not standard markdown. Resolved
     /// against the root rather than as a path.
     WikiLink { target: String, label: Option<String> },
     SoftBreak,

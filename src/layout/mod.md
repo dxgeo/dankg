@@ -1,31 +1,31 @@
 # Layout
 
-Sugiyama layered layout, in four phases that must run in exactly this
-order: [break cycles](acyclic.md), [assign ranks](rank.md), [order within
+Sugiyama layered layout runs in four phases, always in this order:
+[break cycles](acyclic.md), [assign ranks](rank.md), [order within
 each rank](order.md), assign coordinates ([`layout::coord`](coord.md)).
-Every output format -- HTML, dot, Mermaid, the TUI's own grid -- gets
-coordinates from here, so there is exactly one layout engine in this
+Every output format gets its coordinates from here: HTML, dot, Mermaid,
+and the TUI's own grid. That leaves exactly one layout engine in this
 codebase, not one per renderer that could quietly disagree with the
 others about where a node belongs.
 
-Determinism is a hard requirement, not a nicety: it is what lets a
-rendered graph be committed and diffed like any other generated artifact.
-Nothing here ever iterates a hash map, every tie anywhere in the pipeline
-is broken by a stable key, and the arithmetic stays integer throughout --
-a layout expressed in whole pixels has no float formatting left to
-disagree about between two runs, or between two platforms.
+Determinism is a hard requirement, not a nicety. It lets a rendered
+graph be committed and diffed like any other generated artifact.
+Nothing here ever iterates a hash map. Every tie anywhere in the
+pipeline is broken by a stable key. The arithmetic stays integer
+throughout. A layout expressed in whole pixels has no float formatting
+left to disagree about, between two runs or between two platforms.
 
 ```rust name=module_doc path=layout/mod.rs
 //! Sugiyama layered layout.
 //!
-//! Four phases, in the order they must run: break cycles, assign ranks, order
-//! within each rank, assign coordinates. Every format gets coordinates from
-//! here, so there is exactly one layout engine and it is ours.
+//! Four phases, always in this order: break cycles, assign ranks, order
+//! within each rank, assign coordinates. Every format gets its coordinates
+//! from here. That leaves exactly one layout engine. It is ours.
 //!
-//! Determinism is a hard requirement rather than a nicety: it is what lets a
-//! rendered graph be committed and diffed. Nothing here iterates a hash map,
-//! every tie is broken by a stable key, and the arithmetic is integer -- a
-//! layout in whole pixels has no float formatting to disagree about.
+//! Determinism is a hard requirement, not a nicety. It lets a rendered
+//! graph be committed and diffed. Nothing here iterates a hash map. Every
+//! tie is broken by a stable key. The arithmetic stays integer throughout.
+//! A layout in whole pixels has no float formatting to disagree about.
 
 pub mod acyclic;
 pub mod coord;
@@ -41,21 +41,23 @@ pub const RANK_SEP: i32 = 64;
 pub const NODE_SEP: i32 = 28;
 pub const MARGIN: i32 = 24;
 
-/// Label width is estimated rather than measured: DanKG has no font metrics and
-/// is not going to grow any. The estimate only has to be stable and roughly
-/// proportional, because the renderers draw the same label into the same box.
+/// Label width is estimated, not measured. DanKG has no font metrics and
+/// isn't going to grow any. The estimate only has to be stable and roughly
+/// proportional, because every renderer renders the same label into the
+/// same box.
 ///
-/// Public because the HTML renderer's script is a renderer too: it places
-/// nodes the reader expands, and it has to size them the way this did or the
-/// expanded boxes would not line up with the ones Rust drew.
+/// Public because the HTML renderer's script is a renderer too. It places
+/// the nodes a reader expands. It also has to size them the way this did.
+/// Otherwise the expanded boxes would not line up with the ones Rust
+/// rendered.
 pub const CHAR_WIDTH: i32 = 8;
 pub const LABEL_PAD: i32 = 28;
 pub const MIN_WIDTH: i32 = 72;
 pub const MAX_WIDTH: i32 = 264;
 
-/// Containment pulls twice as hard as a link, so a heading ends up sitting
+/// Containment pulls twice as hard as a link. A heading ends up sitting
 /// directly above its children. The weight is used by the ordering and
-/// coordinate phases; ranking is plain longest-path and does not need it.
+/// coordinate phases. Ranking is plain longest-path and does not need it.
 const CONTAINS_WEIGHT: i32 = 2;
 const LINK_WEIGHT: i32 = 1;
 
@@ -84,8 +86,8 @@ pub struct LaidEdge {
     pub to: NodeId,
     pub kind: EdgeKind,
     pub reciprocated: bool,
-    /// True when the edge had to be reversed to break a cycle, so it runs up
-    /// the page. The arrowhead still points the way the author wrote it.
+    /// True when the edge had to be reversed to break a cycle. It then runs
+    /// up the page. The arrowhead still points the way the author wrote it.
     pub reversed: bool,
     /// Source to target, through any virtual bend points. Always ordered from
     /// `from` to `to`, whichever way the layout ran it.
@@ -105,19 +107,19 @@ pub struct Layout {
 ```
 
 `is_drawn` is how a reciprocated pair becomes one undirected line instead
-of two arrows pointing at each other: exactly one of the two directed
-edges is chosen, and it is always the one the layout actually ran *down*
-the page -- the same choice a renderer with its own layering (graphviz,
-Mermaid) would independently land on, since both are laying out the same
-graph by the same rule.
+of two arrows pointing at each other. Exactly one of the two directed
+edges is chosen. It is always the one the layout actually ran *down* the
+page. A renderer with its own layering, such as graphviz or Mermaid,
+would independently land on the same choice, because both lay out the
+same graph by the same rule.
 
 ```rust name=layout_impl path=layout/mod.rs
 impl Layout {
-    /// Whether a renderer should draw this edge.
+    /// Whether this edge should be rendered.
     ///
-    /// A reciprocated pair is one undirected line rather than two arrows, so
-    /// exactly one of the two is drawn. It is the one the layout ran down the
-    /// page: a renderer that does its own layering, as both graphviz and
+    /// A reciprocated pair is one undirected line rather than two arrows.
+    /// Exactly one of the two is rendered. It is the one the layout ran down
+    /// the page. A renderer that does its own layering, as both graphviz and
     /// mermaid do, then agrees with DanKG about which node sits above which.
     pub fn is_drawn(&self, edge: &LaidEdge) -> bool {
         if !edge.reciprocated || edge.from == edge.to {
@@ -146,26 +148,27 @@ impl Layout {
 }
 ```
 
-`Dag` is the working graph every phase mutates in place, deliberately a
-plain struct of parallel vectors rather than anything pointer-based --
-index-addressed, so nothing here can ever depend on a hash map's
-iteration order the way the module doc's determinism guarantee forbids.
-Real nodes occupy indices `0..real`; the ranking and rank-splitting phases
-append virtual bend points after them as they discover long edges that
-need one.
+`Dag` is the working graph every phase mutates in place. It is
+deliberately a plain struct of parallel vectors, not anything
+pointer-based. It is index-addressed. Nothing here can ever depend on a
+hash map's iteration order, the way the module doc's determinism
+guarantee forbids. Real nodes occupy indices `0..real`. The ranking and
+rank-splitting phases append virtual bend points after them, as they
+discover long edges that need one.
 
 ```rust name=dag_and_segment path=layout/mod.rs
 /// The working graph: real nodes `0..real`, virtual bend points after them.
 ///
 /// Phases mutate this in place. It is deliberately a plain struct of parallel
-/// vectors: index-addressed, so nothing depends on a hash map's order.
+/// vectors: index-addressed. Nothing depends on a hash map's order.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Dag {
     pub real: usize,
     pub rank: Vec<u32>,
     pub width: Vec<i32>,
-    /// A stable tie-break key per node. Real nodes use their `NodeId`; virtual
-    /// ones use the edge they belong to, so both are unique and reproducible.
+    /// A stable tie-break key per node. Real nodes use their `NodeId`.
+    /// Virtual ones use the edge they belong to. Both are unique and
+    /// reproducible.
     pub key: Vec<String>,
     /// Edges between adjacent ranks only, after splitting.
     pub segments: Vec<Segment>,
@@ -199,17 +202,17 @@ impl Dag {
 pub(crate) struct Route {
     pub role: Role,
     /// Node indices from the layout's source to its target, inclusive. A
-    /// self-loop holds its single node; nothing else is ever shorter than two.
+    /// self-loop holds its single node. Nothing else is ever shorter than two.
     pub path: Vec<usize>,
 }
 ```
 
-`layout` itself is short precisely because each phase already lives in
-its own module: this function's whole job is threading one `Dag` through
-all four in the order the module doc promises, nothing more. The caller
-always hands it an *induced* subgraph (`graph::view::select`), so every
-edge endpoint is guaranteed present and `position` below is a plain
-lookup rather than something that has to handle a miss.
+`layout` itself is short, precisely because each phase already lives in
+its own module. This function's whole job is threading one `Dag`
+through all four, in the order the module doc promises, nothing more.
+The caller always hands it an *induced* subgraph (`graph::view::select`).
+Every edge endpoint is guaranteed present. `position` below is a plain
+lookup, not something that has to handle a miss.
 
 ```rust name=layout_fn path=layout/mod.rs
 pub fn layout(graph: &Graph) -> Layout {
@@ -225,8 +228,8 @@ pub fn layout(graph: &Graph) -> Layout {
         ..Dag::default()
     };
 
-    // Edges as node indices. The caller hands us an induced subgraph, so every
-    // endpoint is present and this is a lookup rather than a filter.
+    // Edges as node indices. The caller hands us an induced subgraph.
+    // Every endpoint is present. This is a lookup, not a filter.
     let pairs: Vec<(usize, usize, i32)> = graph
         .edges
         .iter()
@@ -252,11 +255,11 @@ pub fn layout(graph: &Graph) -> Layout {
 }
 ```
 
-A self-loop has no rank to travel between at all, so `points_of` draws it
-as a small bulge out to the right and back rather than trying to force it
-through the normal bend-point machinery -- rare in practice, but
-`[x](#this-very-heading)` is legal markdown, and a graph that silently
-dropped it would again be drawing something other than what it was given.
+A self-loop has no rank to travel between at all. `points_of` renders
+it as a small bulge out to the right and back, instead of forcing it
+through the normal bend-point machinery. This is rare in practice, but
+`[x](#this-very-heading)` is legal markdown. A graph that silently
+dropped it would be rendering something other than what it was given.
 
 ```rust name=assemble_and_points_of path=layout/mod.rs
 fn assemble(graph: &Graph, dag: &Dag, routes: &[Route]) -> Layout {
@@ -306,7 +309,7 @@ fn assemble(graph: &Graph, dag: &Dag, routes: &[Route]) -> Layout {
 fn points_of(dag: &Dag, route: &Route, y_of: &impl Fn(u32) -> i32) -> Vec<Point> {
     let half = NODE_HEIGHT / 2;
 
-    // A self-loop has no rank to travel between, so it bulges out to the right
+    // A self-loop has no rank to travel between. It bulges out to the right
     // and comes back. Rare, but `[x](#this-very-heading)` is legal markdown.
     if route.path.len() == 1 {
         let n = route.path[0];
@@ -339,7 +342,7 @@ fn points_of(dag: &Dag, route: &Route, y_of: &impl Fn(u32) -> i32) -> Vec<Point>
         .collect();
 
     // The path runs the way the layout ran it. `from` is what the author
-    // wrote, so a reversed edge's points have to be turned back around.
+    // wrote. A reversed edge's points have to be turned back around.
     if route.role == Role::Reversed {
         points.reverse();
     }
@@ -352,10 +355,10 @@ fn position(graph: &Graph, id: &NodeId) -> usize {
 ```
 
 `fit_label` is deliberately the exact inverse of `label_width`'s own
-estimate, not a real text measurement -- a renderer that measured the
-label properly would disagree with the box the layout already committed
-to, and the box, not the text, is the thing every renderer has to agree
-on.
+estimate, not a real text measurement. A renderer that measured the
+label properly would disagree with the box the layout already
+committed to. The box, not the text, is the thing every renderer has
+to agree on.
 
 ```rust name=label_width_and_fit_label path=layout/mod.rs
 pub fn label_width(title: &str) -> i32 {
@@ -367,7 +370,7 @@ pub fn label_width(title: &str) -> i32 {
 ///
 /// The inverse of `label_width`, and deliberately built on the same estimate.
 /// A renderer that measured the text properly would disagree with the box it
-/// was given, and the box is the thing the layout already committed to.
+/// was given. The box is the thing the layout already committed to.
 pub fn fit_label(title: &str, width: i32) -> String {
     let capacity = ((width - LABEL_PAD) / CHAR_WIDTH).max(1) as usize;
     if title.chars().count() <= capacity {
@@ -449,8 +452,8 @@ mod tests {
 
     #[test]
     fn a_long_edge_bends_through_a_point_on_every_rank_it_crosses() {
-        // One contains Two contains Three, and One also links straight to
-        // Three, so that link spans two ranks and needs a bend point.
+        // One contains Two. Two contains Three. One also links straight to
+        // Three. That link spans two ranks and needs a bend point.
         let l = layout(&graph_of(&[(
             "a.md",
             "# One\n\nsee [three](#three)\n\n## Two\n\n### Three\n",
@@ -484,7 +487,7 @@ mod tests {
         assert_eq!(reversed.len(), 1, "one back edge breaks a three-cycle");
 
         // Whichever edge it was, its polyline still starts at the node the
-        // author wrote first -- leaving the top, because it runs up the page.
+        // author wrote first, leaving the top, because it runs up the page.
         let edge = reversed[0];
         let from = node(&l, &edge.from.to_string());
         assert_eq!(edge.points[0], Point { x: from.x, y: from.y - from.height / 2 });

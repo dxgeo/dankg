@@ -1,26 +1,26 @@
 # Graph ignore
 
-`.dankgignore` is a deliberately small subset of gitignore -- one pattern
-per line, `#` comments, `!` un-ignores, a leading `/` anchors to the root,
-a trailing `/` matches directories only, `*`/`?` stay within one path
-segment and `**` crosses them, later rules win. Small on purpose: the
-whole point of a knowledge-base root is that its contents are predictable,
-which a reader cannot judge by eye if the exclusion language itself grows
-edge cases. Dot-files and dot-directories need no pattern at all -- the
-corpus walk skips them structurally, which is what keeps `.dankg/` and
+`.dankgignore` is a deliberately small subset of gitignore. One pattern
+per line. `#` comments. `!` un-ignores. A leading `/` anchors to the root.
+A trailing `/` matches directories only. `*` and `?` stay within one path
+segment. `**` crosses them. Later rules win. Small on purpose. The whole
+point of a knowledge-base root is that its contents are predictable. A
+reader cannot judge that by eye if the exclusion language itself grows
+edge cases. Dot-files and dot-directories need no pattern at all. The
+corpus walk skips them structurally. That is what keeps `.dankg/` and
 `.git/` out without this file ever mentioning either.
 
 ```rust name=module_doc path=graph/ignore.rs
 //! `.dankgignore`: which files under the root are not part of the corpus.
 //!
 //! A deliberately small subset of gitignore, because the whole point of a root
-//! is that its contents are predictable. One pattern per line; `#` comments;
-//! `!` un-ignores; a leading `/` anchors to the root; a trailing `/` matches
-//! directories only; `*` and `?` stay within one path segment and `**` crosses
+//! is that its contents are predictable. One pattern per line. `#` comments.
+//! `!` un-ignores. A leading `/` anchors to the root. A trailing `/` matches
+//! directories only. `*` and `?` stay within one path segment. `**` crosses
 //! them. Later rules win, so an exception can follow the rule it excepts.
 //!
 //! Dot-files and dot-directories are skipped by the walk itself and need no
-//! pattern -- that is what keeps `.dankg/` and `.git/` out of the corpus.
+//! pattern. That is what keeps `.dankg/` and `.git/` out of the corpus.
 
 use crate::diag::Diags;
 use std::fs;
@@ -47,8 +47,8 @@ pub struct Ignore {
 }
 ```
 
-A missing file is not an error -- most corpora will never have one, and
-"nothing ignored" is exactly the right behavior for that case, not a
+A missing file is not an error. Most corpora will never have one.
+"Nothing ignored" is exactly the right behavior for that case, not a
 diagnostic. An unreadable file (permissions, not absence) does warn,
 since that is a surprise the reader should hear about.
 
@@ -145,7 +145,7 @@ fn rule_matches(rule: &Rule, rel: &str, path: &[char]) -> bool {
 ```
 
 ```rust name=matches path=graph/ignore.rs
-/// Glob matching. `*` and `?` stop at a separator; `**` does not.
+/// Glob matching. `*` and `?` stop at a separator. `**` does not.
 fn matches(pattern: &[char], text: &[char]) -> bool {
     if pattern.is_empty() {
         return text.is_empty();
@@ -153,8 +153,8 @@ fn matches(pattern: &[char], text: &[char]) -> bool {
     match pattern[0] {
         '*' if pattern.get(1) == Some(&'*') => {
             let rest = &pattern[2..];
-            // `**/x` has to match a bare `x` too, or it would only ever find
-            // things at least one directory deep.
+            // `**/x` has to match a bare `x` too. Otherwise it would only ever
+            // find things at least one directory deep.
             if rest.first() == Some(&'/') && matches(&rest[1..], text) {
                 return true;
             }

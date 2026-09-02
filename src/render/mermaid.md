@@ -1,25 +1,25 @@
 # Render mermaid
 
-Mermaid runs its own layout engine and refuses coordinates, so what this
-renderer hands it is only ordering and direction: nodes emitted rank by
-rank, left to right, in the same order `crate::layout` (not yet converted)
-already computed, and edges pointing the way DanKG's own cycle-breaking
-([`layout::acyclic`](../layout/acyclic.md)) decided -- so a hand-drawn
-Mermaid diagram and DanKG's own HTML/dot output always agree about which
-edge points where, even around a cycle one of them had to turn around
-internally.
+Mermaid runs its own layout engine. It refuses coordinates. So what this
+renderer hands it is only ordering and direction. Nodes are emitted rank
+by rank, left to right, in the same order `crate::layout` (not yet
+converted) already computed. Edges point the way DanKG's own
+cycle-breaking ([`layout::acyclic`](../layout/acyclic.md)) decided. So a
+rendered Mermaid diagram and DanKG's own HTML/dot output always agree
+about which edge points where, even around a cycle one of them had to
+turn around internally.
 
 ```rust name=module_doc path=render/mermaid.rs
 //! Mermaid flowchart output.
 //!
-//! Mermaid runs its own layout and will not take coordinates, so what it takes
-//! from DanKG is the ordering: nodes are emitted rank by rank, left to right,
-//! which is enough for its layered engine to land on the same shape. Edge
+//! Mermaid runs its own layout and will not take coordinates. So what it takes
+//! from DanKG is the ordering. Nodes are emitted rank by rank, left to right.
+//! That is enough for its layered engine to land on the same shape. Edge
 //! direction is DanKG's too, including which edge of a cycle was turned
-//! around, so the two drawings agree about what points where.
+//! around. So the two outputs agree about what points where.
 //!
 //! Identifiers are `n0`, `n1`, ... rather than node ids. Mermaid's identifier
-//! grammar does not admit `#` or `/`, and quoting them is not portable across
+//! grammar does not admit `#` or `/`. Quoting them is also not portable across
 //! its versions.
 
 use crate::graph::{EdgeKind, Graph, NodeId, NodeKind};
@@ -27,10 +27,10 @@ use crate::layout::Layout;
 use std::fmt::Write as _;
 ```
 
-A named code block reads as code, not prose, so it gets a distinct tint --
-the same distinction [`render::dot`](dot.md) draws with `fillcolor` and
-`tui/draw.rs` draws with a different border glyph, each renderer's own
-way of drawing the same underlying `NodeKind::Block` fact.
+A named code block reads as code, not prose. So it gets a distinct tint.
+[`render::dot`](dot.md) renders the same distinction with `fillcolor`.
+`tui/draw.rs` renders it with a different border glyph. Each renderer has
+its own way of rendering the same underlying `NodeKind::Block` fact.
 
 ```rust name=render path=render/mermaid.rs
 pub fn render(graph: &Graph, layout: &Layout) -> String {
@@ -43,8 +43,8 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
     }
     out.push_str("    classDef dangling stroke-dasharray:4 3,stroke:#a0a0a0,color:#a0a0a0\n");
     // A named code block reads as code, not prose: a tint distinct from an
-    // ordinary heading's default, the same distinction `dot.rs` draws with
-    // fillcolor and `tui/draw.rs` draws with a different border glyph.
+    // ordinary heading's default. `dot.rs` renders the same distinction with
+    // fillcolor. `tui/draw.rs` renders it with a different border glyph.
     out.push_str("    classDef block fill:#eef2ff,stroke:#3c3c3c\n");
 
     // Emitted in layout order, so the identifiers themselves read top to
@@ -80,7 +80,7 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
             continue;
         };
         let arrow = match (edge.kind, edge.reciprocated) {
-            // Containment is the document skeleton, so it is drawn heavier.
+            // Containment is the document skeleton. It renders heavier.
             (EdgeKind::Contains, _) => "==>",
             (EdgeKind::Link, true) => "---",
             (EdgeKind::Link, false) => "-->",
@@ -99,8 +99,8 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
 ```
 
 ```rust name=escape path=render/mermaid.rs
-/// Mermaid reads `#` as the start of an entity code, which is also the only
-/// way to escape anything, so every character it could misread becomes one.
+/// Mermaid reads `#` as the start of an entity code. That is also the only
+/// way to escape anything. So every character it could misread becomes one.
 fn escape(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     for c in title.chars() {

@@ -1,28 +1,30 @@
 # Render dot
 
-The layout is DanKG's own, not graphviz's: node positions come out as
-pinned `pos` attributes, so `neato -n -Tsvg` reproduces exactly what
+The layout is DanKG's own, not graphviz's. Node positions come out as
+pinned `pos` attributes. So `neato -n -Tsvg` reproduces exactly what
 `crate::layout` (not yet converted) computed. Plain `dot -Tsvg` ignores
-pinned positions and re-lays the graph out on its own, but the `rank=same`
-groups and containment edge weights this renderer also writes mean even
-that re-layout still agrees with DanKG about which node belongs on which
-layer. Edge geometry itself is deliberately never emitted: graphviz wants
-B-spline control points, DanKG only has polylines, and converting between
-the two to satisfy a flag most people will never pass is not worth risking
-an arithmetic bug over.
+pinned positions and re-lays the graph out on its own. But this renderer
+also writes `rank=same` groups and containment edge weights. Even that
+re-layout still agrees with DanKG about which node belongs on which
+layer.
+
+Edge geometry itself is deliberately never emitted. Graphviz wants
+B-spline control points. DanKG only has polylines. Converting between the
+two, just to satisfy a flag most people will never pass, is not worth
+risking an arithmetic bug.
 
 ```rust name=module_doc path=render/dot.rs
 //! Graphviz output.
 //!
 //! The layout is DanKG's, not graphviz's. Node positions are emitted as pinned
 //! `pos` attributes, so `neato -n -Tsvg` reproduces exactly what DanKG
-//! computed; plain `dot -Tsvg` ignores them and re-lays the graph out, but the
-//! `rank=same` groups and the containment weights mean it still agrees about
-//! which node belongs on which layer.
+//! computed. Plain `dot -Tsvg` ignores them and re-lays the graph out on its
+//! own. But the `rank=same` groups and the containment weights mean it still
+//! agrees about which node belongs on which layer.
 //!
 //! Edge geometry is deliberately not emitted. Graphviz wants B-spline control
-//! points, DanKG has polylines, and converting between them to satisfy a flag
-//! most people will not pass is not worth a bug in the arithmetic.
+//! points. DanKG has polylines. Converting between them, just to satisfy a
+//! flag most people will not pass, is not worth risking an arithmetic bug.
 
 use crate::graph::{EdgeKind, Graph, Node, NodeKind};
 use crate::layout::Layout;
@@ -32,11 +34,11 @@ use std::fmt::Write as _;
 const PER_INCH: f64 = 72.0;
 ```
 
-A named code block gets its own tint and monospace font, the same
-distinction [`render::mermaid`](mermaid.md) draws with a `classDef` and
-`tui/draw.rs` draws with a border glyph; an unresolved node is drawn
-dashed and muted, since a dangling link is signal worth noticing, not
-something to hide behind a normal-looking box.
+A named code block gets its own tint and monospace font.
+[`render::mermaid`](mermaid.md) renders the same distinction with a
+`classDef`. `tui/draw.rs` renders it with a border glyph. An unresolved
+node renders dashed and muted, since a dangling link is signal worth
+noticing, not something to hide behind a normal-looking box.
 
 ```rust name=render path=render/dot.rs
 pub fn render(graph: &Graph, layout: &Layout) -> String {
@@ -117,7 +119,7 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
             attrs.push("dir=none".to_string());
         }
         if edge.kind == EdgeKind::Contains {
-            // Matches the layout's own weighting: containment is the skeleton.
+            // This matches the layout's own weighting. Containment is the skeleton.
             attrs.push("weight=2".to_string());
             attrs.push("color=\"#c0c0c0\"".to_string());
         }
@@ -141,7 +143,7 @@ fn location(node: &Node) -> String {
 ```
 
 ```rust name=quote path=render/dot.rs
-/// Always quoted. Node ids carry `#` and `/`, and a heading can carry anything.
+/// Always quoted. Node ids carry `#` and `/`. A heading can carry anything.
 fn quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');

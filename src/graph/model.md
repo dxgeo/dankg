@@ -1,20 +1,20 @@
 # Graph model
 
 The graph itself: `Node`, `Edge`, `NodeId`, and the two kinds each of the
-first two come in. Edges are stored directed; `reciprocated` is computed
-only once the whole corpus is known -- when `a -> b` and `b -> a` both
-exist, both get marked, and every renderer draws one undirected edge
+first two come in. Edges are stored directed. `reciprocated` is computed
+only once the whole corpus is known. When `a -> b` and `b -> a` both
+exist, both get marked. Every renderer renders one undirected edge
 instead of two separate arrows. That single boolean is the entire
-mechanism behind "the link goes both ways, but displays as unidirectional
+mechanism behind "the link goes both ways, but renders as unidirectional
 unless it is linked back."
 
 ```rust name=module_doc path=graph/model.rs
 //! The graph itself.
 //!
 //! Edges are stored directed. `reciprocated` is computed once the whole corpus
-//! is known: when `a -> b` and `b -> a` both exist, both are marked, and the
-//! renderer draws one undirected edge instead of two arrows. That is the
-//! mechanism behind "the link goes both ways, but displays as unidirectional
+//! is known. When `a -> b` and `b -> a` both exist, both are marked. The
+//! renderer renders one undirected edge instead of two arrows. That is the
+//! mechanism behind "the link goes both ways, but renders as unidirectional
 //! unless it is linked back".
 
 use std::fmt;
@@ -56,11 +56,12 @@ impl EdgeKind {
     }
 }
 
-/// What a node stands for. A heading is a section of prose; a block is a
+/// What a node stands for. A heading is a section of prose. A block is a
 /// named, top-level, evaluable code block (decision 19's exact scope --
 /// the same one `eval::plan` and `dankg eval --list` use, so "this is a
-/// node you can navigate to" and "this is a node `dankg eval` can run"
-/// never disagree). A block is always a leaf: nothing nests inside one.
+/// node you can navigate to" and "this is a node `dankg eval` can
+/// evaluate" never disagree). A block is always a leaf. Nothing nests
+/// inside one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Heading,
@@ -111,7 +112,7 @@ pub struct Node {
     /// Absolute URLs referenced from this node. Recorded, never graphed.
     pub external: Vec<String>,
     /// False for placeholder nodes invented to receive a dangling link.
-    /// Always true for a block node -- nothing ever links to one by name
+    /// Always true for a block node. Nothing ever links to one by name
     /// today, so there is nothing for it to be unresolved against.
     pub resolved: bool,
     pub kind: NodeKind,
@@ -135,11 +136,11 @@ pub struct Graph {
 }
 ```
 
-Containment is explicitly excluded from `reciprocate`: a parent containing
-a child is not the child linking back, and treating it as mutual would
+Containment is explicitly excluded from `reciprocate`. A parent containing
+a child is not the child linking back. Treating it as mutual would
 erase direction from the document's own skeleton. `sort` exists for the
-same reason `dankg fmt`'s output is meant to be committed and diffed --
-identical input has to produce identical output, every time.
+same reason `dankg fmt`'s output is meant to be committed and diffed.
+Identical input has to produce identical output, every time.
 
 ```rust name=graph_impl path=graph/model.rs
 impl Graph {
@@ -153,8 +154,8 @@ impl Graph {
 
     /// Mark every pair of link edges that point at each other.
     ///
-    /// Containment is excluded: a parent containing a child is not the child
-    /// linking back, and treating it as mutual would erase direction from the
+    /// Containment is excluded. A parent containing a child is not the child
+    /// linking back. Treating it as mutual would erase direction from the
     /// document skeleton.
     pub fn reciprocate(&mut self) {
         let links: Vec<(NodeId, NodeId)> = self
