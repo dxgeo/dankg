@@ -801,7 +801,7 @@ callers (the status line, help's own lines) clip themselves before handing
 ### A byte lost after a standalone Esc
 
 Binding `esc` to something real surfaced a latent bug in `input.rs` that
-nothing had ever exercised. [`decode`] tells a lone Esc apart from
+nothing had ever exercised. \[`decode`\] tells a lone Esc apart from
 `ESC [ <letter>` by reading one more byte. When that byte is not `[`, it
 correctly reports using only 1 of the 2 bytes it looked at. But
 `read_key`'s loop discarded its whole buffer between calls. So that second,
@@ -1101,15 +1101,13 @@ print(count())
 the *template* string its language resolved to (`[lang.*] command`,
 e.g. `uv run python {file}`). It never covers the fully-substituted
 argv, which would embed eval's own ephemeral temp file path and make
-every result look stale the instant it was checked. Editing `[lang.*]
-command` is exactly the kind of change that should mark a result
+every result look stale the instant it was checked. Editing `[lang.*] command` is exactly the kind of change that should mark a result
 stale. A different temp path on every run is not a change at all. The
 hash itself is the fixed-width 16 hex digit form `hash::hex` uses
 everywhere else in the codebase (the cache stamp included), not the
 shortened form the pipeline sketch above once implied.
 
-On any mismatch the result is stale: it still renders, but `dankg
-check` reports it. A failed run's marker carries a trailing `failed`
+On any mismatch the result is stale: it still renders, but `dankg check` reports it. A failed run's marker carries a trailing `failed`
 word (`<!-- dankg:result name=index hash=... failed -->`), rather than
 a separate attribute. The output is still whatever stdout produced,
 staleness is still just the hash, and `failed` only changes what a
@@ -1195,7 +1193,7 @@ never has to be: a crate is built once, not once per source file. A
 single named file still skips the whole-root walk `index::load` would
 otherwise do, and the graph build that comes with it, for the same
 reason `eval`'s own single-file path already avoids both (decision
-19). Nothing here needs to know about any file but the one named.
+19\). Nothing here needs to know about any file but the one named.
 
 ## Placement
 
@@ -1430,8 +1428,7 @@ other side of the same principle: the file is the source of truth, so
 nothing generated from it gets to also claim that title). The build
 directory is excluded from the corpus walk the same structural way
 `.dankg/` and `.git/` already are, not via `.dankgignore`, so a
-tangled tree sitting under the root never becomes something `dankg
-graph` tries to read as notes. Every generated file opens with a
+tangled tree sitting under the root never becomes something `dankg graph` tries to read as notes. Every generated file opens with a
 banner comment naming the heading and source file it came from and
 saying it is generated. `fmt`'s "nothing unverified reaches the disk"
 guard has no equivalent here, since the generated tree is not the
@@ -1455,9 +1452,8 @@ whichever spawned step comes next can still fail.
 ## Pilots 3 and 4: visibility, and eval/tangle composed over one corpus
 
 Pilots 1 (`literate/hash.md`) and 2 (`literate/layout-pilot/`) each
-proved tangle's own assemble-and-build loop. Neither touched `dankg
-eval` at all, and neither ever set `dankg.tangle.public` (decision
-28): pilot 2's five sibling modules only ever reach each other through
+proved tangle's own assemble-and-build loop. Neither touched `dankg eval` at all, and neither ever set `dankg.tangle.public` (decision
+28\): pilot 2's five sibling modules only ever reach each other through
 `super::`, which a *private* `mod x;` already permits between siblings
 under one parent. Two more pilots close both gaps.
 
@@ -1469,12 +1465,10 @@ heading, and the crate root's `lib.rs` (not a descendant of
 because the flag made `glue/rust.py` write `pub mod greeting;` rather
 than `mod greeting;` into the `mod.rs` it generated for `exposed/`,
 confirmed by inspecting both the manifest
-(`.dankg-tangle-manifest.json`'s `exposed/greeting.rs` entry: `public:
-true`) and the generated `mod.rs` directly. The negative control (done
+(`.dankg-tangle-manifest.json`'s `exposed/greeting.rs` entry: `public: true`) and the generated `mod.rs` directly. The negative control (done
 by hand, not committed broken, the same reason pilot 2's own
 `glue`-disabled check is prose) sets the frontmatter to `false` and
-re-tangles. `cargo test` then fails with `error[E0603]: module
-`greeting` is private`, pointing at `lib.rs`'s own `use` line, proof
+re-tangles. `cargo test` then fails with `error[E0603]: module `greeting` is private`, pointing at `lib.rs`'s own `use` line, proof
 the flag is load-bearing rather than cosmetic.
 
 `literate/composition-pilot/` asks a question neither earlier pilot
@@ -1485,8 +1479,7 @@ dependency and its target under one heading, so tangle's placement
 (containment only, decision 24) and eval's own concatenation
 (`deps`-ordered, decision 11) agree by construction. There is no
 cross-file boundary for the two mechanisms to disagree about, and
-`dankg eval same-file.md --block quadruple` and `dankg tangle
-same-file.md --lang rust` followed by `rustc --test` on the one file
+`dankg eval same-file.md --block quadruple` and `dankg tangle same-file.md --lang rust` followed by `rustc --test` on the one file
 it produces both pass, unmodified, on the identical block source.
 `producer.md`/`consumer.md` puts the dependency in a different file,
 and `dankg eval consumer.md --block use_greeting` still passes.
@@ -1494,10 +1487,8 @@ Decision 29's cross-file `deps=` had unit coverage (`src/eval/plan.rs`,
 `src/eval/files.rs`), but never a pilot spawning the real binary until
 this one. Tangling the same two files apart (`producer/greeting.rs`,
 `consumer/use_greeting.rs`) and compiling `consumer/use_greeting.rs`
-alone fails with `error[E0425]: cannot find function `make_greeting`
-in this scope`: its `use super::*` reaches `consumer`'s own module,
-not `producer`'s, and nothing here writes the `use
-crate::producer::greeting::make_greeting;` that would fix it, because
+alone fails with `error[E0425]: cannot find function `make_greeting` in this scope`: its `use super::*` reaches `consumer`'s own module,
+not `producer`'s, and nothing here writes the `use crate::producer::greeting::make_greeting;` that would fix it, because
 writing it would just as surely break the identical block's use as a
 flat, concatenation-eval'd script, which has no `crate::producer` to
 resolve at all. This is the finding, not a bug in either mechanism: a
@@ -1609,8 +1600,7 @@ Every pilot above proved the mechanics on a throwaway crate under
 generated from it by `dankg tangle` and then committed alongside it,
 rather than left generated-and-ignored the way `**/.dankg/build/` is
 everywhere else. Diverging from that default is deliberate here, since
-the crate this repo ships has to keep building with a plain `cargo
-build` for anyone who does not already have a working `dankg` binary,
+the crate this repo ships has to keep building with a plain `cargo build` for anyone who does not already have a working `dankg` binary,
 which no pilot ever had to consider. Committing the generated file
 only stays honest if drift between it and its source gets caught:
 `tests/literate.rs`'s `hash_rs_matches_its_literate_source` re-tangles
@@ -1742,6 +1732,31 @@ file.
   count belongs in the hash, so that new data marks the result stale,
   is undecided, and the answer differs for a snapshot than for a
   running pipeline.
+- A `Reads` edge is inferred from a SQL block's own query text. A
+  block written in a different language can consume a relation
+  without naming it in any parseable SQL. It then has no way to
+  declare that dependency. One option: extend `deps=` with an
+  explicit target, `deps=table:orders`, resolved to whichever block's
+  snapshot last produced that relation, not to a block by name.
+- Do `Produces`/`Reads` edges feed `dankg check`'s staleness hash, or
+  only `dankg graph`'s picture of lineage? An edge that never
+  invalidates anything downstream still explains where a table came
+  from. It does not solve staleness across it. If it should
+  invalidate, a downstream block would need to fold in the hash of
+  the relation's own content, not the producing block's concatenated
+  source. Concatenation cannot cross the language boundary that made
+  this milestone necessary in the first place.
+- This milestone only covers a database's own relations. `deps=`
+  itself refuses any dependency chain that crosses a language
+  boundary at all ([`src/eval/plan.md`](src/eval/plan.md)). Nothing
+  here changes that for a plain file or a pipe.
+  [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md#caveats-and-next-steps)
+  found that
+  gap directly: a shell stage handing a file to a Python stage has no
+  dankg-tracked dependency edge today, database or not. Whether the
+  artifact idea here, a hashable thing with one producer a block can
+  depend on, is worth generalizing past relations is a question for
+  after this milestone ships.
 
 # Config
 
@@ -1967,8 +1982,7 @@ breaks a line is authorial. Soft breaks are preserved exactly.
 
 # Cache
 
-`.dankg/cache/` holds one entry per source file, keyed on `(mtime,
-len)` and verified by an FNV-1a content hash. The pair is the cheap
+`.dankg/cache/` holds one entry per source file, keyed on `(mtime, len)` and verified by an FNV-1a content hash. The pair is the cheap
 rejection. The hash closes the window where a file is rewritten inside
 one filesystem timestamp tick. The config hash is stamped into every
 entry, so changing `.dankg/config` invalidates all of them at once.

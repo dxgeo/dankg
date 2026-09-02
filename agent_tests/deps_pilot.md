@@ -236,3 +236,9 @@ languages, the pipeline happens to be written in underneath a single
   again; the mixed-tool pipeline here is the closest honest proxy
   available, and its result should be read as one more single-language
   data point, not as a test of a real language boundary.
+- This finding fed directly into
+  [architecture.md's open questions for the literate-database
+  milestone](../architecture.md#open-questions-for-this-milestone): a
+  relation's `Produces`/`Reads` edges are one scoped way to get a real
+  cross-language dependency, without touching `deps=`'s own
+  same-language rule at all.
