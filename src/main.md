@@ -15,8 +15,9 @@ use dankg::depends;
 use dankg::diag::{Diags, Level};
 use dankg::eval::files as eval_files;
 use dankg::eval::{plan, result, run as eval_run, session};
+use dankg::graph::build;
 use dankg::graph::index::{self, Corpus};
-use dankg::graph::{resolve, view, EdgeKind, Graph};
+use dankg::graph::{resolve, view, EdgeKind, Graph, NodeId};
 use dankg::layout;
 use dankg::md::{fmt, Document};
 use dankg::render::{dot, html, json, mermaid};
@@ -196,6 +197,23 @@ climbs above the root, or that names no dependency whose own
 a far stronger signal than a prose substring match (architecture.md,
 *File dependencies*).
 
+A fifth loop calls `build::title_collisions` once per file, over
+`corpus.files`, already loaded. Like the third loop, it never gates the
+returned `bool`. The file resolves exactly as written today. A
+collision only reports a structural risk, not a broken file. This is
+the same "weak signal, never a build gate" reasoning a `dankg:depends`
+marker already gets (see `title_collisions`'s own doc comment,
+`graph/build.md`).
+
+Not every collision carries the same risk, though. Nothing breaks until
+some written link or `dankg:depends` marker actually targets one of the
+pair's two slugs. This loop checks for exactly that: `index_graph`'s own
+link edges (`Graph::incoming_link_count`) and `depends_targets` (the
+third loop's own resolved marker targets, collected there for this
+reason). A collision with a reference is flagged as a live risk. One
+with none is flagged as cosmetic. It is safe to leave for whenever the
+author gets to it.
+
 ```rust name=check_cmd path=main.rs
 /// `dankg check [<path>...]`: the CI gate. Unresolved links come from the
 /// same whole-root index `graph`/`index` build. Staleness is checked
@@ -218,6 +236,15 @@ a far stronger signal than a prose substring match (architecture.md,
 /// marker's substring match, a `produces=`/`reads=file:PATH` mismatch is
 /// two declared strings failing to agree, a signal strong enough to fail
 /// a build on.
+///
+/// A fifth pass, `build::title_collisions` per file over `corpus.files`,
+/// never gates the returned `bool` either: a node whose title collides
+/// with an earlier one's in the same file still resolves correctly today,
+/// so this is reported the same advisory way a `dankg:depends` marker is.
+/// Each collision is also cross-referenced against `index_graph`'s link
+/// edges and the `depends_targets` the third pass already collected, so
+/// the report distinguishes a live risk (something already points at one
+/// of the two slugs) from a cosmetic one (nothing does).
 fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
@@ -279,8 +306,13 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
 
     // Advisory only (see this function's own doc comment): `prose_stale`
     // is reported below but never folded into the returned `bool`.
+    // `depends_targets` is a second, separate use of the same resolution:
+    // the fifth loop, below, wants to know whether a `dankg:depends`
+    // marker anywhere in the corpus already targets a node a title
+    // collision is about to flag.
     let mut prose_checked = 0usize;
     let mut prose_stale = 0usize;
+    let mut depends_targets: Vec<NodeId> = Vec::new();
     for rel_path in &corpus.paths {
         let Some((_, doc)) = files.get(rel_path) else { continue };
         for marker in depends::markers_in(doc) {
@@ -295,6 +327,7 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
                 eprintln!("stale-prose: {rel_path}:{} depends on `{}` -- target not found", marker.line, marker.target);
                 continue;
             };
+            depends_targets.push(target_id);
             let Some((target_source, _)) = files.get(&target_node.file) else { continue };
             let section = depends::section_text(target_source, target_node.line, target_node.end_line);
             if depends::verify(&marker, &section) == depends::Verdict::Stale {
@@ -323,6 +356,47 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
         }
     }
 
+    // Advisory only, the same reasoning as the prose-dependency loop
+    // above: a node whose title collides with an earlier one's in the
+    // same file still resolves correctly today (`Slugger::assign` already
+    // gave it a distinct, ordinal-suffixed slug). What this reports is
+    // that the suffix is order-dependent -- renaming, reordering, or
+    // deleting the earlier same-titled node silently repoints anything
+    // already pinned to the later one's. Whether that risk is live or
+    // cosmetic depends on whether anything currently references either
+    // slug in the pair: `index_graph`'s own link edges (already built
+    // above) and `depends_targets` (already collected in the prose loop)
+    // are both checked, so this needs nothing new to load.
+    let mut title_dupes = 0usize;
+    let mut title_dupes_referenced = 0usize;
+    for file in &corpus.files {
+        for collision in build::title_collisions(&file.nodes) {
+            title_dupes += 1;
+            let refs = index_graph.incoming_link_count(&collision.node.id)
+                + index_graph.incoming_link_count(&collision.first.id)
+                + depends_targets
+                    .iter()
+                    .filter(|t| **t == collision.node.id || **t == collision.first.id)
+                    .count();
+            let note = if refs > 0 {
+                title_dupes_referenced += 1;
+                format!("{refs} incoming reference(s); a rename, reorder, or delete here can silently repoint them")
+            } else {
+                "no incoming references; cosmetic".to_string()
+            };
+            eprintln!(
+                "dup-title: {}:{} `{}` shares its title with {}:{} -- resolved as #{} instead of #{} ({note})",
+                collision.node.file,
+                collision.node.line,
+                collision.node.title,
+                collision.first.file,
+                collision.first.line,
+                collision.node.id.slug,
+                collision.first.id.slug,
+            );
+        }
+    }
+
     diags.sort();
     diags.emit();
     eprintln!("root: {}", corpus.display);
@@ -332,6 +406,7 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     eprintln!("{stale} stale of {checked} eval result(s)");
     eprintln!("{prose_stale} of {prose_checked} prose dependency marker(s) advisory-stale");
     eprintln!("{} stale of {filedep_checked} file dependency declaration(s)", filedep_issues.len());
+    eprintln!("{title_dupes} duplicate-title node(s), advisory ({title_dupes_referenced} referenced)");
     Ok(unresolved == 0 && stale == 0 && filedep_issues.is_empty())
 }
 ```

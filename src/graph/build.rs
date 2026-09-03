@@ -7,7 +7,7 @@
 //! [`super::resolve`] turns them into edges once the whole corpus is known.
 
 use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
-use super::slug::Slugger;
+use super::slug::{slugify, Slugger};
 use crate::md::{Block, Document, Inline};
 
 /// Every real heading level is 1..=6 (0 is reserved for the synthetic
@@ -251,6 +251,42 @@ fn set_extents(nodes: &mut [Node], line_count: u32) {
     }
 }
 
+/// One heading whose title collides with an earlier heading's in the
+/// same file -- the *n*-th heading to slugify to the same base slug,
+/// which is exactly the condition under which `Slugger::assign`
+/// (`graph/slug.rs`) already had to append an ordinal rather than hand
+/// back the title's own. Block nodes are deliberately excluded (see this
+/// function's own doc comment above): a block sharing its containing
+/// heading's title is this corpus' own idiom, not a reorder risk.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TitleCollision<'a> {
+    pub node: &'a Node,
+    pub first: &'a Node,
+}
+
+/// Every collision among `nodes`' headings (one file's worth, in document
+/// order); block nodes are skipped entirely. Grouping by `slugify(title)`
+/// alone is enough: it is exactly the check `Slugger::assign` itself makes
+/// before deciding whether to suffix, so this never has to re-derive which
+/// ordinal a heading actually landed on.
+pub fn title_collisions(nodes: &[Node]) -> Vec<TitleCollision<'_>> {
+    let mut seen: std::collections::HashMap<String, &Node> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for node in nodes {
+        if node.kind != NodeKind::Heading {
+            continue;
+        }
+        let base = slugify(&node.title);
+        match seen.get(&base) {
+            Some(&first) => out.push(TitleCollision { node, first }),
+            None => {
+                seen.insert(base, node);
+            }
+        }
+    }
+    out
+}
+
 /// Every block in document order, paired with whether it sits at the top
 /// level (`doc.blocks` itself) rather than inside a list item. Code
 /// blocks only become nodes at the top level (decision 19's scope, see
@@ -463,6 +499,39 @@ mod tests {
         let f = build_src("a.md", "# Notes\n\n# Notes\n");
         assert_eq!(f.nodes[0].id.slug, "notes");
         assert_eq!(f.nodes[1].id.slug, "notes-1");
+    }
+
+    #[test]
+    fn duplicate_headings_are_reported_as_title_collisions() {
+        let f = build_src("a.md", "# Notes\n\n# Notes\n");
+        let collisions = title_collisions(&f.nodes);
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0].node.id.slug, "notes-1");
+        assert_eq!(collisions[0].first.id.slug, "notes");
+    }
+
+    #[test]
+    fn distinct_titles_report_no_collisions() {
+        let f = build_src("a.md", "# One\n\n## Two\n");
+        assert!(title_collisions(&f.nodes).is_empty());
+    }
+
+    #[test]
+    fn a_third_repeat_still_reports_against_the_first_not_the_second() {
+        let f = build_src("a.md", "# Notes\n\n# Notes\n\n# Notes\n");
+        let collisions = title_collisions(&f.nodes);
+        assert_eq!(collisions.len(), 2);
+        assert!(collisions.iter().all(|c| c.first.id.slug == "notes"));
+    }
+
+    #[test]
+    fn a_block_sharing_its_own_headings_title_is_not_reported() {
+        // This corpus' own idiom (every module's `## Tests` heading wraps a
+        // `name=tests` block). The pair can never actually reorder -- a
+        // block cannot precede the heading that contains it -- so it is
+        // deliberately excluded, unlike two independent headings.
+        let f = build_src("a.md", "# Setup\n\n```sh name=Setup\n:\n```\n");
+        assert!(title_collisions(&f.nodes).is_empty());
     }
 
     #[test]

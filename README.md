@@ -13,6 +13,8 @@ blocks into a real, buildable source tree.
   `dankg eval` is the only command that runs code. It prints the plan and
   asks for confirmation before running anything.
 
+<!-- dankg:depends target=architecture.md#decision-9-eval-trigger quote="never automatic." -->
+
 See `architecture.md` for the full design record: numbered decisions,
 data model, module layout. See `project.md` for the what and why. Both
 files are themselves a dankg corpus. `dankg graph architecture.md`
@@ -197,6 +199,8 @@ source, dependencies, or configured command, including a dependency in
 another file. `check` is deliberately separate from `graph`. This way, a
 half-written note never fails a build.
 
+<!-- dankg:depends target=architecture.md#cli quote="It is deliberately separate from `graph` so that drafting a half-written note never fails." -->
+
 `check` also reports every `<!-- dankg:depends target=other.md#heading quote="..." -->` marker whose quoted claim can no longer be found,
 whitespace differences aside, in the section it names. This is advisory
 only. It never affects the exit code, because a substring match is a
@@ -213,6 +217,18 @@ fails if the two paths do not agree. Unlike `dankg:depends`, this one
 stronger signal than a prose substring match (see architecture.md,
 *File dependencies*).
 
+`check` also reports a heading whose title collides with an earlier
+heading's in the same file. This is advisory too, like `dankg:depends`.
+The file still resolves correctly. But the colliding heading's slug is
+order-dependent. A later rename or reorder can silently repoint it.
+`check` tells you whether that risk is real. A collision with a
+written link or `dankg:depends` marker already pointing at one of its
+two slugs prints as referenced. One with neither prints as cosmetic
+(see architecture.md, *Title collisions*).
+
+<!-- dankg:depends target=architecture.md#title-collisions quote="That slug is order-dependent, though." -->
+<!-- dankg:depends target=architecture.md#title-collisions quote="A collision with a reference prints as a live risk." -->
+
 ### `fmt` — normalize markdown
 
 ```sh
@@ -223,6 +239,8 @@ dankg fmt --check notes/*.md   # report which files would change; write nothing
 `fmt` refuses to write any file whose formatted form doesn't re-parse to
 the same document. This way, a formatter bug can't quietly corrupt a
 note.
+
+<!-- dankg:depends target=architecture.md#decision-15-format-safety quote="Re-parse and compare before writing." -->
 
 ### `tangle` — assemble a literate program into a source tree
 
@@ -235,6 +253,8 @@ by its containing top-level heading (one heading, one file). It
 assembles the groups into `build/` (default `.dankg/build/<lang>/`).
 Then it runs any configured `[tangle.<lang>] glue` and `command` against
 the result.
+
+<!-- dankg:depends target=architecture.md#decision-24-tangle-placement quote="Heading containment + document order; `deps` not consulted." -->
 
 ## Configuration
 
@@ -268,6 +288,8 @@ down = j
 tree's `{dir}` for tangle). A `[lang.*]` or `[tangle.*]` section is also
 the allowlist. DanKG only reports a block in an unconfigured language. It
 never runs that block.
+
+<!-- dankg:depends target=architecture.md#config quote="a fenced block in a language with no configured command is never executed, only reported." -->
 
 ## Development
 

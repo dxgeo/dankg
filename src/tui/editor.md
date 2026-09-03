@@ -1,8 +1,7 @@
 # TUI editor
 
 This is the one place `dankg tui` shells out to something the reader
-chose, rather than something this crate rendered itself. `[editor]
-command` (decision 17) goes through [`crate::cmd`](../cmd.md) exactly
+chose, rather than something this crate rendered itself. `[editor] command` (decision 17) goes through [`crate::cmd`](../cmd.md) exactly
 like any other configured template. What is specific to this module is
 the fallback chain when nothing is configured, and the fact that it
 never touches raw-mode terminal state on its own. Suspending and

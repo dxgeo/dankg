@@ -133,6 +133,13 @@ impl Graph {
         self.nodes.iter().any(|n| &n.id == id)
     }
 
+    /// Every written `Link` edge pointing at `id`. A collision-risk report
+    /// wants to know how many references exist, not just whether one does,
+    /// so this counts rather than stopping at the first match.
+    pub fn incoming_link_count(&self, id: &NodeId) -> usize {
+        self.edges.iter().filter(|e| e.kind == EdgeKind::Link && &e.to == id).count()
+    }
+
     /// Mark every pair of link edges that point at each other.
     ///
     /// Containment is excluded. A parent containing a child is not the child
@@ -230,6 +237,31 @@ mod tests {
         };
         g.reciprocate();
         assert!(!g.edges[0].reciprocated);
+    }
+
+    #[test]
+    fn incoming_link_count_counts_every_distinct_link() {
+        let g = Graph {
+            nodes: vec![node("a", "x"), node("b", "y"), node("c", "z")],
+            edges: vec![link(("b", "y"), ("a", "x")), link(("c", "z"), ("a", "x"))],
+        };
+        assert_eq!(g.incoming_link_count(&NodeId::new("a", "x")), 2);
+        assert_eq!(g.incoming_link_count(&NodeId::new("b", "y")), 0);
+    }
+
+    #[test]
+    fn incoming_link_count_ignores_containment_edges() {
+        let g = Graph {
+            nodes: vec![node("a", "x"), node("a", "y")],
+            edges: vec![Edge {
+                from: NodeId::new("a", "x"),
+                to: NodeId::new("a", "y"),
+                kind: EdgeKind::Contains,
+                line: 0,
+                reciprocated: false,
+            }],
+        };
+        assert_eq!(g.incoming_link_count(&NodeId::new("a", "y")), 0);
     }
 
     #[test]
