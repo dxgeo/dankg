@@ -165,6 +165,12 @@ fn format_files(paths: &[String], check: bool) -> Result<bool, String> {
 /// reported the same way but never gates the returned `bool`. A
 /// substring match is advisory by design (`depends.md`), so it is
 /// counted and printed, not failed on.
+///
+/// A fourth pass, `plan::check_file_deps` over the same `all_blocks`,
+/// *does* gate the returned `bool` (decision 33): unlike a prose
+/// marker's substring match, a `produces=`/`reads=file:PATH` mismatch is
+/// two declared strings failing to agree, a signal strong enough to fail
+/// a build on.
 fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
@@ -254,6 +260,22 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
         }
     }
 
+    // Unlike the prose loop above, a mismatch here does gate the returned
+    // `bool` (decision 33, architecture.md's *File dependencies*): two
+    // declared strings failing to agree is a far stronger signal than a
+    // substring search over prose.
+    let (filedep_checked, filedep_issues) = plan::check_file_deps(&all_blocks);
+    for issue in &filedep_issues {
+        match issue {
+            plan::FileDepIssue::ReadsEscapesRoot { file, line, block, path } => {
+                eprintln!("stale-filedep: {file}:{line} `{block}` reads=file:{path} -- escapes the root");
+            }
+            plan::FileDepIssue::NoMatchingProducer { file, line, block, path } => {
+                eprintln!("stale-filedep: {file}:{line} `{block}` reads=file:{path} -- no dependency produces it");
+            }
+        }
+    }
+
     diags.sort();
     diags.emit();
     eprintln!("root: {}", corpus.display);
@@ -262,7 +284,8 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     }
     eprintln!("{stale} stale of {checked} eval result(s)");
     eprintln!("{prose_stale} of {prose_checked} prose dependency marker(s) advisory-stale");
-    Ok(unresolved == 0 && stale == 0)
+    eprintln!("{} stale of {filedep_checked} file dependency declaration(s)", filedep_issues.len());
+    Ok(unresolved == 0 && stale == 0 && filedep_issues.is_empty())
 }
 
 fn graph(

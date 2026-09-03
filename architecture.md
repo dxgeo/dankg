@@ -202,6 +202,12 @@ Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same
 
 **Rationale:** A section of prose has no execution to re-derive and compare, the way a code block's output does. Hashing a whole section would flag a typo fix as loudly as a meaning change. A substring match on the specific claim a marker pins is a narrower, weaker, but far less noisy signal, and a weak signal that gates a build trains a reader to silence it rather than read it.
 
+## Decision 33: File artifact dependency
+
+`produces=file:PATH` on a writer block and `reads=file:PATH` on a reader, each paired with an ordinary `deps=`/`xdeps=name` edge naming the other block directly. `dankg check` adds one comparison on top of that edge's own verified hash: the reader's `reads=` path must equal its named dependency's `produces=` path, textually.
+
+**Rationale:** `xdeps=name` (decision 31) already verifies a cross-language producer's source hash, but says nothing about which file that block actually writes. Two blocks can each rename their own path independently and drift apart while the named edge still reports fresh. `produces=`/`reads=` catch exactly that drift, and need no database, no execution, and no resolution logic beyond the edge that already exists.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -216,6 +222,9 @@ Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same
 - prose dependency :: A `dankg:depends` marker (decision 32): a quoted
   claim pinned against another section, checked by substring, never a
   graph edge.
+- file dependency :: A `produces=`/`reads=file:PATH` pair (decision
+  33\): a declared artifact path, checked for agreement against an
+  existing `deps=`/`xdeps=name` edge, never resolved on its own.
 
 # Data model
 
@@ -1757,6 +1766,63 @@ reason pilot 1 needed none either. That arrives once a second module
   `dankg.tangle.*` key, versus staying a `glue` script's own problem to
   solve by reading the block source it is free to read, is open.
 
+# File dependencies
+
+Decision 33. `xdeps=name` (decision 31) already lets a shell block
+depend on a Python block, or the reverse, without concatenating them:
+exactly the gap [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md)
+found in a raw pipeline with no `dankg`-tracked edge at all. That
+closes the plain-file half of what used to be an open question under
+*Literate database management*, below: a file handoff had no
+dependency-tracking primitive short of a database. It does not close a
+narrower gap underneath it. `xdeps=name` verifies the *named block's*
+source hash. It says nothing about which file that block actually
+writes. Two blocks can each rename their own path independently,
+`xdeps=name` still matches, and the pipeline is broken anyway.
+
+`produces=file:PATH` on the writer and `reads=file:PATH` on the reader
+declare the artifact both sides believe they share, on top of the
+`deps=`/`xdeps=name` edge that already names the other block directly.
+Neither attribute resolves anything by itself. There is no catalog to
+diff, unlike decision 16's DuckDB relations, and no corpus-wide search
+for whoever last wrote `PATH`: the existing edge still says *which*
+block this is about, exactly as it always did. `produces=`/`reads=` add
+one comparison on top of that edge's own verified hash, in `dankg check`: the reader's `reads=` path must equal its named dependency's
+`produces=` path, after the same normalization a written link's own
+path already gets. A mismatch is a hard failure, not an advisory one,
+unlike decision 32's prose dependencies. Two declared strings failing
+to agree is a much stronger signal than a substring search over prose,
+and checking it costs nothing: no filesystem read, no spawned command,
+decision 9 untouched.
+
+A block missing `produces=`/`reads=` is unaffected. Neither attribute
+is required the way `name` is required to be targeted at all; both are
+a second, optional layer for a pipeline that wants its file contract
+checked, not just its source hash re-verified. Same-file and cross-file
+resolution both work exactly as `xdeps=` already does (decision 29's
+lookup, unchanged): `produces=`/`reads=` never invent a second
+resolution path of their own to keep in sync with the first.
+
+## Open questions
+
+- Should `produces=`/`reads=` ever be required together, so a block
+  naming one without the other is refused rather than silently
+  unchecked? Left permissive for now: an author adding the check to
+  one side of an existing pipeline should not be forced to touch the
+  other side in the same edit.
+- A block can write more than one file, or read more than one. Today
+  each attribute takes exactly one `PATH`. Covering more needs either
+  repeated declarations or a comma-separated value, whichever a real
+  multi-artifact pipeline asks for first.
+- This says nothing about a file's own staleness independent of its
+  producing block: an artifact edited or deleted by hand, outside
+  `dankg` entirely. `xdeps=`'s verified hash already covers "did the
+  producing block's source change." Whether the file on disk still
+  matches what that block last wrote is a different,
+  filesystem-reading question left alone on purpose. Stat-and-hash an
+  artifact is close enough to executing something that it deserves its
+  own decision, not a rider on this one (decision 9).
+
 # Literate database management
 
 Milestone 9. Literate programming put the prose and the code that
@@ -1873,32 +1939,19 @@ file.
   same. Concatenation cannot cross the language boundary that made
   this milestone necessary in the first place, so the producing
   block's own hash is the only honest source for this one.
-- This milestone only covers a database's own relations. `deps=`
-  itself refuses any dependency chain that crosses a language
-  boundary at all ([`src/eval/plan.md`](src/eval/plan.md)). Nothing
-  here changes that for a plain file or a pipe.
+- This milestone only covers a database's own relations. The plain-file
+  half of this gap -- a shell stage handing a file to a Python stage,
+  the exact case
   [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md#caveats-and-next-steps)
-  found that
-  gap directly: a shell stage handing a file to a Python stage has no
-  dankg-tracked dependency edge today, database or not.
-- This milestone requires a database. Decision 1 and project.md's
-  third key feature both commit to plaintext, dependency-free
-  operation. Gating any cross-language dependency tracking behind
-  DuckDB adoption would leave the common case, a shell script handing
-  a file to a Python script, no better off than before this milestone
-  shipped. A `File` artifact kind needs no database and no new
-  external tool: `produces=file:PATH` on the writer, `deps=file:PATH`
-  on the reader, hash-chained from the producing block the same way a
-  same-language `deps=` chain already is. It should probably ship
-  before this milestone's relation kind, not after, with a relation as
-  a second, richer kind layered on the same mechanism for whoever
-  already has a database.
-- A file has no catalog to snapshot. A relation's `Produces` edge is
-  inferred for free by diffing `duckdb_tables()`/`duckdb_views()`. A
-  file's producer has no equivalent to diff against, so
-  `produces=file:PATH` has to be an explicit declaration, not an
-  inferred one. The file kind is simpler to implement and asks more of
-  whoever writes it, the opposite trade the relation kind makes.
+  found untracked -- is resolved by decision 33 (*File dependencies*,
+  above) and needs no database. What decision 33 does not give a
+  relation is the *inferred* half of this milestone's own value: a
+  file's producer has no catalog to diff, so `produces=file:PATH` is
+  always an explicit declaration, never inferred the free way a
+  relation's `Produces` edge is from `duckdb_tables()`/`duckdb_views()`.
+  The relation kind stays the richer, database-requiring layer for
+  whoever already has one; decision 33 is what the common,
+  database-free case gets instead.
 
 # Config
 
@@ -2426,6 +2479,20 @@ one enforced only by construction.
   stale quote, an unresolvable target, and a target escaping the root
   are each reported by file, line, and target, the summary line counts
   every marker once, and none of it fails the exit code.
+- File dependencies (decision 33): `eval/plan.rs`'s own unit tests cover
+  `check_file_deps` in isolation -- a match via `deps=`, a match via
+  `xdeps=` across languages, a mismatch, a dependency declaring no
+  `produces=` at all, a `reads=` with no dependency edge to check
+  against, a `reads=` escaping the root, an unrecognised artifact kind
+  staying silently uncounted, a match found among several candidate
+  dependencies, and (the one a raw string compare would get wrong) two
+  blocks in different directories naming the same artifact by different
+  relative spellings, confirmed to still agree once both are resolved
+  through `join_normalize`. `tests/filedeps.rs` drives the real binary
+  against `tests/data/filedeps-corpus/`, its own isolated root, and
+  checks the same cases end to end, plus the one thing the unit tests
+  cannot: unlike a `dankg:depends` marker, a mismatch here does fail
+  `dankg check`'s exit code.
 
 # Milestones
 
@@ -2504,6 +2571,8 @@ one enforced only by construction.
    distinctly in every format. See *Block nodes* under *Data model*.
 9. Literate database management, over DuckDB. Depends on 8: it is the same
    plan-run-write-back machinery pointed at a database instead of a process.
+   Decision 33's `produces=`/`reads=file:PATH` ships first, as the
+   database-free half of the same gap: see *File dependencies*.
 10. `dankg serve`, deferred, opt-in, only if the static path proves insufficient.
 11. \[DONE\] `dankg tangle` (`src/tangle.rs`). Block scope reuses
     `eval::plan::top_level_blocks` exactly (decision 23), independent

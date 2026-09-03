@@ -93,6 +93,14 @@ pub struct BlockRef<'a> {
     /// `tangle`'s placement override (decision 24). Ignored by eval
     /// entirely. A block's `path=` has nothing to do with evaluating it.
     pub path: Option<&'a str>,
+    /// `produces=file:PATH` (decision 33), raw. Read only by
+    /// `check_file_deps`, below, when some other block's own `reads=`
+    /// names it as a dependency.
+    pub produces: Option<&'a str>,
+    /// `reads=file:PATH` (decision 33), raw. Checked against a resolved
+    /// `deps=`/`xdeps=` target's own `produces=`, never resolved on its
+    /// own: see `check_file_deps`.
+    pub reads: Option<&'a str>,
 }
 ```
 
@@ -207,6 +215,8 @@ fn block_ref<'a>(
         xdeps: info.xdeps(),
         timeout: info.timeout(),
         path: info.path(),
+        produces: info.produces(),
+        reads: info.reads(),
     })
 }
 ```
@@ -440,6 +450,104 @@ pub fn resolve_xdeps(blocks: &[BlockRef], block: &BlockRef) -> Result<Vec<usize>
         .iter()
         .map(|dep| resolve_dep(blocks, block.file, dep).map_err(|e| xdep_error(block.name.to_string(), dep, e)))
         .collect()
+}
+```
+
+## File dependencies
+
+`produces=file:PATH`/`reads=file:PATH` (decision 33) are the one place
+this module compares two blocks' own declared attributes to each other,
+rather than walking the dependency graph the way everything above does.
+`check_file_deps` reuses `resolve_dep` exactly, to find which block a
+`deps=`/`xdeps=` entry actually names, but never calls `visit`: nothing
+here is planned, ordered, or run. It answers one question per block
+declaring `reads=`: does the artifact it names match `produces=` on at
+least one of the dependencies it already declared? Only `file` is a
+recognised artifact kind today. Anything else -- a bare path with no
+prefix, or a future `table:` for milestone 9's own DuckDB relations --
+is left unrecognised on purpose, a documented gap rather than a second,
+narrower error path.
+
+```rust name=file_deps path=eval/plan.rs
+/// One `produces=`/`reads=file:PATH` mismatch (decision 33), reported by
+/// `dankg check`. Unlike a `dankg:depends` prose marker, this is a hard
+/// failure: two declared strings failing to agree is a far stronger
+/// signal than a substring search over prose.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FileDepIssue {
+    /// `block`'s own `reads=file:PATH` climbs above the root.
+    ReadsEscapesRoot { file: String, line: u32, block: String, path: String },
+    /// None of `block`'s resolved `deps=`/`xdeps=` targets declare a
+    /// `produces=file:PATH` that names the same artifact.
+    NoMatchingProducer { file: String, line: u32, block: String, path: String },
+}
+
+/// Splits an attribute's whole value into its artifact kind and path.
+/// Only `file` is recognised today; anything else -- a bare path with no
+/// prefix, or a future `table:` for milestone 9's own DuckDB relations --
+/// returns `None`, silently unchecked rather than reported as an error
+/// of its own.
+fn parse_artifact(raw: &str) -> Option<&str> {
+    let (kind, path) = raw.split_once(':')?;
+    if kind != "file" || path.is_empty() {
+        return None;
+    }
+    Some(path)
+}
+
+/// Resolves `path`, declared by a block living in `from_file`, to a
+/// root-relative, normalized form -- the same `join_normalize`/`dir_of` a
+/// written link's own target already resolves through, so two blocks in
+/// different directories naming the same artifact by different relative
+/// spellings still compare equal.
+fn resolve_artifact(from_file: &str, path: &str) -> Option<String> {
+    crate::graph::resolve::join_normalize(crate::graph::resolve::dir_of(from_file), path)
+}
+
+/// Checks every `reads=file:PATH` in `blocks` against the `produces=` of
+/// whatever it already names in its own `deps=`/`xdeps=`. Returns the
+/// number of declarations actually checked (a recognised `file:` kind),
+/// alongside every mismatch found. Neither number moves for a block with
+/// no `reads=`, or one naming a kind other than `file`: decision 33 is
+/// additive, and a block that never opts in is never counted either way.
+pub fn check_file_deps(blocks: &[BlockRef]) -> (usize, Vec<FileDepIssue>) {
+    let mut checked = 0usize;
+    let mut issues = Vec::new();
+
+    for block in blocks {
+        let Some(raw) = block.reads else { continue };
+        let Some(path) = parse_artifact(raw) else { continue };
+        checked += 1;
+
+        let Some(wanted) = resolve_artifact(block.file, path) else {
+            issues.push(FileDepIssue::ReadsEscapesRoot {
+                file: block.file.to_string(),
+                line: block.line,
+                block: block.name.to_string(),
+                path: path.to_string(),
+            });
+            continue;
+        };
+
+        let satisfied = block.deps.iter().chain(block.xdeps.iter()).any(|dep| {
+            let Ok(producer) = resolve_dep(blocks, block.file, dep) else { return false };
+            let producer = &blocks[producer];
+            let Some(praw) = producer.produces else { return false };
+            let Some(ppath) = parse_artifact(praw) else { return false };
+            resolve_artifact(producer.file, ppath).as_deref() == Some(wanted.as_str())
+        });
+
+        if !satisfied {
+            issues.push(FileDepIssue::NoMatchingProducer {
+                file: block.file.to_string(),
+                line: block.line,
+                block: block.name.to_string(),
+                path: path.to_string(),
+            });
+        }
+    }
+
+    (checked, issues)
 }
 ```
 
@@ -793,6 +901,132 @@ mod tests {
             resolve_xdeps(&blocks, top).unwrap_err(),
             PlanError::XDepEscapesRoot { block: "top".into(), dep: "../../etc.md#x".into() }
         );
+    }
+
+    // -- `produces=`/`reads=file:PATH` (decision 33) --------------------
+
+    #[test]
+    fn a_block_with_no_reads_is_not_checked() {
+        let d = doc("```sh name=only\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 0);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn matching_produces_and_reads_via_deps_is_not_an_issue() {
+        let d = doc(
+            "```sh name=writer produces=file:out.csv\n:\n```\n\n```sh name=reader deps=writer reads=file:out.csv\n:\n```\n",
+        );
+        let blocks = top_level_blocks(&d, FILE);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 1);
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn matching_produces_and_reads_via_xdeps_across_languages_is_not_an_issue() {
+        let d = doc(
+            "```sh name=writer produces=file:out.csv\n:\n```\n\n```python name=reader xdeps=writer reads=file:out.csv\n:\n```\n",
+        );
+        let blocks = top_level_blocks(&d, FILE);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 1);
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn a_mismatched_path_is_reported() {
+        let d = doc(
+            "```sh name=writer produces=file:out.csv\n:\n```\n\n```sh name=reader deps=writer reads=file:different.csv\n:\n```\n",
+        );
+        let blocks = top_level_blocks(&d, FILE);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 1);
+        assert_eq!(
+            issues,
+            vec![FileDepIssue::NoMatchingProducer {
+                file: FILE.into(),
+                line: 5,
+                block: "reader".into(),
+                path: "different.csv".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_dependency_that_declares_no_produces_is_reported() {
+        let d = doc("```sh name=writer\n:\n```\n\n```sh name=reader deps=writer reads=file:out.csv\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 1);
+        assert!(matches!(issues.as_slice(), [FileDepIssue::NoMatchingProducer { .. }]), "{issues:?}");
+    }
+
+    #[test]
+    fn reads_with_no_dependency_edge_at_all_is_reported() {
+        let d = doc("```sh name=reader reads=file:out.csv\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 1);
+        assert!(matches!(issues.as_slice(), [FileDepIssue::NoMatchingProducer { .. }]), "{issues:?}");
+    }
+
+    #[test]
+    fn a_reads_path_escaping_the_root_is_reported() {
+        let d = doc("```sh name=reader reads=file:../../etc/passwd\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 1);
+        assert_eq!(
+            issues,
+            vec![FileDepIssue::ReadsEscapesRoot {
+                file: FILE.into(),
+                line: 1,
+                block: "reader".into(),
+                path: "../../etc/passwd".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_artifact_kind_is_not_checked() {
+        // `table:` is reserved for milestone 9's own DuckDB relations; it
+        // is not an error today, just silently unchecked.
+        let d = doc("```sh name=reader reads=table:orders\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 0);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn a_match_among_several_dependencies_is_enough() {
+        let d = doc(
+            "```sh name=other\n:\n```\n\n```sh name=writer produces=file:out.csv\n:\n```\n\n```sh name=reader deps=other,writer reads=file:out.csv\n:\n```\n",
+        );
+        let blocks = top_level_blocks(&d, FILE);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 1);
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn different_relative_spellings_of_the_same_artifact_still_match() {
+        // Producer and reader sit in different directories and spell the
+        // same repo-relative path differently. Only normalization, not a
+        // raw string compare, can see they agree.
+        let producer =
+            Document::parse("```sh name=producer produces=file:../data/out.csv\n:\n```\n", &mut Diags::new("cross/prod.md"));
+        let reader = Document::parse(
+            "```sh name=reader deps=../../cross/prod.md#producer reads=file:../../data/out.csv\n:\n```\n",
+            &mut Diags::new("cross/deep/read.md"),
+        );
+        let blocks = combined(&[("cross/prod.md", &producer), ("cross/deep/read.md", &reader)]);
+        let (checked, issues) = check_file_deps(&blocks);
+        assert_eq!(checked, 1);
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
