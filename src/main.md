@@ -199,6 +199,11 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
 
     let mut stale = 0usize;
     let mut checked = 0usize;
+    // Shared across the whole run, not per block: the same upstream
+    // block is often reachable via `xdeps` from many of the blocks this
+    // loop checks, and nothing loaded here changes between iterations,
+    // so a result verified once stays valid for the rest of this run.
+    let mut xdep_cache = std::collections::HashMap::new();
     for rel_path in &corpus.paths {
         let Some((_, doc)) = files.get(rel_path) else { continue };
         let blocks: Vec<&plan::BlockRef> = all_blocks.iter().filter(|b| b.file == rel_path.as_str()).collect();
@@ -226,7 +231,7 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
             // opening paragraph), so every `xdeps` target this block
             // could possibly name is already resolvable here, exactly as
             // it would be during a real `dankg eval`.
-            let xdep_hashes = match result::xdep_hashes(&files, &corpus.config, &all_blocks, &chain) {
+            let xdep_hashes = match result::xdep_hashes(&files, &corpus.config, &all_blocks, &chain, &mut xdep_cache) {
                 Ok(hashes) => hashes,
                 Err(msg) => {
                     stale += 1;
