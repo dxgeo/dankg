@@ -190,6 +190,12 @@ Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same
 
 **Rationale:** A richer glue script needs block-level source position to compare against, never a paragraph's own text. DanKG hands over structure. Judgment stays glue's (decision 27).
 
+## Decision 31: Cross-language dependency
+
+`xdeps=name` resolves exactly like `deps=` (decision 29's same-file/cross-file lookup). A target is never concatenated into the chain. It always runs alone, and its staleness hash folds in the referenced block's own hash by verified reference instead.
+
+**Rationale:** Decision 11's refusal to mix languages in one concatenated chain is correct and stays unchanged, but it left no way to track staleness across a boundary it cannot cross. `xdeps=` is a second, narrower mechanism for exactly that gap, not a loosening of decision 11.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -955,6 +961,52 @@ file (decision 19's original scope, unchanged). Only a target's
 *chain* may now reach outside it, so a pulled-in dependency from
 another file is never itself treated as one of `--all`/`--each`'s
 targets.
+
+`xdeps=name` (decision 31) resolves the same way. It is never
+concatenated. A target with an `xdeps=` entry always runs alone.
+Decision 11's own refusal to mix languages in one chain is correct. It
+stays exactly as it is. Concatenating a `[sh]` block ahead of a
+`[python]` target through one interpreter really is almost always a
+mistake. Decision 11 does not offer a way to track staleness across
+the boundary it correctly refuses to cross.
+[agent_tests/deps_pilot.md](agent_tests/deps_pilot.md) found that gap
+costs real correctness. A raw pipeline with no equivalent mechanism
+missed a stale upstream stage in the same two ways, in shell, Python,
+SQL, and a realistic mixed-tool pipeline alike. `xdeps=`'s own hash is
+never a referenced block's stored marker, read blindly.
+`eval::result::verified_hash` recomputes that block's own hash from
+its current chain and its own `xdeps`, recursively. This is the exact
+check `dankg check`'s per-block loop already runs. It only trusts a
+stored value once a fresh recomputation still matches it. A mismatch,
+a missing result, an `xdeps` cycle, and a now-unconfigured language
+are all refused rather than silently trusted. `xdeps` is a trust
+boundary on purpose. It holds itself to a stricter bar than decision
+11's own chain, where an unconfigured language is merely skipped
+rather than failed. A cache, shared across `dankg check`'s whole run,
+remembers a block already verified once. A real DAG's diamond shape or
+fan-out means the same upstream block is often reachable from many
+paths.
+
+**Deferred.** Whether `--each`/`--all` should ever schedule execution
+across `xdeps=`, not just track staleness through it, is left open on
+purpose. Only `xdeps` edges are a genuine ordering constraint. A
+`deps=` member never needs to have run standalone first, since
+concatenation always re-derives it from current source. A real fix
+would need a second, `xdeps`-only topological sort, layered over
+`plan_each`/`plan_all` without disturbing decision 11's chain-building.
+Even that would only help ordering within one already-named file or
+corpus scope. Decision 19's one-file targeting is untouched by any of
+this. A pipeline spanning several files, this document's own
+`agent_tests/deps_pilot.md` mixed-tool example among them, still needs
+each file run by hand, in order. The alternative is having eval
+automatically run a missing upstream `xdeps` target to satisfy a
+downstream one. That is not merely undone work. It is a different
+feature, refused on purpose. Decision 9 does not run anything
+automatically. Cascading execution across files the reader did not
+explicitly ask to run in this invocation is exactly the kind of trust
+decision 9 exists to withhold until asked. `xdeps=` stays a tracking
+primitive, not a scheduling one, unless a concrete pipeline need
+forces the question for real.
 
 For a language with no real per-file module system reachable from within
 one compiled unit (Rust among them), this is enough to write a genuinely
