@@ -17,7 +17,7 @@ use dankg::eval::{plan, result, run as eval_run, session};
 use dankg::graph::index::{self, Corpus};
 use dankg::graph::{resolve, view, EdgeKind, Graph};
 use dankg::layout;
-use dankg::md::{fmt, Block, Document};
+use dankg::md::{fmt, Document};
 use dankg::render::{dot, html, json, mermaid};
 use dankg::tangle;
 use dankg::tui;
@@ -204,10 +204,7 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
         let blocks: Vec<&plan::BlockRef> = all_blocks.iter().filter(|b| b.file == rel_path.as_str()).collect();
 
         for (i, b) in blocks.iter().enumerate() {
-            let Some((marker_line, _)) = result::locate_existing(doc, b.index, b.name) else { continue };
-            let _ = marker_line;
-            let Some(Block::Passthrough { text, .. }) = doc.blocks.get(b.index + 1) else { continue };
-            let Some((_, stored_hash, _)) = text.lines().next().and_then(result::parse_marker) else { continue };
+            let Some(stored_hash) = result::recorded_hash(doc, b.index, b.name) else { continue };
             checked += 1;
 
             // By index, not by name. The loop already holds the exact
@@ -225,7 +222,19 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
             // cannot be re-verified. That is reported by the missing
             // `[lang.*]` section itself, not double-counted as stale here.
             let Some(lang) = eval_run::command_for(&corpus.config, &chain) else { continue };
-            if result::expected_hash(&chain, &lang.command) != stored_hash {
+            // The whole corpus is already loaded (this function's own
+            // opening paragraph), so every `xdeps` target this block
+            // could possibly name is already resolvable here, exactly as
+            // it would be during a real `dankg eval`.
+            let xdep_hashes = match result::xdep_hashes(&files, &corpus.config, &all_blocks, &chain) {
+                Ok(hashes) => hashes,
+                Err(msg) => {
+                    stale += 1;
+                    eprintln!("stale: {rel_path} `{}` ({msg})", b.name);
+                    continue;
+                }
+            };
+            if result::expected_hash(&chain, &lang.command, &xdep_hashes) != stored_hash {
                 stale += 1;
                 eprintln!("stale: {rel_path} `{}`", b.name);
             }

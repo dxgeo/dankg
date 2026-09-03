@@ -351,6 +351,11 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
     let chain = plan::plan_for_index(&blocks, &entry_file, position).map_err(|e| e.to_string())?;
     let target = chain.last().expect("plan_for_index never returns an empty chain");
     let name = target.name;
+    // Resolved before anything runs, the same "plan fully or not at all"
+    // discipline `run_single` already applies to language configuration:
+    // an unresolvable `xdeps` target should fail fast, not after paying
+    // for a spawn that was going to be thrown away anyway.
+    let xdep_hashes = result::xdep_hashes(&files, config, &blocks, &chain)?;
     let lang = eval_run::command_for(config, &chain)
         .ok_or_else(|| format!("`{name}` has no configured language"))?;
     let timeout = Duration::from_secs(target.timeout.unwrap_or(eval_run::DEFAULT_TIMEOUT_SECS));
@@ -358,7 +363,7 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
 
     if !no_write {
         let (source, doc) = files.get(&entry_file).expect("entry_file was just discovered above");
-        let result_hash = result::expected_hash(&chain, &lang.command);
+        let result_hash = result::expected_hash(&chain, &lang.command, &xdep_hashes);
         let existing = result::locate_existing(doc, target.index, name);
         let updated =
             result::write_back(source, target.end_line, existing, name, result_hash, !output.success, &output.stdout);
@@ -487,6 +492,29 @@ mod tests {
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         run_one(path.to_str().unwrap(), &config, 0, true).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn run_one_refuses_an_xdep_with_no_recorded_result_yet() {
+        let path =
+            scratch_file("xdep_missing.md", "```sh name=setup\necho hi\n```\n\n```sh name=top xdeps=setup\necho top\n```\n");
+        let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
+        let err = run_one(path.to_str().unwrap(), &config, 1, false).unwrap_err();
+        assert!(err.contains("setup"), "{err:?}");
+        assert!(err.contains("run it first"), "{err:?}");
+    }
+
+    #[test]
+    fn run_one_runs_an_xdeps_target_standalone_once_its_dependency_has_a_recorded_result() {
+        let path =
+            scratch_file("xdep_ok.md", "```sh name=setup\necho hi\n```\n\n```sh name=top xdeps=setup\necho top\n```\n");
+        let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
+        run_one(path.to_str().unwrap(), &config, 0, false).unwrap();
+        let summary = run_one(path.to_str().unwrap(), &config, 1, false).unwrap();
+        assert!(summary.success);
+        assert_eq!(summary.stdout, "top\n", "setup's echo must never run as part of top's own process");
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("dankg:result name=top"), "{written:?}");
     }
 
     #[test]

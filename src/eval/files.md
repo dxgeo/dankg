@@ -112,7 +112,7 @@ impl Files {
 ```
 
 `discover` is over-inclusive by *block* rather than by *chain*. A file
-reached by any block's `deps=` is loaded even when the eventual target's
+reached by any block's `deps=`/`xdeps=` is loaded even when the eventual target's
 own chain never actually uses it. The alternative would discover only
 what one specific target reaches. That would need interleaving with
 `plan.rs`'s own DAG walk, and `plan.rs` stays a pure function of
@@ -123,7 +123,7 @@ would notice.
 ```rust name=discover path=eval/files.rs
 impl Files {
     /// Loads `entry` and, transitively, every file any of its own top-level
-    /// blocks' `deps=` reach. It follows only the edges actually declared,
+    /// blocks' `deps=` or `xdeps=` reach. It follows only the edges actually declared,
     /// never a corpus walk. `Err` happens when `entry` itself, the file the
     /// reader actually named, cannot be read. A *dependency* that cannot be
     /// read is silently left unloaded instead. `plan.rs`'s own
@@ -133,7 +133,7 @@ impl Files {
     /// actually needs, it would say something nobody asked about.
     ///
     /// Over-inclusive by *block* rather than by *chain*. A file reached by
-    /// any block's `deps=` is loaded even if the eventual target's own
+    /// any block's `deps=`/`xdeps=` is loaded even if the eventual target's own
     /// chain never uses it. The alternative would discover only what one
     /// specific target's chain reaches. That would need to interleave
     /// loading with `plan.rs`'s own DAG walk, and `plan.rs` stays a pure
@@ -156,7 +156,7 @@ impl Files {
         // `load`/`discover_from` below need `&mut self` again.
         let cross_file_deps: Vec<String> = plan::top_level_blocks(&loaded.doc, file)
             .iter()
-            .flat_map(|b| b.deps.iter().copied())
+            .flat_map(|b| b.deps.iter().chain(b.xdeps.iter()).copied())
             .filter_map(|raw| plan::split_dep(raw).0.map(str::to_string))
             .collect();
 
@@ -229,6 +229,19 @@ mod tests {
         files.discover("a.md", &mut diags).unwrap();
         let names: Vec<&str> = files.all_blocks().iter().map(|b| b.name).collect();
         assert!(names.contains(&"go") && names.contains(&"helper"), "{names:?}");
+    }
+
+    #[test]
+    fn discover_follows_a_cross_file_xdep() {
+        let dir = scratch_dir(&[
+            ("a.md", "```python name=top xdeps=lib.md#helper\n:\n```\n"),
+            ("lib.md", "```sh name=helper\n:\n```\n"),
+        ]);
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("a.md", &mut diags).unwrap();
+        let names: Vec<&str> = files.all_blocks().iter().map(|b| b.name).collect();
+        assert!(names.contains(&"top") && names.contains(&"helper"), "{names:?}");
     }
 
     #[test]
