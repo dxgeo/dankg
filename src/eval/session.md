@@ -355,7 +355,7 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
     // discipline `run_single` already applies to language configuration:
     // an unresolvable `xdeps` target should fail fast, not after paying
     // for a spawn that was going to be thrown away anyway.
-    let xdep_hashes = result::xdep_hashes(&files, config, &blocks, &chain)?;
+    let xdep_hashes = result::xdep_hashes(&files, config, &blocks, &chain, &mut std::collections::HashMap::new())?;
     let lang = eval_run::command_for(config, &chain)
         .ok_or_else(|| format!("`{name}` has no configured language"))?;
     let timeout = Duration::from_secs(target.timeout.unwrap_or(eval_run::DEFAULT_TIMEOUT_SECS));

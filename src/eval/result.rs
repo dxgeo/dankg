@@ -48,17 +48,6 @@ pub fn recorded_hash(doc: &Document, index: usize, name: &str) -> Option<u64> {
     Some(hash)
 }
 
-/// `blocks[index]`'s own hash, verified fresh right now rather than
-/// merely read. Recomputes its chain and its own `xdeps` (recursively,
-/// through this same function) from current source, exactly what
-/// `dankg check`'s per-block loop already does, and only returns the
-/// stored value if a fresh recomputation still matches it. A mismatch,
-/// a missing recorded result, or an `xdeps` cycle back through
-/// `visiting` are all reported by name rather than silently treated as
-/// fresh. An unconfigured language cannot be re-verified at all -- the
-/// stored value is trusted as-is, the same leniency an unconfigured
-/// language already gets from not being double-counted as stale in
-/// `main.rs`.
 /// Every `xdeps=` entry declared by *any* block in `chain`, resolved and
 /// verified fresh, in chain order. Not just `chain`'s last element: a
 /// `deps=` member concatenated into the chain can carry its own
@@ -76,56 +65,87 @@ fn chain_xdep_hashes(
     config: &crate::config::Config,
     chain: &[BlockRef],
     visiting: &mut std::collections::HashSet<usize>,
+    cache: &mut std::collections::HashMap<usize, Result<u64, String>>,
 ) -> Result<Vec<u64>, String> {
     let mut hashes = Vec::new();
     for b in chain {
         for i in plan::resolve_xdeps(blocks, b).map_err(|e| e.to_string())? {
-            hashes.push(verified_hash(blocks, files, config, i, visiting)?);
+            hashes.push(verified_hash(blocks, files, config, i, visiting, cache)?);
         }
     }
     Ok(hashes)
 }
 
+/// `blocks[index]`'s own hash, verified fresh right now rather than
+/// merely read. Recomputes its chain and its own `xdeps` (recursively,
+/// through this same function) from current source, exactly what
+/// `dankg check`'s per-block loop already does, and only returns the
+/// stored value if a fresh recomputation still matches it. A mismatch,
+/// a missing recorded result, an `xdeps` cycle back through `visiting`,
+/// or an unconfigured language are all reported by name rather than
+/// silently treated as fresh: `xdeps` is a trust boundary on purpose,
+/// so it holds itself to a stricter bar than `dankg check`'s own
+/// per-block loop does for a language dropped from config, which is
+/// merely skipped there rather than refused. `cache` remembers a
+/// completed result by block index, since the same block is often
+/// reachable from more than one path through a real DAG (a diamond
+/// shape, or several downstream blocks sharing one upstream `xdeps`
+/// target) and re-deriving it every time is pure waste once it is
+/// already known.
 fn verified_hash(
     blocks: &[BlockRef],
     files: &Files,
     config: &crate::config::Config,
     index: usize,
     visiting: &mut std::collections::HashSet<usize>,
+    cache: &mut std::collections::HashMap<usize, Result<u64, String>>,
 ) -> Result<u64, String> {
+    if let Some(cached) = cache.get(&index) {
+        return cached.clone();
+    }
     let b = &blocks[index];
     if !visiting.insert(index) {
         return Err(format!("`{}` is part of an xdeps cycle", b.name));
     }
-    let chain = plan::plan_for(blocks, b.file, b.name).map_err(|e| e.to_string())?;
-    let xdep_hashes = chain_xdep_hashes(blocks, files, config, &chain, visiting)?;
-    visiting.remove(&index);
+    let result = (|| {
+        let chain = plan::plan_for(blocks, b.file, b.name).map_err(|e| e.to_string())?;
+        let xdep_hashes = chain_xdep_hashes(blocks, files, config, &chain, visiting, cache)?;
 
-    let (_, doc) = files.get(b.file).ok_or_else(|| format!("{}: not loaded", b.file))?;
-    let Some(stored) = recorded_hash(doc, b.index, b.name) else {
-        return Err(format!("`{}` has no recorded result yet -- run it first", b.name));
-    };
-    let Some(lang) = run::command_for(config, &chain) else {
-        return Ok(stored); // unconfigured language: cannot re-verify, trust what is stored
-    };
-    if expected_hash(&chain, &lang.command, &xdep_hashes) == stored {
-        Ok(stored)
-    } else {
-        Err(format!("`{}` is itself stale -- run it first", b.name))
-    }
+        let (_, doc) = files.get(b.file).ok_or_else(|| format!("{}: not loaded", b.file))?;
+        let Some(stored) = recorded_hash(doc, b.index, b.name) else {
+            return Err(format!("`{}` has no recorded result yet -- run it first", b.name));
+        };
+        let Some(lang) = run::command_for(config, &chain) else {
+            return Err(format!("`{}`'s language is unconfigured -- cannot verify it", b.name));
+        };
+        if expected_hash(&chain, &lang.command, &xdep_hashes) == stored {
+            Ok(stored)
+        } else {
+            Err(format!("`{}` is itself stale -- run it first", b.name))
+        }
+    })();
+    visiting.remove(&index);
+    cache.insert(index, result.clone());
+    result
 }
 
 /// `chain_xdep_hashes` for a caller outside this module: `dankg check`'s
-/// staleness loop and `run_one` both already hold the exact chain
-/// they mean, and neither needs to see `verified_hash`'s own recursion.
+/// staleness loop and `run_one` both already hold the exact chain they
+/// mean, and neither needs to see `verified_hash`'s own recursion.
+/// `cache` is the caller's to keep or discard. `dankg check` shares one
+/// across its whole run, since the same upstream block is often
+/// reachable from many of the blocks it checks; `run_one` is content
+/// with a fresh one every call, since it only ever verifies one
+/// target's own chain.
 pub fn xdep_hashes(
     files: &Files,
     config: &crate::config::Config,
     blocks: &[BlockRef],
     chain: &[BlockRef],
+    cache: &mut std::collections::HashMap<usize, Result<u64, String>>,
 ) -> Result<Vec<u64>, String> {
     let mut visiting = std::collections::HashSet::new();
-    chain_xdep_hashes(blocks, files, config, chain, &mut visiting)
+    chain_xdep_hashes(blocks, files, config, chain, &mut visiting, cache)
 }
 
 /// `failed` marks a non-zero exit or a timeout. The output is still
@@ -234,6 +254,7 @@ mod tests {
     use crate::config::Config;
     use crate::diag::Diags;
     use crate::eval::plan::{plan_for, top_level_blocks};
+    use std::collections::HashMap;
 
     fn doc(src: &str) -> Document {
         Document::parse(src, &mut Diags::new("t.md"))
@@ -314,7 +335,7 @@ mod tests {
         let blocks = files.all_blocks();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let top = blocks.iter().find(|b| b.name == "top").unwrap();
-        assert_eq!(xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top)).unwrap(), vec![h]);
+        assert_eq!(xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top), &mut HashMap::new()).unwrap(), vec![h]);
     }
 
     #[test]
@@ -326,9 +347,60 @@ mod tests {
         let blocks = files.all_blocks();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let top = blocks.iter().find(|b| b.name == "top").unwrap();
-        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top)).unwrap_err();
+        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top), &mut HashMap::new()).unwrap_err();
         assert!(err.contains("setup"), "{err:?}");
         assert!(err.contains("run it first"), "{err:?}");
+    }
+
+    #[test]
+    fn verified_hash_refuses_an_xdep_target_with_an_unconfigured_language() {
+        // `setup` is `python`, but only `sh` is configured below, so its
+        // freshness genuinely cannot be recomputed. Refusing is the
+        // stricter choice, deliberately: `xdeps` is a trust boundary,
+        // unlike `dankg check`'s own per-block loop, which merely skips
+        // (does not fail) a block whose own language is unconfigured.
+        let dir = scratch_dir(
+            "unconfigured",
+            "```python name=setup\n:\n```\n\n<!-- dankg:result name=setup hash=0000000000000001 -->\n\n```\nout\n```\n\n```sh name=top xdeps=setup\n:\n```\n",
+        );
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("t.md", &mut diags).unwrap();
+        let blocks = files.all_blocks();
+        let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top), &mut HashMap::new()).unwrap_err();
+        assert!(err.contains("setup"), "{err:?}");
+        assert!(err.contains("unconfigured"), "{err:?}");
+    }
+
+    #[test]
+    fn xdep_hashes_gives_consistent_results_across_a_diamond_with_a_shared_cache() {
+        // `b` and `c` both xdep on the same `setup`. A cache shared
+        // across both calls (the same way `dankg check`'s whole run
+        // shares one) must not corrupt either result.
+        let dir = scratch_dir("diamond", "```sh name=setup\necho hi\n```\n");
+        let doc = Document::parse(&std::fs::read_to_string(dir.join("t.md")).unwrap(), &mut Diags::new("t"));
+        let blocks = top_level_blocks(&doc, "t.md");
+        let chain = plan_for(&blocks, "t.md", "setup").unwrap();
+        let h = expected_hash(&chain, "sh {file}", &[]);
+        let content = format!(
+            "```sh name=setup\necho hi\n```\n\n<!-- dankg:result name=setup hash={} -->\n\n```\nhi\n```\n\n```sh name=b xdeps=setup\n:\n```\n\n```sh name=c xdeps=setup\n:\n```\n",
+            hash::hex(h)
+        );
+        std::fs::write(dir.join("t.md"), content).unwrap();
+
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("t.md", &mut diags).unwrap();
+        let blocks = files.all_blocks();
+        let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
+        let b = blocks.iter().find(|x| x.name == "b").unwrap();
+        let c = blocks.iter().find(|x| x.name == "c").unwrap();
+
+        let mut cache = HashMap::new();
+        assert_eq!(xdep_hashes(&files, &config, &blocks, std::slice::from_ref(b), &mut cache).unwrap(), vec![h]);
+        assert_eq!(xdep_hashes(&files, &config, &blocks, std::slice::from_ref(c), &mut cache).unwrap(), vec![h]);
     }
 
     #[test]
@@ -349,7 +421,7 @@ mod tests {
         let blocks = files.all_blocks();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let top = blocks.iter().find(|b| b.name == "top").unwrap();
-        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top)).unwrap_err();
+        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top), &mut HashMap::new()).unwrap_err();
         assert!(err.contains("setup"), "{err:?}");
         assert!(err.contains("itself stale"), "{err:?}");
     }
@@ -363,7 +435,7 @@ mod tests {
         let blocks = files.all_blocks();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let a = blocks.iter().find(|b| b.name == "a").unwrap();
-        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(a)).unwrap_err();
+        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(a), &mut HashMap::new()).unwrap_err();
         assert!(err.contains("cycle"), "{err:?}");
     }
 
