@@ -1,0 +1,3 @@
+# Marks this directory as its own root, isolated from the repo's own
+# corpus, so the prose-dependency fixtures below never affect any golden
+# dump built over tests/data/corpus.

@@ -155,6 +155,14 @@ source, dependencies, or configured command, including a dependency in
 another file. `check` is deliberately separate from `graph`. This way, a
 half-written note never fails a build.
 
+`check` also reports every `<!-- dankg:depends target=other.md#heading quote="..." -->` marker whose quoted claim can no longer be found,
+whitespace differences aside, in the section it names. This is advisory
+only. It never affects the exit code, because a substring match is a
+much weaker signal than a source hash (see architecture.md, *Prose
+dependencies*).
+
+<!-- dankg:depends target=architecture.md#prose-dependencies quote="A substring match is a much weaker signal than a content hash" -->
+
 ### `fmt` — normalize markdown
 
 ```sh
