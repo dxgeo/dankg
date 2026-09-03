@@ -201,7 +201,7 @@ pub struct InfoString {
 }
 
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
-pub const KNOWN_ATTRS: &[&str] = &["name", "deps", "timeout", "path"];
+pub const KNOWN_ATTRS: &[&str] = &["name", "deps", "xdeps", "timeout", "path"];
 
 impl InfoString {
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -222,6 +222,18 @@ impl InfoString {
     /// Dependency names, in declaration order. Empty when `deps` is absent.
     pub fn deps(&self) -> Vec<&str> {
         match self.get("deps") {
+            None => Vec::new(),
+            Some(v) => v.split(',').map(str::trim).filter(|s| !s.is_empty()).collect(),
+        }
+    }
+
+    /// Cross-language dependency names, in declaration order. Resolved the
+    /// same way `deps=` is, but never concatenated into a chain: the
+    /// block always runs alone, and the target's own last recorded hash
+    /// is folded in by reference instead (`eval::result::xdep_hashes`).
+    /// Empty when `xdeps` is absent.
+    pub fn xdeps(&self) -> Vec<&str> {
+        match self.get("xdeps") {
             None => Vec::new(),
             Some(v) => v.split(',').map(str::trim).filter(|s| !s.is_empty()).collect(),
         }
@@ -307,6 +319,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(info.deps(), vec!["setup", "fetch"]);
+    }
+
+    #[test]
+    fn info_string_xdeps_split_and_trim() {
+        let info = InfoString {
+            lang: Some("python".into()),
+            attrs: vec![("xdeps".into(), "raw.md#load , clean.md#norm".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.xdeps(), vec!["raw.md#load", "clean.md#norm"]);
+    }
+
+    #[test]
+    fn xdeps_is_empty_when_absent() {
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert!(info.xdeps().is_empty());
     }
 
     #[test]

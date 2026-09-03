@@ -83,6 +83,12 @@ pub struct BlockRef<'a> {
     pub line: u32,
     pub end_line: u32,
     pub deps: Vec<&'a str>,
+    /// Cross-language dependencies (decision: never concatenated). Resolved
+    /// exactly like `deps`, but `visit`/`plan_from` never walk into them:
+    /// a target with an `xdeps` entry still runs alone. `eval::result`
+    /// folds each resolved target's own last recorded hash into the
+    /// target's staleness hash instead of its source.
+    pub xdeps: Vec<&'a str>,
     pub timeout: Option<u64>,
     /// `tangle`'s placement override (decision 24). Ignored by eval
     /// entirely. A block's `path=` has nothing to do with evaluating it.
@@ -115,6 +121,14 @@ pub enum PlanError {
     /// gets (`graph::resolve::join_normalize`), reused rather than
     /// reimplemented.
     DepEscapesRoot { block: String, dep: String },
+    /// `block`'s `xdeps=dep` names something that is not a top-level
+    /// named block. The same "not found" as `UnknownDep`, kept as its
+    /// own variant so an error naming an `xdeps` entry never reads as
+    /// though it named a concatenated dependency instead.
+    UnknownXDep { block: String, dep: String },
+    /// `block`'s `xdeps=dep` named a cross-file path that climbs above
+    /// the root. `DepEscapesRoot`'s counterpart for `xdeps`.
+    XDepEscapesRoot { block: String, dep: String },
 }
 
 impl fmt::Display for PlanError {
@@ -141,6 +155,12 @@ impl fmt::Display for PlanError {
             }
             PlanError::DepEscapesRoot { block, dep } => {
                 write!(f, "`{block}` depends on `{dep}`, which escapes the root")
+            }
+            PlanError::UnknownXDep { block, dep } => {
+                write!(f, "`{block}` xdeps on `{dep}`, which is not a top-level named block")
+            }
+            PlanError::XDepEscapesRoot { block, dep } => {
+                write!(f, "`{block}` xdeps on `{dep}`, which escapes the root")
             }
         }
     }
@@ -184,6 +204,7 @@ fn block_ref<'a>(
         line,
         end_line,
         deps: info.deps(),
+        xdeps: info.xdeps(),
         timeout: info.timeout(),
         path: info.path(),
     })
@@ -245,6 +266,13 @@ fn dep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
     match err {
         DepLookup::Escapes => PlanError::DepEscapesRoot { block, dep: dep.to_string() },
         DepLookup::NotFound => PlanError::UnknownDep { block, dep: dep.to_string() },
+    }
+}
+
+fn xdep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
+    match err {
+        DepLookup::Escapes => PlanError::XDepEscapesRoot { block, dep: dep.to_string() },
+        DepLookup::NotFound => PlanError::UnknownXDep { block, dep: dep.to_string() },
     }
 }
 
@@ -390,6 +418,28 @@ pub fn plan_for_index<'a>(
         .map(|(i, _)| i)
         .ok_or_else(|| PlanError::UnknownTarget(format!("<block #{index}>")))?;
     plan_from(blocks, file, target_index)
+}
+```
+
+`xdeps=` reuses `resolve_dep` exactly, the same name and cross-file
+lookup `deps=` already uses. It never calls `visit`: an `xdeps` target
+is not walked into the chain, not checked for a consistent language,
+and not part of cycle detection, because nothing here ever runs it.
+`eval::result::xdep_hashes` is the only caller, and it only ever wants
+an index to look up an already-recorded hash by.
+
+```rust name=resolve_xdeps path=eval/plan.rs
+/// Resolves `block`'s `xdeps=` entries to their indices in `blocks`, in
+/// declaration order. Same lookup `deps=` uses (`resolve_dep`), but the
+/// result is never fed to `visit`: an `xdeps` target is referenced, not
+/// run, so there is nothing here for a cycle to loop through and no
+/// reason to require it share `block`'s own language.
+pub fn resolve_xdeps(blocks: &[BlockRef], block: &BlockRef) -> Result<Vec<usize>, PlanError> {
+    block
+        .xdeps
+        .iter()
+        .map(|dep| resolve_dep(blocks, block.file, dep).map_err(|e| xdep_error(block.name.to_string(), dep, e)))
+        .collect()
 }
 ```
 
@@ -686,6 +736,62 @@ mod tests {
                 block: "setup".into(),
                 block_lang: "sh".into(),
             }
+        );
+    }
+
+    #[test]
+    fn an_xdep_in_a_different_language_is_not_refused() {
+        let d = doc("```sh name=setup\n:\n```\n\n```python name=top xdeps=setup\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        assert!(plan_for(&blocks, FILE, "top").is_ok(), "xdeps never triggers MixedLang");
+    }
+
+    #[test]
+    fn an_xdep_is_never_concatenated_into_the_chain() {
+        let d = doc("```sh name=setup\n:\n```\n\n```python name=top xdeps=setup\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let plan = plan_for(&blocks, FILE, "top").unwrap();
+        assert_eq!(plan.iter().map(|b| b.name).collect::<Vec<_>>(), vec!["top"], "setup is xdeps-only, not part of the run");
+    }
+
+    #[test]
+    fn resolve_xdeps_finds_a_same_file_target() {
+        let d = doc("```sh name=setup\n:\n```\n\n```python name=top xdeps=setup\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        let indices = resolve_xdeps(&blocks, top).unwrap();
+        assert_eq!(blocks[indices[0]].name, "setup");
+    }
+
+    #[test]
+    fn resolve_xdeps_resolves_across_files() {
+        let a = Document::parse("```python name=top xdeps=lib.md#setup\n:\n```\n", &mut Diags::new("a.md"));
+        let lib = Document::parse("```sh name=setup\n:\n```\n", &mut Diags::new("lib.md"));
+        let blocks = combined(&[("a.md", &a), ("lib.md", &lib)]);
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        let indices = resolve_xdeps(&blocks, top).unwrap();
+        assert_eq!((blocks[indices[0]].file, blocks[indices[0]].name), ("lib.md", "setup"));
+    }
+
+    #[test]
+    fn resolve_xdeps_reports_an_unknown_target() {
+        let d = doc("```sh name=top xdeps=ghost\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        assert_eq!(
+            resolve_xdeps(&blocks, top).unwrap_err(),
+            PlanError::UnknownXDep { block: "top".into(), dep: "ghost".into() }
+        );
+    }
+
+    #[test]
+    fn resolve_xdeps_reports_a_dependency_that_escapes_the_root() {
+        let d = doc("```sh name=top xdeps=../../etc.md#x\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        assert_eq!(
+            resolve_xdeps(&blocks, top).unwrap_err(),
+            PlanError::XDepEscapesRoot { block: "top".into(), dep: "../../etc.md#x".into() }
         );
     }
 
