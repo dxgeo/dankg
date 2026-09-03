@@ -11,7 +11,9 @@ sharpest version of a relationship-shaped question: transitive
 dependency tracing and staleness. That is the thing `deps=` and
 `dankg check` exist for. The same fixture was rebuilt four times, in
 shell, Python, SQL, and a realistic mixed-tool pipeline, to check
-whether the result depends on language at all.
+whether the result depends on language at all. A fifth, adversarial
+rebuild then checked whether one of the raw arm's own verdicts was
+sound reasoning or luck.
 
 # Setup
 
@@ -216,6 +218,55 @@ tested so far, and it does not depend on which language, or how many
 languages, the pipeline happens to be written in underneath a single
 `deps=` chain.
 
+# Adversarial fixture: was the numeric coincidence luck?
+
+Every raw arm's "safe" verdict on `counts`/`ratios` rested on one
+convenient fact: reversing a string preserves its length. A fifth
+fixture removed that coincidence on purpose. Was that verdict sound
+reasoning that happened to have a coincidence, or a general habit of
+assuming things are fine that would persist once the coincidence was
+gone?
+
+The shell pipeline was rebuilt once more, unchanged except for
+`normalize`'s edit. Instead of reversing each word's characters, it
+now drops any word 4 characters or shorter before upper-casing the
+rest. `dedupe`'s output is `apple`, `banana`, `cherry`, `date`.
+Dropping `date` changes both `counts` (4 → 3) and `ratios` (21 → 17).
+Neither number can still match by accident.
+
+## Result
+
+| | Raw | Literate |
+|---|---|---|
+| `normalize`, `counts`, `ratios` correctly marked stale | **yes, this time** | yes, exact |
+| `train`, `summary` correctly marked stale | **no — marked safe again** | yes, exact |
+| Tool calls | 7 | 7 |
+| Wall-clock | ~39s | ~37s |
+
+## Finding
+
+The two errors turn out to differ in kind, not degree. Once the
+coincidence was gone, the raw agent correctly reclassified `counts`
+and `ratios` as stale, for the same reason `dankg` would give: their
+input changed. That reasoning was never broken. It was narrow, and
+narrow reasoning looks identical to broken reasoning exactly when a
+coincidence covers for it, which is what the first four pipelines
+caught.
+
+`train` and `summary` did not improve at all. The same raw agent, on
+the same fixture, still marked them "safe," for the same reason as
+every run before this one: no file reference in their own text, and a
+sentence of prose two hops away is not something a read-and-run
+approach ever checks. This error is not luck breaking one way. It is a
+stable blind spot, unrelated to whichever specific trap a fixture
+happens to use, and it survived the one change built specifically to
+catch a confidence problem instead of a genuine one.
+
+Net across five pipelines now: `dankg check` gave the exact answer, in
+one call, every single time. The raw arm's failure narrowed from "two
+different kinds of wrong" to one specific, structural kind, and that
+kind never went away.
+
 # Caveats and next steps
 
 - N=1 per pipeline, one purpose-built fixture each, same as the other
@@ -225,11 +276,6 @@ languages, the pipeline happens to be written in underneath a single
   numeric-coincidence trap. It is a fair test of a real failure class,
   not a neutral random sample of "typical" pipeline questions.
 - No real sandbox, same as `pilot.md` and `feature_pilot.md`.
-- The raw arms' "numeric coincidence" reasoning is worth a second,
-  adversarial fixture, one where the coincidence *doesn't* hold. That
-  would check whether the same kind of agent catches its own
-  overconfidence, or whether the false-safe verdict here was luck
-  rather than a stable pattern.
 - A genuine cross-language `deps=` chain cannot be built at all, given
   the constraint this pilot found in `src/eval/plan.md`. Anyone
   extending this file should not try to route around that constraint
