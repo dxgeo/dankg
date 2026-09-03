@@ -1031,6 +1031,24 @@ pure dependency also gets no `<!-- dankg:result -->` of its own under
 `--all`, since there is no standalone run to hang one on. `--each` is
 what still gives every block a recorded result, dependency or not.
 
+Decision 11's repetition is free when a chain is cheap. It is not free
+when a stage in it does real, heavy work. A pipeline processing
+hundreds of gigabytes would re-derive that stage from scratch on every
+`--block`/`--each`/`--all` invocation that reaches it, with no way to
+reuse a result already known to be fresh. `dankg check`'s hash
+comparison only ever answers "is this stale," never "skip re-running
+this, it already isn't." The [milestone 9 artifact
+idea](#open-questions-for-this-milestone) sidesteps this by
+construction, not by accident: a cross-language dependency was
+designed to fold in a producing block's hash by reference, never by
+re-concatenating and re-running it. Whether that same
+reference-not-concatenation approach is worth offering inside a single
+language too, as an explicit opt-out of decision 11's repetition for a
+stage a reader knows is expensive, is open. Nothing about decision 11
+itself needs to change either way. A chain that opts out this way
+chooses a different, additional mechanism; it does not disable this
+one.
+
 `run_one` (`session.rs`), the one place "run this block" is
 implemented (see *Terminal UI*'s *Eval in the TUI*), identifies its
 target by *position*: where it sits among the file's named top-level
@@ -1742,10 +1760,14 @@ file.
   only `dankg graph`'s picture of lineage? An edge that never
   invalidates anything downstream still explains where a table came
   from. It does not solve staleness across it. If it should
-  invalidate, a downstream block would need to fold in the hash of
-  the relation's own content, not the producing block's concatenated
-  source. Concatenation cannot cross the language boundary that made
-  this milestone necessary in the first place.
+  invalidate, a downstream block would need to fold in the producing
+  block's own hash, not the relation's current content. Hashing
+  content instead of source reopens the exact coincidence
+  [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md) found
+  dangerous: a source can change while its output happens to look the
+  same. Concatenation cannot cross the language boundary that made
+  this milestone necessary in the first place, so the producing
+  block's own hash is the only honest source for this one.
 - This milestone only covers a database's own relations. `deps=`
   itself refuses any dependency chain that crosses a language
   boundary at all ([`src/eval/plan.md`](src/eval/plan.md)). Nothing
@@ -1753,10 +1775,25 @@ file.
   [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md#caveats-and-next-steps)
   found that
   gap directly: a shell stage handing a file to a Python stage has no
-  dankg-tracked dependency edge today, database or not. Whether the
-  artifact idea here, a hashable thing with one producer a block can
-  depend on, is worth generalizing past relations is a question for
-  after this milestone ships.
+  dankg-tracked dependency edge today, database or not.
+- This milestone requires a database. Decision 1 and project.md's
+  third key feature both commit to plaintext, dependency-free
+  operation. Gating any cross-language dependency tracking behind
+  DuckDB adoption would leave the common case, a shell script handing
+  a file to a Python script, no better off than before this milestone
+  shipped. A `File` artifact kind needs no database and no new
+  external tool: `produces=file:PATH` on the writer, `deps=file:PATH`
+  on the reader, hash-chained from the producing block the same way a
+  same-language `deps=` chain already is. It should probably ship
+  before this milestone's relation kind, not after, with a relation as
+  a second, richer kind layered on the same mechanism for whoever
+  already has a database.
+- A file has no catalog to snapshot. A relation's `Produces` edge is
+  inferred for free by diffing `duckdb_tables()`/`duckdb_views()`. A
+  file's producer has no equivalent to diff against, so
+  `produces=file:PATH` has to be an explicit declaration, not an
+  inferred one. The file kind is simpler to implement and asks more of
+  whoever writes it, the opposite trade the relation kind makes.
 
 # Config
 
