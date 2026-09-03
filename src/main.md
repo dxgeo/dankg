@@ -11,6 +11,7 @@ crate (`session::run`, `tangle::run`, `tui::run`), never here.
 
 ```rust name=module_doc path=main.rs
 use dankg::cli::{self, Command, Format};
+use dankg::depends;
 use dankg::diag::{Diags, Level};
 use dankg::eval::files as eval_files;
 use dankg::eval::{plan, result, run as eval_run, session};
@@ -175,7 +176,17 @@ for the unresolved-link pass regardless. This way, there is no "avoid
 reading files a target's own chain does not reach" reason to hold back.
 Loading everything is what lets a cross-file `deps=` actually resolve
 during a staleness recheck, no matter which file happens to be under
-iteration at the time.
+iteration at the time. It is also what lets a `dankg:depends` marker's
+own target resolve, for exactly the same reason.
+
+A third loop checks every `dankg:depends` marker the same run already
+has everything on hand for: `index_graph` to resolve a target, `files`
+to read both the marker's own file and the target's, already loaded for
+the eval-staleness loop just above. Unlike the first two checks, this one
+never touches the returned `bool`. A missed quote, or even a target that
+no longer resolves at all, is reported and counted, never failed on:
+see `depends.md`'s own opening paragraph for why a substring match is
+too weak a signal to gate a build on.
 
 ```rust name=check_cmd path=main.rs
 /// `dankg check [<path>...]`: the CI gate. Unresolved links come from the
@@ -186,7 +197,13 @@ iteration at the time.
 /// reading files a target's own chain does not reach" reason to hold
 /// back. Loading everything is what lets a cross-file `deps=` actually
 /// resolve during a staleness recheck, regardless of which file is being
-/// iterated.
+/// iterated, and is what lets a `dankg:depends` marker's own target
+/// resolve too.
+///
+/// A third pass, over every `dankg:depends` marker in the corpus, is
+/// reported the same way but never gates the returned `bool`. A
+/// substring match is advisory by design (`depends.md`), so it is
+/// counted and printed, not failed on.
 fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
@@ -246,6 +263,36 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
         }
     }
 
+    // Advisory only (see this function's own doc comment): `prose_stale`
+    // is reported below but never folded into the returned `bool`.
+    let mut prose_checked = 0usize;
+    let mut prose_stale = 0usize;
+    for rel_path in &corpus.paths {
+        let Some((_, doc)) = files.get(rel_path) else { continue };
+        for marker in depends::markers_in(doc) {
+            prose_checked += 1;
+            let Some(target_id) = depends::resolve_target(rel_path, &marker.target) else {
+                prose_stale += 1;
+                eprintln!("stale-prose: {rel_path}:{} depends on `{}` -- target escapes the root", marker.line, marker.target);
+                continue;
+            };
+            let Some(target_node) = index_graph.node(&target_id).filter(|n| n.resolved) else {
+                prose_stale += 1;
+                eprintln!("stale-prose: {rel_path}:{} depends on `{}` -- target not found", marker.line, marker.target);
+                continue;
+            };
+            let Some((target_source, _)) = files.get(&target_node.file) else { continue };
+            let section = depends::section_text(target_source, target_node.line, target_node.end_line);
+            if depends::verify(&marker, &section) == depends::Verdict::Stale {
+                prose_stale += 1;
+                eprintln!(
+                    "stale-prose: {rel_path}:{} depends on `{}` -- quote no longer found",
+                    marker.line, marker.target
+                );
+            }
+        }
+    }
+
     diags.sort();
     diags.emit();
     eprintln!("root: {}", corpus.display);
@@ -253,6 +300,7 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
         eprintln!("{unresolved} unresolved of {} node(s)", index_graph.nodes.len());
     }
     eprintln!("{stale} stale of {checked} eval result(s)");
+    eprintln!("{prose_stale} of {prose_checked} prose dependency marker(s) advisory-stale");
     Ok(unresolved == 0 && stale == 0)
 }
 ```

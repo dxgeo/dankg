@@ -196,6 +196,12 @@ Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same
 
 **Rationale:** Decision 11's refusal to mix languages in one concatenated chain is correct and stays unchanged, but it left no way to track staleness across a boundary it cannot cross. `xdeps=` is a second, narrower mechanism for exactly that gap, not a loosening of decision 11.
 
+## Decision 32: Prose dependencies
+
+`<!-- dankg:depends target=... quote="..." -->` pins one quoted claim against another section, checked by whitespace-normalized substring match, never by hash. `dankg check` reports a miss but never fails its exit code on one.
+
+**Rationale:** A section of prose has no execution to re-derive and compare, the way a code block's output does. Hashing a whole section would flag a typo fix as loudly as a meaning change. A substring match on the specific claim a marker pins is a narrower, weaker, but far less noisy signal, and a weak signal that gates a build trains a reader to silence it rather than read it.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -207,6 +213,9 @@ Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same
 - entry :: The file or node named on the command line. Sets the view, never the
   index.
 - block :: A fenced code block carrying a `name` in its info string.
+- prose dependency :: A `dankg:depends` marker (decision 32): a quoted
+  claim pinned against another section, checked by substring, never a
+  graph edge.
 
 # Data model
 
@@ -358,6 +367,7 @@ src/
     run.rs           process spawn, timeout, output capture
     result.rs        hashing, write-back, staleness detection
   tangle.rs          heading -> file placement, tree assembly, build spawn
+  depends.rs         dankg:depends marker: quote-anchored prose staleness
 ```
 
 # Markdown subset
@@ -1193,8 +1203,9 @@ drift self-heals rather than accumulating.
 ## `dankg check`
 
 The CI gate (decision 9's flip side: `eval` never runs anything automatically,
-`check` is what confirms nothing needs to). Two independent checks, both
-reported and both able to fail the exit code on their own:
+`check` is what confirms nothing needs to). Three checks, all reported.
+The first two can fail the exit code on their own; the third never does
+(*Prose dependencies*, below, explains why):
 
 - *Unresolved links*, from the same whole-root index `graph`/`tui` build
   (decision 6: the index is always the whole root, so this needs no
@@ -1209,6 +1220,48 @@ reported and both able to fail the exit code on their own:
   stale on that account alone. A plan error (a dependency renamed or
   removed, a cycle introduced) *is* counted stale, since the result
   can no longer be reproduced from what the file says now.
+- *Advisory-stale prose dependencies*, corpus-wide: see *Prose
+  dependencies*, below.
+
+# Prose dependencies
+
+A code block's staleness has a clean signal: re-hash the source, compare
+it to what last ran (decision 12, `xdeps=`'s own decision 31). Prose has
+no such signal. Two sections can say the same words and mean different
+things, or different words and mean the same thing. Hashing a whole
+section, the way eval's result marker hashes a whole chain, would flag a
+typo fix as loudly as a meaning change. Hashing nothing would flag
+nothing at all.
+
+Decision 32's `<!-- dankg:depends target=... quote="..." -->` picks a
+narrower claim instead of a whole section: the author names the exact
+sentence they are relying on, written under (or near) the section that
+depends on it. `target` is `other.md#heading` or `#heading` for the
+declaring file itself, resolved exactly the way a written link's own
+target is (`graph::resolve::join_normalize`/`dir_of`, shared rather than
+reimplemented, the same reuse `eval::plan`'s cross-file `deps=` already
+gets). `quote` is the claim, whitespace-normalized before comparison so a
+rewrapped paragraph -- a line break moved, no word changed -- never
+counts as drift. `dankg check` asks one question per marker: is `quote`
+still a substring of the target section's current, whitespace-normalized
+text? A missing target (a bad file, a bad heading, a path escaping the
+root) and a quote that no longer appears are both reported by file, line,
+and target, exactly like an unresolved link's own diagnostic.
+
+Unlike an unresolved link or a stale eval result, none of this fails
+`check`'s exit code. A substring match is a much weaker signal than a
+content hash: it is fooled by an edit that changes meaning while leaving
+the exact pinned sentence intact, and it is not fooled by anything that
+does not touch those words, but there is no way to be sure to which side
+of that line a real report will fall. A mechanism that gates a build on a
+signal this weak trains a reader to add `--no-verify`-shaped workarounds,
+or to stop reading its output at all, rather than to treat a report as
+worth a look. `dankg:depends` stays a `dankg check`-reported hint, one a
+reader chooses to act on, not a build gate. Nothing here creates a graph
+node or edge, unlike a written link: rendering a dependency in `dot`,
+`mermaid`, and `html`, and giving it a cache schema of its own, is a
+real, separable feature this decision deliberately leaves for whenever a
+real corpus actually asks for it. See *Open questions*.
 
 # Tangle
 
@@ -2360,6 +2413,19 @@ one enforced only by construction.
   sidecar manifest is written only when `glue` is configured, never
   otherwise, and carries each tangled file's `dankg.tangle.public`
   frontmatter hint, defaulting to `false` with none.
+- Prose dependencies (decision 32): `depends.rs`'s own unit tests cover
+  marker parsing (key order, a required `quote` missing, an unrelated
+  comment), `resolve_target` (same-file, cross-file relative to the
+  declaring file, a path escaping the root), `section_text`'s inclusive
+  1-indexed slicing, and `verify` staying fresh across a rewrapped line
+  break while going stale once the pinned words are actually gone.
+  `tests/depends.rs` drives the real binary against a dedicated fixture
+  corpus (`tests/data/depends-corpus/`, its own root, isolated from the
+  golden-dump corpus) and checks `dankg check`'s wiring end to end: a
+  fresh same-file quote and a fresh cross-file one both stay silent, a
+  stale quote, an unresolvable target, and a target escaping the root
+  are each reported by file, line, and target, the summary line counts
+  every marker once, and none of it fails the exit code.
 
 # Milestones
 
@@ -2472,3 +2538,15 @@ one enforced only by construction.
 - Cross-file tangle, an eval-able-but-not-tangled escape hatch, and
   whether a language with no configured `[tangle.*] command` should still
   get a compile-check: see *Tangle*'s own *Open questions*.
+- Should `dankg:depends` (decision 32) ever become a graph edge -- drawn
+  in `dot`/`mermaid`/`html`, given its own cache schema bump -- rather
+  than a `check`-only report? Deferred on purpose until a real corpus
+  wants to *see* a prose dependency, not just be warned about one. A
+  marker that never resolves would need a placeholder-node treatment
+  much like a dangling link's own (decision 8), which is one more reason
+  this was left for a real need rather than spun up speculatively.
+- Should a marker ever be allowed more than one `quote=`, for a section
+  that leans on several claims from the same target at once? Today a
+  section wanting that writes several markers. Whether that is a real
+  cost or just unwritten sugar has not come up against a real document
+  yet.
