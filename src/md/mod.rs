@@ -165,7 +165,7 @@ pub struct InfoString {
 }
 
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
-pub const KNOWN_ATTRS: &[&str] = &["name", "deps", "xdeps", "timeout", "path"];
+pub const KNOWN_ATTRS: &[&str] = &["name", "deps", "xdeps", "produces", "reads", "timeout", "path"];
 
 impl InfoString {
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -205,6 +205,22 @@ impl InfoString {
 
     pub fn timeout(&self) -> Option<u64> {
         self.get("timeout").and_then(|v| v.parse().ok())
+    }
+
+    /// The artifact this block writes (`produces=file:PATH`, decision 33),
+    /// as the raw `kind:value` string. Interpreting the `file:` prefix is
+    /// `eval::plan::check_file_deps`'s job, not this accessor's: the info
+    /// string only ever hands back what was written, the same way `deps()`
+    /// hands back names rather than resolving them.
+    pub fn produces(&self) -> Option<&str> {
+        self.get("produces")
+    }
+
+    /// The artifact this block reads (`reads=file:PATH`, decision 33).
+    /// Checked against a `deps=`/`xdeps=` target's own `produces=`, never
+    /// resolved on its own.
+    pub fn reads(&self) -> Option<&str> {
+        self.get("reads")
     }
 }
 
@@ -288,6 +304,24 @@ mod tests {
     fn xdeps_is_empty_when_absent() {
         let info = InfoString { lang: Some("sh".into()), ..Default::default() };
         assert!(info.xdeps().is_empty());
+    }
+
+    #[test]
+    fn info_string_produces_and_reads_are_read_raw() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("produces".into(), "file:out.csv".into()), ("reads".into(), "file:in.csv".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.produces(), Some("file:out.csv"));
+        assert_eq!(info.reads(), Some("file:in.csv"));
+    }
+
+    #[test]
+    fn produces_and_reads_are_none_when_absent() {
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert_eq!(info.produces(), None);
+        assert_eq!(info.reads(), None);
     }
 
     #[test]

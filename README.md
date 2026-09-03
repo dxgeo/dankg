@@ -143,6 +143,48 @@ This is enough to write a genuinely multi-file literate program with no
 `import`, `use`, or `mod` at all. DanKG concatenates the whole reachable
 chain into one file before handing it to the interpreter or compiler.
 
+`deps=` never crosses a language: concatenating a shell block ahead of
+a Python target and running the result through one interpreter is far
+more likely a mistake than an intentional pipeline, so it is refused.
+`xdeps=` is the cross-language counterpart, for tracking staleness
+without concatenating:
+
+````markdown
+```sh name=fetch
+curl -o raw.csv https://example.com/data.csv
+```
+
+```python name=summarize xdeps=fetch
+print(open("raw.csv").read().strip())
+```
+````
+
+A target with an `xdeps=` entry always runs alone; `fetch` is never
+pulled into `summarize`'s own process. `dankg check` still verifies
+`fetch`'s own recorded result is fresh before trusting `summarize`'s,
+recursively, exactly the way a same-language `deps=` chain is
+verified. `xdeps=` resolves across files the same way `deps=` does
+(`xdeps=lib.md#helper`).
+
+A writer block can also declare `produces=file:PATH`, and a reader
+`reads=file:PATH`, alongside a `deps=`/`xdeps=` entry naming the other
+block directly:
+
+````markdown
+```sh name=fetch produces=file:raw.csv
+curl -o raw.csv https://example.com/data.csv
+```
+
+```python name=clean deps=fetch reads=file:raw.csv
+print(open("raw.csv").read().strip())
+```
+````
+
+Neither attribute resolves anything on its own: the `deps=`/`xdeps=`
+edge still says which block this is about. `dankg check` just confirms
+the two sides agree on which file that edge is actually about (see
+`check` below).
+
 ### `check` — the CI gate
 
 ```sh
@@ -162,6 +204,14 @@ much weaker signal than a source hash (see architecture.md, *Prose
 dependencies*).
 
 <!-- dankg:depends target=architecture.md#prose-dependencies quote="A substring match is a much weaker signal than a content hash" -->
+
+`check` also gates on `produces=file:PATH`/`reads=file:PATH`: a writer
+block declares the file it writes, a reader declares the file it reads
+and names the writer directly in its own `deps=`/`xdeps=`, and `check`
+fails if the two paths do not agree. Unlike `dankg:depends`, this one
+*does* fail the build: two declared strings disagreeing is a much
+stronger signal than a prose substring match (see architecture.md,
+*File dependencies*).
 
 ### `fmt` — normalize markdown
 

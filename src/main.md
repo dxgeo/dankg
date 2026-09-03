@@ -188,6 +188,14 @@ no longer resolves at all, is reported and counted, never failed on:
 see `depends.md`'s own opening paragraph for why a substring match is
 too weak a signal to gate a build on.
 
+A fourth loop calls `plan::check_file_deps` once, over the same
+`all_blocks` the staleness loop already built. Unlike the third loop,
+this one *does* gate the returned `bool`: a `reads=file:PATH` that
+climbs above the root, or that names no dependency whose own
+`produces=` agrees with it, is two declared strings failing to agree,
+a far stronger signal than a prose substring match (architecture.md,
+*File dependencies*).
+
 ```rust name=check_cmd path=main.rs
 /// `dankg check [<path>...]`: the CI gate. Unresolved links come from the
 /// same whole-root index `graph`/`index` build. Staleness is checked
@@ -204,6 +212,12 @@ too weak a signal to gate a build on.
 /// reported the same way but never gates the returned `bool`. A
 /// substring match is advisory by design (`depends.md`), so it is
 /// counted and printed, not failed on.
+///
+/// A fourth pass, `plan::check_file_deps` over the same `all_blocks`,
+/// *does* gate the returned `bool` (decision 33): unlike a prose
+/// marker's substring match, a `produces=`/`reads=file:PATH` mismatch is
+/// two declared strings failing to agree, a signal strong enough to fail
+/// a build on.
 fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
@@ -293,6 +307,22 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
         }
     }
 
+    // Unlike the prose loop above, a mismatch here does gate the returned
+    // `bool` (decision 33, architecture.md's *File dependencies*): two
+    // declared strings failing to agree is a far stronger signal than a
+    // substring search over prose.
+    let (filedep_checked, filedep_issues) = plan::check_file_deps(&all_blocks);
+    for issue in &filedep_issues {
+        match issue {
+            plan::FileDepIssue::ReadsEscapesRoot { file, line, block, path } => {
+                eprintln!("stale-filedep: {file}:{line} `{block}` reads=file:{path} -- escapes the root");
+            }
+            plan::FileDepIssue::NoMatchingProducer { file, line, block, path } => {
+                eprintln!("stale-filedep: {file}:{line} `{block}` reads=file:{path} -- no dependency produces it");
+            }
+        }
+    }
+
     diags.sort();
     diags.emit();
     eprintln!("root: {}", corpus.display);
@@ -301,7 +331,8 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     }
     eprintln!("{stale} stale of {checked} eval result(s)");
     eprintln!("{prose_stale} of {prose_checked} prose dependency marker(s) advisory-stale");
-    Ok(unresolved == 0 && stale == 0)
+    eprintln!("{} stale of {filedep_checked} file dependency declaration(s)", filedep_issues.len());
+    Ok(unresolved == 0 && stale == 0 && filedep_issues.is_empty())
 }
 ```
 
