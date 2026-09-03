@@ -62,7 +62,9 @@ Placeholder node + stderr warning.
 
 `dankg eval` only; serve mode deferred.
 
-**Rationale:** project.md:34 -- never automatic. Static output stays static.
+**Rationale:** project.md:71 -- never automatic. Static output stays static.
+
+<!-- dankg:depends target=project.md#code-evaluation quote="DanKG never evaluates code automatically." -->
 
 ## Decision 10: Block dependencies
 
@@ -208,6 +210,12 @@ Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same
 
 **Rationale:** `xdeps=name` (decision 31) already verifies a cross-language producer's source hash, but says nothing about which file that block actually writes. Two blocks can each rename their own path independently and drift apart while the named edge still reports fresh. `produces=`/`reads=` catch exactly that drift, and need no database, no execution, and no resolution logic beyond the edge that already exists.
 
+## Decision 34: Title collision check
+
+`dankg check` reports every heading whose title collides with an earlier heading's in the same file. It classifies each as *referenced* (a written link or `dankg:depends` marker already targets one of the pair's two slugs) or *cosmetic* (nothing does). Neither classification fails the exit code. `graph::build::title_collisions` scopes the underlying collision detection to headings. A named, top-level block sharing its own containing heading's title is excluded.
+
+**Rationale:** A colliding heading still gets a distinct slug from `Slugger` (*Slugs and node identity*, below). The file resolves correctly exactly as written. But that slug is order-dependent. Renaming, reordering, or deleting the earlier same-titled heading silently repoints anything already pinned to the later one's suffix. Only a pair something actually references is at real risk of that. Splitting referenced from cosmetic makes the report actionable. The reader no longer has to verify it by hand. A block is excluded for a different reason. It cannot precede the heading that contains it. That particular pair can never actually reorder.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -280,6 +288,8 @@ question by construction, not by convention. Concretely, a block node must sit
 outside a list and carry a name (`name=` present in its info string). An
 unnamed block, or one inside a list item, is invisible to the graph exactly as
 it already is to eval.
+
+<!-- dankg:depends target=#decision-20-block-nodes quote="Node scope == eval scope, exactly (decision 19)." -->
 
 `graph/build.rs` builds a block's node in the same single pass as headings and
 paragraphs. It attaches the node to whichever heading is `current` at that
@@ -455,6 +465,8 @@ The walk covers the whole root, always (decision 6). It yields root-relative
 would leak into the output. Three exclusions are structural rather than
 configured:
 
+<!-- dankg:depends target=#decision-6-index-scope quote="Whole root, always." -->
+
 - Dot-entries are skipped outright, which is what keeps `.dankg/` and `.git/`
   out of the corpus without anyone writing a pattern for them.
 - Symlinks are never followed. They are the one way a walk could leave the
@@ -598,6 +610,8 @@ same embedded index that the server-rendered path reads `Node.kind` from.
 Reciprocated edges render as a single line with no arrowhead. Stale results
 render with a warning badge.
 
+<!-- dankg:depends target=#data-model quote="always true for a block" -->
+
 ## Expansion is a placement, not a second layout
 
 Clicking a node reveals its hidden neighbours from the blob. They are dropped
@@ -653,6 +667,8 @@ existing box-metrics work already speaks the TUI's language: `CHAR_WIDTH` and
 friends are computed in character units so an HTML-expanded box matches the
 layout's sizing. A terminal cell *is* that unit. So rendering the same
 Sugiyama output as text needs no rescaling.
+
+<!-- dankg:depends target=#decision-7-view-scope quote="Entry + 2 hops, expandable in the browser." -->
 
 ## What is new
 
@@ -793,6 +809,8 @@ runs nothing and needs no confirmation, the same as `--format json` being the
 graph's own pipeable, "requested output" surface (decision 13's reasoning
 applied to eval).
 
+<!-- dankg:depends target=#decision-13-cli-shape quote="JSON is a first-class, testable surface from day one." -->
+
 Unlike `--block`/`--all`, scoped to exactly one file because `deps=` only
 resolves within one (decision 19), `--list` has no execution to scope. A
 named file lists just its own blocks. A directory (or several paths, or
@@ -918,7 +936,7 @@ that. `scroll_row`/`scroll_col` move directly instead of following the
 selection, reusing the same fields and the same terminal-clipped
 `draw::window`, just under different control.
 
-## Open questions
+## Open questions (Terminal UI)
 
 - `/`, "jump to a node by title": in the interaction table, but not
   yet wired up. `input.rs` decodes the key. `app.rs` does not bind it.
@@ -1212,9 +1230,11 @@ drift self-heals rather than accumulating.
 ## `dankg check`
 
 The CI gate (decision 9's flip side: `eval` never runs anything automatically,
-`check` is what confirms nothing needs to). Three checks, all reported.
-The first two can fail the exit code on their own; the third never does
-(*Prose dependencies*, below, explains why):
+`check` is what confirms nothing needs to). Five checks, all reported.
+Three can fail the exit code on their own. Two are advisory only
+(*Prose dependencies*, *Title collisions*, both below, explain why):
+
+<!-- dankg:depends target=#decision-9-eval-trigger quote="`dankg eval` only; serve mode deferred." -->
 
 - *Unresolved links*, from the same whole-root index `graph`/`tui` build
   (decision 6: the index is always the whole root, so this needs no
@@ -1231,6 +1251,10 @@ The first two can fail the exit code on their own; the third never does
   can no longer be reproduced from what the file says now.
 - *Advisory-stale prose dependencies*, corpus-wide: see *Prose
   dependencies*, below.
+- *File dependency mismatches*, corpus-wide: see *File dependencies*,
+  below.
+- *Advisory duplicate heading titles*, per file: see *Title
+  collisions*, below.
 
 # Prose dependencies
 
@@ -1307,6 +1331,8 @@ that already exists and is already tested, `tests/parsing.rs`) is
 deliberately not what tangle uses, for the same reason `eval` does not
 use it either.
 
+<!-- dankg:depends target=#decision-23-tangle-block-scope quote="Exactly decision 20's node scope (named, top-level)." -->
+
 A block not written in `--lang`'s language is skipped. A file with no
 blocks in that language tangles to an empty tree, which is reported
 rather than treated as an error, on the same "half a plan is still a
@@ -1346,6 +1372,8 @@ concatenating a disposable, throwaway script, and has nothing to say
 about how a persistent, structured source file should be laid out. A
 block with no `deps` at all tangles exactly the same as one with
 several. Tangle never reads the attribute in the first place.
+
+<!-- dankg:depends target=#decision-24-tangle-placement quote="Heading containment + document order; `deps` not consulted." -->
 
 Corpus-wide (decision 26), each contributing source file's own
 heading placement gets nested under one more directory: its own
@@ -1519,7 +1547,7 @@ check, via `sh -c '... && ...'`, the same quote-aware split `cmd.rs`
 already tests) is what surfaced the `source-root` gap in the first
 place.
 
-## Config
+## Tangle config
 
 ```
 [tangle.rust]
@@ -1566,6 +1594,8 @@ saying it is generated. `fmt`'s "nothing unverified reaches the disk"
 guard has no equivalent here, since the generated tree is not the
 thing being trusted. The markdown that produced it is.
 
+<!-- dankg:depends target=#decision-12-results quote="File stays the source of truth." -->
+
 ## Trigger
 
 Never automatic, the same principle as decision 9: `graph`/`check`
@@ -1580,6 +1610,8 @@ authorizes `eval` to run anything at all. `glue` runs before
 `command`, so a build failure and a glue failure are both reported the
 same way. Tangle already wrote every file either would need. Only
 whichever spawned step comes next can still fail.
+
+<!-- dankg:depends target=#decision-9-eval-trigger quote="never automatic." -->
 
 ## Pilots 3 and 4: visibility, and eval/tangle composed over one corpus
 
@@ -1744,7 +1776,7 @@ flat file with no subdirectory needing `mod` declarations, the same
 reason pilot 1 needed none either. That arrives once a second module
 (one with siblings) converts.
 
-## Open questions
+## Open questions (Tangle)
 
 - Should a named, eval-able block be excludable from tangle
   specifically: a demo or scratch snippet that should stay runnable
@@ -1795,6 +1827,8 @@ to agree is a much stronger signal than a substring search over prose,
 and checking it costs nothing: no filesystem read, no spawned command,
 decision 9 untouched.
 
+<!-- dankg:depends target=#decision-32-prose-dependencies quote="`dankg check` reports a miss but never fails its exit code on one." -->
+
 A block missing `produces=`/`reads=` is unaffected. Neither attribute
 is required the way `name` is required to be targeted at all; both are
 a second, optional layer for a pipeline that wants its file contract
@@ -1803,7 +1837,7 @@ resolution both work exactly as `xdeps=` already does (decision 29's
 lookup, unchanged): `produces=`/`reads=` never invent a second
 resolution path of their own to keep in sync with the first.
 
-## Open questions
+## Open questions (File dependencies)
 
 - Should `produces=`/`reads=` ever be required together, so a block
   naming one without the other is refused rather than silently
@@ -1822,6 +1856,50 @@ resolution path of their own to keep in sync with the first.
   filesystem-reading question left alone on purpose. Stat-and-hash an
   artifact is close enough to executing something that it deserves its
   own decision, not a rider on this one (decision 9).
+
+# Title collisions
+
+Decision 34. Two headings can legally share a title in one file.
+`Slugger::assign` (`graph/slug.rs`) already gives the second one a
+distinct, `-1`-suffixed slug. The file resolves correctly exactly as
+written. That slug is order-dependent, though. Rename the first
+heading, reorder the two, or delete the first one. The suffix shifts to
+whatever same-titled heading now comes first. Anything already pinned
+to the old suffix -- a written link, a `dankg:depends` marker --
+repoints silently, to whatever node the slug now happens to mean.
+
+`graph::build::title_collisions` scopes the check to headings only. A
+named, top-level block can share its own containing heading's title
+too. That is this corpus' own idiom: every module's `## Tests` heading
+wraps a `name=tests` block. This pair is excluded on purpose. A block
+cannot precede the heading that contains it. It can never actually
+reorder. Two independent headings can.
+
+`dankg check` reports every collision, one line per node after the
+first: file, line, title, the slug it actually got, and the slug it
+lost. This is advisory only, the same "weak signal, never a build gate"
+reasoning as a `dankg:depends` marker. The file is not broken. The fix
+is a choice for the author, not something `check` should force.
+
+<!-- dankg:depends target=#decision-32-prose-dependencies quote="`dankg check` reports a miss but never fails its exit code on one." -->
+
+Not every collision carries the same risk, though. Nothing breaks
+until some written link or `dankg:depends` marker actually targets one
+of the pair's two slugs. `dankg check` cross-references both:
+`index_graph`'s own link edges (`Graph::incoming_link_count`) and
+every resolved `dankg:depends` target already collected for the
+prose-dependency pass, above. A collision with a reference prints as a
+live risk. A collision with none prints as cosmetic. It is safe to
+leave for whenever the author gets to it.
+
+## Open questions (Title collisions)
+
+- Every report today is file-scoped, deliberately (see this section's
+  own opening paragraph). A heading nested under a clearly different
+  parent section is less likely to confuse a reader than two *siblings*
+  sharing a title. This holds even before counting references. Whether
+  the report should also distinguish that shape -- sibling versus
+  differently-nested -- is still open.
 
 # Literate database management
 
@@ -1848,6 +1926,8 @@ Decision 1 is unchanged. `duckdb` is spawned exactly like `python` or
 `sh`, configured in the same file, and subject to the same allowlist
 rule: a `sql` block with no configured command is reported and never
 run.
+
+<!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
 
 ```
 # .dankg/config
@@ -1906,6 +1986,8 @@ which block builds it, what that block depends on, and whether the
 stored result is stale, without a connection, credentials, or a schema
 dump. Answering "what breaks if I change `orders`" becomes reading a
 file.
+
+<!-- dankg:depends target=project.md#key-features quote="Agent-compatible" -->
 
 ## Open questions for this milestone
 
@@ -1993,6 +2075,8 @@ the defaults above. A config half-remapped would leave one key doing
 two things with no indication which, so this is the same
 "half-understood is worse than refused" principle as frontmatter and
 section names, not a special case for `[keys]`.
+
+<!-- dankg:depends target=#decision-18-keybindings quote="`[keys]` remaps letters only; arrows fixed." -->
 
 `[editor] command` is the template a future `dankg open <node>` spawns
 to jump to a node's source line, substituting `\{file\}` and `\{line\}`
@@ -2158,6 +2242,8 @@ documents, ignoring source line numbers, the one thing formatting is
 expected to change. If they differ, or if a second pass is not
 byte-identical, the file is left alone and the reason goes to stderr.
 The four spec cases above take this path.
+
+<!-- dankg:depends target=#decision-15-format-safety quote="Re-parse and compare before writing." -->
 
 The guard exists because `fmt` is the only command that writes to a
 user's notes. A conformance regression costs a number in a table. A

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Broken out from the general test run below so a stale
+      # `src/*.rs` (forgotten `dankg tangle` + commit after editing a
+      # literate `.md`) shows up as its own red check, not buried
+      # inside a generic "cargo test failed".
+      - name: Literate freshness (src/*.rs matches its .md source)
+        run: cargo test --test literate
+
+      - name: Test suite
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release
+
+      # `fmt`, unlike `graph`/`check`/`tangle`, never walks a directory --
+      # it takes an explicit file list (see README's own `dankg fmt
+      # notes/*.md` example). The list comes from `dankg graph`'s own
+      # JSON dump rather than a hand-written `find`, so it can never
+      # drift out of sync with .dankgignore's real exclusion rules.
+      - name: Formatting (dankg fmt --check)
+        run: |
+          ./target/release/dankg graph . --format json \
+            | jq -r '[.nodes[].file] | unique[]' \
+            | xargs ./target/release/dankg fmt --check
+
+      # Unresolved links, stale eval results, and file-dependency
+      # mismatches fail the exit code. Prose-dependency and
+      # duplicate-heading-title findings are advisory only and print
+      # here without failing the step -- see architecture.md's *Prose
+      # dependencies* and *Title collisions*.
+      - name: Corpus check (dankg check)
+        run: ./target/release/dankg check .

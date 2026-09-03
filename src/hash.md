@@ -136,8 +136,7 @@ That overwrites `src/hash.rs` in place. No `[tangle.rust] glue`/`command`
 is even configured for `rust` at the repo root yet. Tangle never runs on
 its own regardless (architecture.md,
 *[Trigger](../architecture.md#trigger)*, the same principle as
-[decision 9](../architecture.md#decision-9-eval-trigger)). Run `cargo
-test` yourself afterward to confirm the regenerated tree still builds
+[decision 9](../architecture.md#decision-9-eval-trigger)). Run `cargo test` yourself afterward to confirm the regenerated tree still builds
 before committing it.
 
 **Staleness is a checked property, not an assumption.**

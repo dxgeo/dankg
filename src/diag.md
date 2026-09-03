@@ -5,8 +5,7 @@ through this one type, `Diags`. It is threaded by `&mut` through every
 parser and resolver, rather than living behind a global. This way,
 parsing stays a pure function of its input. A test can assert on exactly
 what a given document produced, with nothing implicit accumulating
-between test runs. `stdout` is reserved for requested output (`--format
-json`, a rendered graph). Everything here goes to stderr instead. This is
+between test runs. `stdout` is reserved for requested output (`--format json`, a rendered graph). Everything here goes to stderr instead. This is
 the split every command in this crate follows.
 
 ```rust name=module_doc path=diag.rs
