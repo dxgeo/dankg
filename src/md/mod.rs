@@ -165,7 +165,8 @@ pub struct InfoString {
 }
 
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
-pub const KNOWN_ATTRS: &[&str] = &["name", "deps", "xdeps", "produces", "reads", "timeout", "path"];
+pub const KNOWN_ATTRS: &[&str] =
+    &["db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path"];
 
 impl InfoString {
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -174,6 +175,13 @@ impl InfoString {
 
     pub fn name(&self) -> Option<&str> {
         self.get("name")
+    }
+
+    /// The `[db.*]` section this block targets (decision 16), if any. A
+    /// block with no `db=` runs through `[lang.*]` exactly as it already
+    /// does; this is the one attribute milestone 9 adds on top.
+    pub fn db(&self) -> Option<&str> {
+        self.get("db")
     }
 
     /// `tangle`'s escape hatch: an explicit output path overriding the

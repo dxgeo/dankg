@@ -1971,9 +1971,15 @@ run.
 ```
 # .dankg/config
 [db.warehouse]
-command = duckdb -csv {db} < {file}
+command = duckdb -csv {db} -f {file}
 path    = data/warehouse.duckdb
 ```
+
+`-f`, not shell redirection: decision 11's own "no PTY, no per-language
+state protocol" already means every command spawns directly, with no
+shell in between to interpret a `<`. `{file}` is always a real path on
+disk (`run`'s own temp file), so `-f {file}` reads it exactly the way
+`sh {file}` already does for a shell block.
 
 A `[db.*]` section names one database. Other engines fit the same shape; DuckDB
 is the first implementation, not a special case in the code.
@@ -2119,7 +2125,7 @@ block's SQL say":
 ```
 # .dankg/config
 [db.warehouse]
-command = duckdb -csv {db} < {file}
+command = duckdb -csv {db} -f {file}
 list    = duckdb -csv {db} -c "select table_name from duckdb_tables() union select view_name from duckdb_views()"
 path    = data/warehouse.duckdb
 ```
@@ -2217,6 +2223,54 @@ hop away. A reader not wanting it yet already has the filter:
 
 <!-- dankg:depends target=#layout quote="Containment edges carry weight 2 and link edges weight 1." -->
 
+## Row count
+
+Decision 39. Every hash `check` already recomputes is a source hash:
+the chain, its resolved template (*Milestones*, above), and now a
+verified `xdeps=`/`table:NAME` reference (decisions 31, 35, 36). None
+of them ever touch a block's own captured output.
+
+<!-- dankg:depends target=#milestones quote="hashes the concatenated chain plus the *template* a language resolved to" -->
+
+A `SELECT`'s own result is nothing but captured output: a markdown
+table, truncated at the same 64 KiB every result already is. Folding
+its row count into the hash would be the first exception to a rule the
+whole mechanism depends on, and the exact one
+[agent_tests/deps_pilot.md](agent_tests/deps_pilot.md) already found
+dangerous: a source can change while its output happens to look the
+same, so trusting output over source risks missing the change that
+mattered while flagging one that never did.
+
+The open bullet framed this as splitting on snapshot versus running
+pipeline. It does not split, once pushed on -- both land on "leave it
+out," for different reasons. A snapshot cannot drift without its own
+SQL re-running, which the source hash already tracks; row count would
+only repeat a signal that exists. A running pipeline's row count
+drifts by definition, independent of source, so no single stale/fresh
+bit can represent it without `check` answering a question it was never
+built to ask: not "did the source that would reproduce this change,"
+but "has the world moved on since."
+
+The real need underneath -- is a captured result still current against
+live data -- is not new. Decision 33's own open questions already
+named the identical shape for a file: whether the file on disk still
+matches what its block last wrote.
+
+<!-- dankg:depends target=#open-questions-file-dependencies quote="Stat-and-hash an artifact is close enough to executing something that it deserves its own decision, not a rider on this one" -->
+
+That was left for `--live` to answer once it existed, not folded into
+`check`'s hash. A `SELECT`'s own currency against live data belongs
+there too (decision 37), if it is ever wanted, rather than reopening
+the source-hash rule for one block kind.
+
+## Open questions (Row count)
+
+- Should `--live` (decision 37) ever extend to re-running a stored
+  `SELECT` and diffing its row count or content against what is on
+  disk, the way it already diffs the catalog for orphans? Not decided
+  here; today's `--live` only lists relations, it does not re-run a
+  block's own query.
+
 ## What this buys an agent
 
 project.md's third key feature is that an LLM can run DanKG because it
@@ -2238,10 +2292,9 @@ file.
   depth*, above) resolves this: entering one is free, leaving one for
   a further block still costs the ordinary hop.
 - Write-back for a `SELECT`: the result block holds the query output
-  as a markdown table, truncated at the same 64 KiB. Whether the row
-  count belongs in the hash, so that new data marks the result stale,
-  is undecided, and the answer differs for a snapshot than for a
-  running pipeline.
+  as a markdown table, truncated at the same 64 KiB. Decision 39 (*Row
+  count*, above) resolves whether it belongs in the hash: never, for
+  either a snapshot or a running pipeline.
 - A `Reads` edge is inferred from a SQL block's own query text. A
   block written in a different language can consume a relation
   without naming it in any parseable SQL. Decision 35

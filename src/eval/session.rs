@@ -108,25 +108,45 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Res
     // runs everything it printed or, on any block with no configured
     // language, runs nothing at all, rather than partially acting on a
     // plan the reader already approved.
-    let mut commands = Vec::with_capacity(chains.len());
+    let mut commands: Vec<String> = Vec::with_capacity(chains.len());
     for chain in &chains {
-        let target_name = chain.last().expect("plan_for/plan_all never return an empty chain").name;
-        match eval_run::command_for(&config, chain) {
-            Some(lang) => commands.push(lang),
-            None => {
-                let lang_name = chain.last().and_then(|b| b.lang).unwrap_or("(none)");
-                return Err(format!(
-                    "`{target_name}` is `{lang_name}`, which has no configured `[lang.{lang_name}] command`; refusing to run anything"
-                ));
+        let target = chain.last().expect("plan_for/plan_all never return an empty chain");
+        // A `db=` target resolves through `[db.*]`, never `[lang.*]`
+        // (decision 16); `check_consistent_db` already guarantees every
+        // block in `chain` agrees on which. `run_one` (below) re-resolves
+        // the same way once it actually runs -- this loop only exists to
+        // fail the whole plan fast, before anything spawns, on the first
+        // unconfigured target.
+        if target.db.is_some() {
+            match eval_run::db_command_for(&config, chain) {
+                Some(db) => commands.push(db.command),
+                None => {
+                    let db_name = target.db.unwrap_or("(none)");
+                    return Err(format!(
+                        "`{}` targets `db={db_name}`, which has no configured `[db.{db_name}] command`; refusing to run anything",
+                        target.name
+                    ));
+                }
+            }
+        } else {
+            match eval_run::command_for(&config, chain) {
+                Some(lang) => commands.push(lang.command),
+                None => {
+                    let lang_name = target.lang.unwrap_or("(none)");
+                    return Err(format!(
+                        "`{}` is `{lang_name}`, which has no configured `[lang.{lang_name}] command`; refusing to run anything",
+                        target.name
+                    ));
+                }
             }
         }
     }
 
     let total: usize = chains.iter().map(Vec::len).sum();
     eprintln!("will run ({total} block(s), in order):");
-    for (chain, lang) in chains.iter().zip(&commands) {
+    for (chain, command) in chains.iter().zip(&commands) {
         for b in chain {
-            eprintln!("  {} [{}] {}:{}   via: {}", b.name, b.lang.unwrap_or("?"), b.file, b.line, lang.command);
+            eprintln!("  {} [{}] {}:{}   via: {}", b.name, b.lang.unwrap_or("?"), b.file, b.line, command);
         }
     }
 
@@ -311,14 +331,30 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
     // an unresolvable `xdeps` target should fail fast, not after paying
     // for a spawn that was going to be thrown away anyway.
     let xdep_hashes = result::xdep_hashes(&files, config, &blocks, &chain, &mut std::collections::HashMap::new())?;
-    let lang = eval_run::command_for(config, &chain)
-        .ok_or_else(|| format!("`{name}` has no configured language"))?;
     let timeout = Duration::from_secs(target.timeout.unwrap_or(eval_run::DEFAULT_TIMEOUT_SECS));
-    let output = eval_run::run(&lang, &eval_run::concatenated_source(&chain), timeout)?;
+    let code = eval_run::concatenated_source(&chain);
+
+    // A `db=` target spawns through `[db.*]`, never `[lang.*]` (decision
+    // 16). The string hashed for staleness folds in the target database's
+    // own name and path, not just its command: two `[db.*]` sections can
+    // share an identical `command=` while pointing at different `path=`s,
+    // and `db.command` alone would not tell those two targets apart.
+    let (output, hash_template) = if target.db.is_some() {
+        let db = eval_run::db_command_for(config, &chain)
+            .ok_or_else(|| format!("`{name}` has no configured database"))?;
+        let output = eval_run::run_db(&db, &code, timeout)?;
+        let template = format!("{} #db={} path={}", db.command, db.name, db.path.as_deref().unwrap_or(""));
+        (output, template)
+    } else {
+        let lang = eval_run::command_for(config, &chain)
+            .ok_or_else(|| format!("`{name}` has no configured language"))?;
+        let output = eval_run::run(&lang, &code, timeout)?;
+        (output, lang.command)
+    };
 
     if !no_write {
         let (source, doc) = files.get(&entry_file).expect("entry_file was just discovered above");
-        let result_hash = result::expected_hash(&chain, &lang.command, &xdep_hashes);
+        let result_hash = result::expected_hash(&chain, &hash_template, &xdep_hashes);
         let existing = result::locate_existing(doc, target.index, name);
         let updated =
             result::write_back(source, target.end_line, existing, name, result_hash, !output.success, &output.stdout);
@@ -434,6 +470,31 @@ mod tests {
         let written = fs::read_to_string(&path).unwrap();
         assert!(written.contains("dankg:result name=a"), "{written:?}");
         assert!(written.contains("hi\n"), "{written:?}");
+    }
+
+    #[test]
+    fn run_one_runs_a_db_targeted_block_against_real_duckdb() {
+        // Real `duckdb` binary -- nothing mocked, mirroring `run_one_
+        // writes_the_result_back_to_disk`'s own shape above. `:memory:`
+        // proves `{db}` substitution works with no file left behind.
+        let path = scratch_file(
+            "dbtest.md",
+            "```sql db=t name=a\nCREATE TABLE x AS SELECT 1 AS n;\nSELECT * FROM x;\n```\n",
+        );
+        let config = Config::parse("[db.t]\ncommand = duckdb -csv {db} -f {file}\npath = :memory:\n", &mut Diags::new("t"));
+        let summary = run_one(path.to_str().unwrap(), &config, 0, false).unwrap();
+        assert!(summary.success, "stderr: {}", summary.stderr);
+        assert_eq!(summary.stdout, "n\n1\n");
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("dankg:result name=a"), "{written:?}");
+    }
+
+    #[test]
+    fn run_one_reports_an_unconfigured_database() {
+        let path = scratch_file("dbtest2.md", "```sql db=missing name=a\nselect 1;\n```\n");
+        let config = Config::none();
+        let err = run_one(path.to_str().unwrap(), &config, 0, false).unwrap_err();
+        assert!(err.contains("no configured database"), "{err:?}");
     }
 
     #[test]
