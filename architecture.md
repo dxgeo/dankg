@@ -2004,18 +2004,32 @@ The point of this milestone is the edges, not the execution.
 
 DanKG runs the block's own `[db.*]`'s configured `list` command
 (decision 37) before the block runs and again afterwards, and diffs
-the two. Relations that appeared or changed are the block's outputs.
-Relations the block's SQL names but did not create are its inputs.
-Both readings come from the same plain, protocol-agnostic listing
-`--live` also uses. DuckDB is the first engine this gets tested
-against, not an assumption the diff itself makes: no bindings, no
-catalog format to track, just `list`'s own contract of one identifier
-per line, however it was produced.
+the two. A name newly present in the second snapshot is the block's
+own output. Neither snapshot alone is enough, though. A bare name diff
+only ever catches a relation appearing. It cannot catch one an
+existing `UPDATE`, `INSERT`, or `CREATE OR REPLACE` changed in place,
+since the name already existed before the block ran. The block's own
+SQL text has the opposite gap: it can name a write or a read, but it
+cannot tell a real relation from a query-local alias or a typo.
+`eval::sql` scans the block's own text for both. A name it reports
+only counts once one of the two snapshots confirms the relation
+actually exists. Both the snapshots and the scan read the same plain,
+protocol-agnostic listing `--live` also uses. DuckDB is the first
+engine this gets tested against, not an assumption the diff itself
+makes: no bindings, no catalog format to track, just `list`'s own
+contract of one identifier per line, however it was produced.
 
 <!-- dankg:depends target=#decision-37-live-catalog-opt-in-only quote="reading its stdout as one relation identifier per line" -->
 
-Each relation becomes a node with id `<db>::<schema>.<table>`, and two new edge
-kinds join `Contains` and `Link`:
+Each relation becomes a node in a synthetic `db:NAME` namespace, never
+a real file: `NodeId` already means "the namespace `slug` is unique
+within" for every other node kind, and a relation reuses that same
+meaning rather than a second identity scheme, since it belongs to a
+database, not to whichever file's block happened to name it first.
+
+<!-- dankg:depends target=#slugs-and-node-identity quote="`NodeId` is `<file path relative to root, extension stripped>#<slug>`." -->
+
+Two new edge kinds join `Contains` and `Link`:
 
 ```rust
 enum EdgeKind { Contains, Link, Produces, Reads }
@@ -2036,7 +2050,7 @@ but did not create. A block written in another language has no query
 for DanKG to read, so it has no way to declare a `Reads` dependency at
 all today.
 
-<!-- dankg:depends target=#provenance-without-a-driver quote="Relations the block's SQL names but did not create are its inputs." -->
+<!-- dankg:depends target=#provenance-without-a-driver quote="`eval::sql` scans the block's own text for both." -->
 
 `xdeps=table:NAME` closes that gap by naming the relation, not the
 block that writes it. Resolution walks the whole corpus's own
@@ -2941,7 +2955,24 @@ one enforced only by construction.
 9. Literate database management, over DuckDB. Depends on 8: it is the same
    plan-run-write-back machinery pointed at a database instead of a process.
    Decision 33's `produces=`/`reads=file:PATH` ships first, as the
-   database-free half of the same gap: see *File dependencies*.
+   database-free half of the same gap: see *File dependencies*. Partly
+   built. `db=` blocks resolve and spawn through `[db.*]` (decision 16,
+   `eval::run::db_command_for`/`run_db`). *Provenance without a driver*'s
+   own snapshot-diff-plus-SQL-scan inference ships, writing `produces=`/
+   `reads=` back onto the result marker (decisions 35-36), which
+   `graph::build` reads into real `Produces`/`Reads` edges and relation
+   nodes. `xdeps=table:NAME` resolves against those edges corpus-wide
+   (`graph::query::find_producer`) and verifies a relation's producing
+   block recursively, the same way a named `xdeps=` already does. Two
+   real bugs turned up building this, both fixed: the milestone's own
+   `duckdb -csv {db} < {file}` example assumed shell redirection that
+   never existed (decision 11's own "no shell" design; `-f {file}` is
+   what actually works), and `dankg check`'s staleness loop, along with
+   `verified_hash` itself, computed a db-targeted chain's hash against
+   the wrong template twice over -- both now call one shared
+   `eval::result::hash_template_for` so they cannot drift apart again.
+   `--live` (decision 37) and relation depth cost (decision 38) are not
+   implemented yet.
 10. `dankg serve`, deferred, opt-in, only if the static path proves insufficient.
 11. \[DONE\] `dankg tangle` (`src/tangle.rs`). Block scope reuses
     `eval::plan::top_level_blocks` exactly (decision 23), independent
