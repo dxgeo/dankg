@@ -222,6 +222,12 @@ Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same
 
 **Rationale:** A `Reads` edge is inferred only from a SQL block's own query text. A block written in another language has no parseable SQL for DanKG to check, so it has no way to declare that dependency today. `Produces` is inferred from a database snapshot diff, not authored, so a fixed block name would go stale the moment a different block started producing the relation. Naming the relation instead keeps the binding live.
 
+## Decision 36: Inferred relation staleness
+
+A SQL block's inferred `Reads` edges are written back with its result, one resolved `table:NAME` per relation the block's own query names but did not create, exactly as if the block had declared `xdeps=table:NAME` itself. `dankg check` verifies each the same way decision 35 already verifies a declared one: recursively, against the producing block's own hash, refusing on a missing or ambiguous producer.
+
+**Rationale:** An edge recorded only for `dankg graph`'s picture of lineage never feeds `check`, so a downstream block can drift stale against its real upstream table with nothing to notice. Recording an inferred `Reads` edge in the same `table:NAME` form decision 35 already resolves and verifies means an inferred dependency costs no second mechanism. Hashing the relation's own content instead was considered and rejected: a source can change while its output happens to look the same, the exact coincidence [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md) found dangerous.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -2029,6 +2035,43 @@ decision 31 already holds `xdeps=name` to.
   refusing and asking the author to rename is good enough, has not come
   up against a real corpus yet.
 
+## Inferred relation staleness
+
+Decision 36. Decision 35 gave `table:NAME` a verified-reference
+staleness check for the one case a reader writes by hand. An ordinary
+SQL block's own `Reads` edges never go through that hand-written form.
+They come from diffing the catalog after the block already ran, not
+before,
+
+<!-- dankg:depends target=#provenance-without-a-driver quote="before a block runs and again afterwards, and diffs the two" -->
+
+which means `check` -- which never executes anything -- cannot
+discover them on its own. Only a run of `eval` can.
+
+<!-- dankg:depends target=#dankg-check quote="`check` is what confirms nothing needs to" -->
+
+The fix writes the discovery back rather than asking `check` to find
+something that does not exist yet. `dankg eval` already writes a
+block's result into its source, hash-tagged (decision 12); this adds
+one `table:NAME` per discovered `Reads` relation to that same
+written-back record, indistinguishable afterward from one an author
+typed by hand. A later `dankg check` reads it and walks decision 35's
+own resolution and verification exactly as written: one relation, one
+producing block, refuse on zero or more than one.
+
+<!-- dankg:depends target=#decision-35-relation-targeted-dependency quote="its staleness hash folded in by verified reference to the producing block's own hash" -->
+
+A block's first run has no prior record to compare and nothing to
+refuse. It writes the discovery once, the same way any first run
+writes a fresh hash with no staleness yet to check against.
+
+## Open questions (Inferred relation staleness)
+
+- A block's own set of relations it reads can change between runs -- a
+  query rewritten to join a new table, or to drop one. Whether `check`
+  should flag *that* drift on its own, separately from a stale hash on
+  an unchanged relation set, is open.
+
 ## What this buys an agent
 
 project.md's third key feature is that an LLM can run DanKG because it
@@ -2061,17 +2104,9 @@ file.
   (*Relation-targeted dependency*, above) resolves this:
   `xdeps=table:NAME` names the relation instead of a block.
 - Do `Produces`/`Reads` edges feed `dankg check`'s staleness hash, or
-  only `dankg graph`'s picture of lineage? An edge that never
-  invalidates anything downstream still explains where a table came
-  from. It does not solve staleness across it. If it should
-  invalidate, a downstream block would need to fold in the producing
-  block's own hash, not the relation's current content. Hashing
-  content instead of source reopens the exact coincidence
-  [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md) found
-  dangerous: a source can change while its output happens to look the
-  same. Concatenation cannot cross the language boundary that made
-  this milestone necessary in the first place, so the producing
-  block's own hash is the only honest source for this one.
+  only `dankg graph`'s picture of lineage? Decision 36 (*Inferred
+  relation staleness*, above) resolves this: an inferred `Reads` edge
+  writes back and verifies exactly like a declared `table:NAME` one.
 - This milestone only covers a database's own relations. The plain-file
   half of this gap -- a shell stage handing a file to a Python stage,
   the exact case
