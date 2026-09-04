@@ -240,6 +240,12 @@ An edge landing on a relation node -- either direction of `Produces`/`Reads` -- 
 
 **Rationale:** Containment already costs a hop (*View selection*, above), and that is flagged there as a problem, not a model to repeat here. A relation reads more like an attribute of the block that produces or reads it than like a fifth heading a reader had to click through to reach -- "a table one hop from its ETL is not really a hop." Zero-cost entry only, though: if leaving a relation were free too, every block that ever touched it would collapse to zero distance from every other, and `--depth` would stop bounding anything once a corpus had one widely-shared table. Lineage stays exactly the traversal *Provenance without a driver* already promises, just one that never double-charges for stopping to look at the table itself. One real hop still buys every other block touching the same relation, sibling producer or downstream reader alike, once a reader spends it. That is not a leak to guard against. A shared table's other writers are exactly the kind of structure the induced-subgraph rule already refuses to hide once it is one hop away, and `--depth 0` is the reader's own filter for not wanting it yet.
 
+## Decision 39: Row count stays out of the hash
+
+A `SELECT` result's row count, or any other captured output, never enters the staleness hash. `dankg check` still only recomputes source: the concatenated chain, its resolved template, and any `xdeps=`/`table:NAME` it verifies (decisions 31, 35, 36). Whether a captured result still matches live data is a different question, answered by `--live` (decision 37), not by `check`.
+
+**Rationale:** Every hash `dankg` computes is a source hash, never a content hash -- the direct lesson of [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md): a source can change while its output happens to look the same, so hashing output instead risks silence on exactly the change that matters. A snapshot's row count adds nothing a source hash does not already cover, since nothing changes it without the SQL re-running. A running pipeline's row count drifts independent of source by definition, so no hash bit can represent it as a single stale/fresh signal without answering a question `check` was never built to ask. The two cases do not actually disagree; they fail for different reasons and land on the same answer.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
