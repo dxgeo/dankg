@@ -85,8 +85,24 @@ all, rather than stopping dead at the first one.
 pub fn recorded_hash(doc: &Document, index: usize, name: &str) -> Option<u64> {
     locate_existing(doc, index, name)?;
     let Block::Passthrough { text, .. } = doc.blocks.get(index + 1)? else { return None };
-    let (_, hash, _) = parse_marker(text.lines().next()?)?;
+    let (_, hash, _, _, _) = parse_marker(text.lines().next()?)?;
     Some(hash)
+}
+
+/// A block's own `produces=`/`reads=` fields, read straight from its
+/// `<!-- dankg:result -->` marker (decision 36). `graph::build`'s only
+/// use for this: neither `check` nor `expected_hash` needs it, since
+/// captured output never enters the hash (decision 39). Empty, never
+/// `None`, when there is no marker yet or it names neither -- the graph
+/// builder wants "nothing to add," not a case to unwrap.
+pub fn recorded_provenance(doc: &Document, index: usize, name: &str) -> (Vec<String>, Vec<String>) {
+    (|| {
+        locate_existing(doc, index, name)?;
+        let Block::Passthrough { text, .. } = doc.blocks.get(index + 1)? else { return None };
+        let (_, _, _, produces, reads) = parse_marker(text.lines().next()?)?;
+        Some((produces, reads))
+    })()
+    .unwrap_or_default()
 }
 
 /// Every `xdeps=` entry declared by *any* block in `chain`, resolved and
@@ -196,23 +212,40 @@ pub fn xdep_hashes(
 /// output and marks the result failed"), just flagged rather than
 /// dropped. This way a reader sees what actually happened last time,
 /// without `dankg eval` silently discarding a run that went wrong.
-pub fn render_marker(name: &str, result_hash: u64, failed: bool) -> String {
+/// `produces`/`reads` (decision 36) are each a comma-separated list of
+/// relation identifiers, omitted entirely when empty -- the same
+/// optionality `failed` already has. Neither is part of `expected_hash`'s
+/// own inputs (decision 39: captured output never enters the hash); they
+/// are metadata about what a `db=` block's run discovered, not source.
+pub fn render_marker(name: &str, result_hash: u64, failed: bool, produces: &[String], reads: &[String]) -> String {
     let flag = if failed { " failed" } else { "" };
-    format!("<!-- dankg:result name={name} hash={}{flag} -->", hash::hex(result_hash))
+    let mut out = format!("<!-- dankg:result name={name} hash={}", hash::hex(result_hash));
+    if !produces.is_empty() {
+        out.push_str(&format!(" produces={}", produces.join(",")));
+    }
+    if !reads.is_empty() {
+        out.push_str(&format!(" reads={}", reads.join(",")));
+    }
+    out.push_str(flag);
+    out.push_str(" -->");
+    out
 }
 
 /// The inverse of [`render_marker`]. It tolerates the exact spacing a
 /// hand edit might introduce, but not a comment that merely happens to
 /// start the same way. `key=value` order is not fixed, but `name` and
 /// `hash` must both be present, matching how `md/block.rs` reads a
-/// fence's own info string.
-pub fn parse_marker(line: &str) -> Option<(String, u64, bool)> {
+/// fence's own info string. Returns `(name, hash, failed, produces, reads)`;
+/// the last two are empty when the marker carries neither.
+pub fn parse_marker(line: &str) -> Option<(String, u64, bool, Vec<String>, Vec<String>)> {
     let inner = line.trim().strip_prefix("<!--")?.strip_suffix("-->")?.trim();
     let inner = inner.strip_prefix("dankg:result")?.trim();
 
     let mut name = None;
     let mut result_hash = None;
     let mut failed = false;
+    let mut produces = Vec::new();
+    let mut reads = Vec::new();
     for word in inner.split_whitespace() {
         if word == "failed" {
             failed = true;
@@ -222,10 +255,12 @@ pub fn parse_marker(line: &str) -> Option<(String, u64, bool)> {
         match k {
             "name" => name = Some(v.to_string()),
             "hash" => result_hash = hash::parse_hex(v),
+            "produces" => produces = v.split(',').map(str::to_string).collect(),
+            "reads" => reads = v.split(',').map(str::to_string).collect(),
             _ => {}
         }
     }
-    Some((name?, result_hash?, failed))
+    Some((name?, result_hash?, failed, produces, reads))
 }
 ```
 
@@ -247,7 +282,7 @@ pub fn locate_existing(doc: &Document, code_index: usize, name: &str) -> Option<
     if lines.next().is_some() {
         return None;
     }
-    let (marker_name, _, _) = parse_marker(first)?;
+    let (marker_name, _, _, _, _) = parse_marker(first)?;
     if marker_name != name {
         return None;
     }
@@ -275,6 +310,8 @@ pub fn write_back(
     name: &str,
     result_hash: u64,
     failed: bool,
+    produces: &[String],
+    reads: &[String],
     output: &str,
 ) -> String {
     let had_trailing_newline = source.ends_with('\n');
@@ -283,8 +320,12 @@ pub fn write_back(
         lines.pop(); // drop the phantom empty element `split` leaves after a trailing `\n`
     }
 
-    let mut insert: Vec<String> =
-        vec![String::new(), render_marker(name, result_hash, failed), String::new(), "```".to_string()];
+    let mut insert: Vec<String> = vec![
+        String::new(),
+        render_marker(name, result_hash, failed, produces, reads),
+        String::new(),
+        "```".to_string(),
+    ];
     insert.extend(output.lines().map(str::to_string));
     insert.push("```".to_string());
 
@@ -496,20 +537,48 @@ mod tests {
 
     #[test]
     fn marker_round_trips() {
-        let m = render_marker("index", 0xa3f9c1, false);
-        assert_eq!(parse_marker(&m), Some(("index".to_string(), 0xa3f9c1, false)));
+        let m = render_marker("index", 0xa3f9c1, false, &[], &[]);
+        assert_eq!(parse_marker(&m), Some(("index".to_string(), 0xa3f9c1, false, vec![], vec![])));
     }
 
     #[test]
     fn a_failed_marker_round_trips_with_the_flag_set() {
-        let m = render_marker("index", 0xa3f9c1, true);
-        assert_eq!(parse_marker(&m), Some(("index".to_string(), 0xa3f9c1, true)));
+        let m = render_marker("index", 0xa3f9c1, true, &[], &[]);
+        assert_eq!(parse_marker(&m), Some(("index".to_string(), 0xa3f9c1, true, vec![], vec![])));
     }
 
     #[test]
     fn marker_parses_regardless_of_key_order() {
         let m = "<!-- dankg:result hash=1 name=foo -->";
-        assert_eq!(parse_marker(m), Some(("foo".to_string(), 1, false)));
+        assert_eq!(parse_marker(m), Some(("foo".to_string(), 1, false, vec![], vec![])));
+    }
+
+    #[test]
+    fn a_marker_with_produces_and_reads_round_trips() {
+        let m = render_marker(
+            "orders",
+            0xa3f9c1,
+            false,
+            &["orders".to_string()],
+            &["staging".to_string(), "customers".to_string()],
+        );
+        assert_eq!(
+            parse_marker(&m),
+            Some((
+                "orders".to_string(),
+                0xa3f9c1,
+                false,
+                vec!["orders".to_string()],
+                vec!["staging".to_string(), "customers".to_string()],
+            ))
+        );
+    }
+
+    #[test]
+    fn produces_and_reads_are_absent_from_the_marker_when_empty() {
+        let m = render_marker("index", 0xa3f9c1, false, &[], &[]);
+        assert!(!m.contains("produces="), "{m:?}");
+        assert!(!m.contains("reads="), "{m:?}");
     }
 
     #[test]
@@ -542,21 +611,21 @@ mod tests {
     #[test]
     fn write_back_inserts_after_a_block_with_nothing_following() {
         let src = "```sh name=a\necho hi\n```\n";
-        let got = write_back(src, 3, None, "a", 1, false, "hi\n");
+        let got = write_back(src, 3, None, "a", 1, false, &[], &[], "hi\n");
         assert_eq!(got, "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n");
     }
 
     #[test]
     fn write_back_marks_a_failed_run() {
         let src = "```sh name=a\nfalse\n```\n";
-        let got = write_back(src, 3, None, "a", 1, true, "");
+        let got = write_back(src, 3, None, "a", 1, true, &[], &[], "");
         assert!(got.contains("hash=0000000000000001 failed -->"), "{got:?}");
     }
 
     #[test]
     fn write_back_preserves_a_missing_trailing_newline() {
         let src = "```sh name=a\necho hi\n```"; // no trailing newline
-        let got = write_back(src, 3, None, "a", 1, false, "hi\n");
+        let got = write_back(src, 3, None, "a", 1, false, &[], &[], "hi\n");
         assert!(!got.ends_with('\n'));
         assert!(got.ends_with("```"));
     }
@@ -564,7 +633,7 @@ mod tests {
     #[test]
     fn write_back_does_not_disturb_content_that_follows() {
         let src = "```sh name=a\necho hi\n```\n\n# Next\n";
-        let got = write_back(src, 3, None, "a", 1, false, "hi\n");
+        let got = write_back(src, 3, None, "a", 1, false, &[], &[], "hi\n");
         assert!(got.ends_with("\n\n# Next\n"), "{got:?}");
     }
 
@@ -573,7 +642,7 @@ mod tests {
         let src = "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nold\n```\n\n# Next\n";
         let d = doc(src);
         let existing = locate_existing(&d, 0, "a").unwrap();
-        let got = write_back(src, 3, Some(existing), "a", 2, false, "new\n");
+        let got = write_back(src, 3, Some(existing), "a", 2, false, &[], &[], "new\n");
         assert_eq!(
             got,
             "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000002 -->\n\n```\nnew\n```\n\n# Next\n"
@@ -585,13 +654,13 @@ mod tests {
         let src = "```sh name=a\necho hi\n```\n\n\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n\n```\nold\n```\n";
         let d = doc(src);
         let existing = locate_existing(&d, 0, "a").unwrap();
-        let got = write_back(src, 3, Some(existing), "a", 1, false, "old\n");
+        let got = write_back(src, 3, Some(existing), "a", 1, false, &[], &[], "old\n");
         assert_eq!(got, "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nold\n```\n");
     }
 
     #[test]
     fn write_back_handles_multi_line_output() {
-        let got = write_back("```sh name=a\n:\n```\n", 3, None, "a", 1, false, "one\ntwo\nthree\n");
+        let got = write_back("```sh name=a\n:\n```\n", 3, None, "a", 1, false, &[], &[], "one\ntwo\nthree\n");
         assert!(got.contains("```\none\ntwo\nthree\n```\n"), "{got:?}");
     }
 }

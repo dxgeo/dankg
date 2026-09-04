@@ -21,6 +21,7 @@ use super::files::Files;
 use super::plan::{self, BlockRef};
 use super::result;
 use super::run as eval_run;
+use super::sql;
 use crate::config::Config;
 use crate::diag::Diags;
 use crate::graph::index::{self, Corpus};
@@ -384,29 +385,79 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
     // own name and path, not just its command: two `[db.*]` sections can
     // share an identical `command=` while pointing at different `path=`s,
     // and `db.command` alone would not tell those two targets apart.
-    let (output, hash_template) = if target.db.is_some() {
+    let (output, hash_template, produces, reads) = if target.db.is_some() {
         let db = eval_run::db_command_for(config, &chain)
             .ok_or_else(|| format!("`{name}` has no configured database"))?;
+        // *Provenance without a driver*: a snapshot before and after the
+        // run, diffed, cross-validated against the SQL's own write/read
+        // targets (`eval::sql`). Neither signal alone is trustworthy --
+        // see `infer_provenance`'s own doc comment.
+        let before = eval_run::list_relations(&db, timeout)?;
         let output = eval_run::run_db(&db, &code, timeout)?;
+        let after = eval_run::list_relations(&db, timeout)?;
+        let (produces, reads) = infer_provenance(before, after, &code);
         let template = format!("{} #db={} path={}", db.command, db.name, db.path.as_deref().unwrap_or(""));
-        (output, template)
+        (output, template, produces, reads)
     } else {
         let lang = eval_run::command_for(config, &chain)
             .ok_or_else(|| format!("`{name}` has no configured language"))?;
         let output = eval_run::run(&lang, &code, timeout)?;
-        (output, lang.command)
+        (output, lang.command, Vec::new(), Vec::new())
     };
 
     if !no_write {
         let (source, doc) = files.get(&entry_file).expect("entry_file was just discovered above");
         let result_hash = result::expected_hash(&chain, &hash_template, &xdep_hashes);
         let existing = result::locate_existing(doc, target.index, name);
-        let updated =
-            result::write_back(source, target.end_line, existing, name, result_hash, !output.success, &output.stdout);
+        let updated = result::write_back(
+            source,
+            target.end_line,
+            existing,
+            name,
+            result_hash,
+            !output.success,
+            &produces,
+            &reads,
+            &output.stdout,
+        );
         fs::write(path, &updated).map_err(|e| format!("{path}: {e}"))?;
     }
 
     Ok(RunSummary { stdout: output.stdout, stderr: output.stderr, success: output.success, timed_out: output.timed_out })
+}
+
+/// Cross-validates `sql`'s own write/read targets (`eval::sql::writes`/
+/// `reads`) against a `list` snapshot taken before and after the block
+/// ran. Neither signal alone is trustworthy: SQL text alone cannot tell a
+/// real relation from a query-local alias or a typo (`eval::sql`'s own
+/// doc comment); a bare name diff alone can only ever detect a newly
+/// appeared relation, never one an existing `UPDATE`/`INSERT`/`CREATE OR
+/// REPLACE` changed in place. `None` for either snapshot (no `list`
+/// configured) means nothing is confirmed to exist at all, so nothing is
+/// asserted -- guessing from SQL text with no way to verify it would be
+/// the exact coincidence `agent_tests/deps_pilot.md` already found
+/// dangerous, just one hop earlier. Both returned lists are sorted, so
+/// write-back is stable across runs that discover the same relations.
+fn infer_provenance(before: Option<Vec<String>>, after: Option<Vec<String>>, sql_text: &str) -> (Vec<String>, Vec<String>) {
+    use std::collections::HashSet;
+    let (Some(before), Some(after)) = (before, after) else { return (Vec::new(), Vec::new()) };
+    let known: HashSet<&str> = before.iter().chain(after.iter()).map(String::as_str).collect();
+    let before_set: HashSet<&str> = before.iter().map(String::as_str).collect();
+
+    let mut produces: HashSet<String> = after.iter().filter(|n| !before_set.contains(n.as_str())).cloned().collect();
+    produces.extend(sql::writes(sql_text).into_iter().filter(|n| known.contains(n)).map(String::from));
+
+    let reads: HashSet<String> = sql::reads(sql_text)
+        .into_iter()
+        .filter(|n| known.contains(n) && !produces.contains(*n))
+        .map(String::from)
+        .collect();
+
+    let mut produces: Vec<String> = produces.into_iter().collect();
+    let mut reads: Vec<String> = reads.into_iter().collect();
+    produces.sort();
+    reads.sort();
+    (produces, reads)
 }
 
 fn confirm() -> Result<bool, String> {
@@ -536,6 +587,89 @@ mod tests {
         assert_eq!(summary.stdout, "n\n1\n");
         let written = fs::read_to_string(&path).unwrap();
         assert!(written.contains("dankg:result name=a"), "{written:?}");
+    }
+
+    #[test]
+    fn run_one_infers_and_writes_back_produces_for_a_new_table() {
+        // Needs a real file-backed database, not `:memory:`: `list_
+        // relations` runs before and after the block in two separate
+        // process spawns, and `:memory:` starts fresh every time, so
+        // neither would ever see what the other wrote.
+        let db_path = std::env::temp_dir().join(format!("dankg-session-test-{}-provenance.duckdb", std::process::id()));
+        let _ = fs::remove_file(&db_path);
+        let path = scratch_file("provenance.md", "```sql db=t name=a\nCREATE TABLE orders AS SELECT 1 AS n;\n```\n");
+        let config = Config::parse(
+            &format!(
+                "[db.t]\ncommand = duckdb -csv {{db}} -f {{file}}\nlist = duckdb -csv {{db}} -c \"select table_name from duckdb_tables()\"\npath = {}\n",
+                db_path.to_string_lossy()
+            ),
+            &mut Diags::new("t"),
+        );
+        let summary = run_one(path.to_str().unwrap(), &config, 0, false).unwrap();
+        let _ = fs::remove_file(&db_path);
+        assert!(summary.success, "stderr: {}", summary.stderr);
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("produces=orders"), "{written:?}");
+    }
+
+    #[test]
+    fn run_one_infers_and_writes_back_reads_for_an_existing_table() {
+        let db_path = std::env::temp_dir().join(format!("dankg-session-test-{}-reads.duckdb", std::process::id()));
+        let _ = fs::remove_file(&db_path);
+        let path = scratch_file(
+            "reads.md",
+            "```sql db=t name=setup\nCREATE TABLE orders AS SELECT 1 AS n;\n```\n\n```sql db=t name=report\nSELECT * FROM orders;\n```\n",
+        );
+        let config = Config::parse(
+            &format!(
+                "[db.t]\ncommand = duckdb -csv {{db}} -f {{file}}\nlist = duckdb -csv {{db}} -c \"select table_name from duckdb_tables()\"\npath = {}\n",
+                db_path.to_string_lossy()
+            ),
+            &mut Diags::new("t"),
+        );
+        run_one(path.to_str().unwrap(), &config, 0, false).unwrap();
+        let summary = run_one(path.to_str().unwrap(), &config, 1, false).unwrap();
+        let _ = fs::remove_file(&db_path);
+        assert!(summary.success, "stderr: {}", summary.stderr);
+        let written = fs::read_to_string(&path).unwrap();
+        let report_marker = written.lines().find(|l| l.contains("dankg:result") && l.contains("name=report")).unwrap();
+        assert!(report_marker.contains("reads=orders"), "{report_marker:?}");
+        assert!(!report_marker.contains("produces="), "{report_marker:?}");
+    }
+
+    #[test]
+    fn infer_provenance_is_empty_with_no_list_configured() {
+        assert_eq!(infer_provenance(None, None, "CREATE TABLE orders AS SELECT 1;"), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn infer_provenance_finds_an_appeared_relation_even_with_no_matching_sql() {
+        // The snapshot diff alone is enough for a newly appeared name,
+        // regardless of what the SQL scanner itself finds.
+        let before = vec!["a".to_string()];
+        let after = vec!["a".to_string(), "b".to_string()];
+        let (produces, reads) = infer_provenance(Some(before), Some(after), "SELECT 1;");
+        assert_eq!(produces, vec!["b".to_string()]);
+        assert_eq!(reads, Vec::<String>::new());
+    }
+
+    #[test]
+    fn infer_provenance_rejects_a_write_target_that_does_not_exist_in_either_snapshot() {
+        // A typo (`UPDATE ordrs`) never appears in a real snapshot, so it
+        // is filtered out rather than asserted as a relation that exists.
+        let snap = vec!["orders".to_string()];
+        let (produces, _) = infer_provenance(Some(snap.clone()), Some(snap), "UPDATE ordrs SET n = 1;");
+        assert!(produces.is_empty(), "{produces:?}");
+    }
+
+    #[test]
+    fn infer_provenance_reads_never_includes_a_produced_relation() {
+        let before = vec!["orders".to_string()];
+        let after = vec!["orders".to_string(), "summary".to_string()];
+        let (produces, reads) =
+            infer_provenance(Some(before), Some(after), "CREATE TABLE summary AS SELECT * FROM orders;");
+        assert_eq!(produces, vec!["summary".to_string()]);
+        assert_eq!(reads, vec!["orders".to_string()]);
     }
 
     #[test]

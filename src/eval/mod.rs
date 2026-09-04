@@ -12,11 +12,14 @@
 //! - `session` the interactive `dankg eval` flow (plan, confirm, evaluate,
 //!   write back) and `run_one`, shared with `tui::eval`'s in-grid
 //!   cycle-and-run.
+//! - `sql`     a hand-rolled scanner for what a `db=` block's own SQL
+//!   writes to and reads from (decision: *Provenance without a driver*).
 
 pub mod files;
 pub mod plan;
 pub mod result;
 pub mod run;
 pub mod session;
+pub mod sql;
 
 pub use session::EvalTarget;
