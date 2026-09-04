@@ -216,6 +216,12 @@ Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same
 
 **Rationale:** A colliding heading still gets a distinct slug from `Slugger` (*Slugs and node identity*, below). The file resolves correctly exactly as written. But that slug is order-dependent. Renaming, reordering, or deleting the earlier same-titled heading silently repoints anything already pinned to the later one's suffix. Only a pair something actually references is at real risk of that. Splitting referenced from cosmetic makes the report actionable. The reader no longer has to verify it by hand. Sibling versus differently-nested is a different question. It asks whether a *human* reading the raw document, not a link resolver, is likely to confuse the two. A block is excluded for a different reason. It cannot precede the heading that contains it. That particular pair can never actually reorder.
 
+## Decision 35: Relation-targeted dependency
+
+`xdeps=table:NAME` names a relation instead of a block, resolved against the whole corpus's own `Produces` edges rather than decision 29's file-scoped lookup. Exactly one block may produce that relation; zero or more than one both refuse, the same as an unknown `xdeps=name` target already does. Once resolved, it behaves exactly like a block-named `xdeps=` (decision 31): never concatenated, its staleness hash folded in by verified reference to the producing block's own hash.
+
+**Rationale:** A `Reads` edge is inferred only from a SQL block's own query text. A block written in another language has no parseable SQL for DanKG to check, so it has no way to declare that dependency today. `Produces` is inferred from a database snapshot diff, not authored, so a fixed block name would go stale the moment a different block started producing the relation. Naming the relation instead keeps the binding live.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -1986,6 +1992,43 @@ edges back to the prose section that explains it, and forward to
 everything downstream of it. Lineage is just a traversal, and it
 renders in the same graph as everything else.
 
+## Relation-targeted dependency
+
+Decision 35. `Produces` and `Reads` above are inferred, not authored:
+DanKG diffs `duckdb_tables()`/`duckdb_views()` around a block's run,
+and reads a SQL block's own query text for what it named but did not
+create. A block written in another language has no query for DanKG to
+read, so it has no way to declare a `Reads` dependency at all today.
+
+<!-- dankg:depends target=#provenance-without-a-driver quote="Relations the block's SQL names but did not create are its inputs." -->
+
+`xdeps=table:NAME` closes that gap by naming the relation, not the
+block that writes it. Resolution walks the whole corpus's own
+`Produces` edges, since a relation belongs to a database, not to
+whichever file happens to declare it. Exactly one block may claim to
+have produced `NAME`. Two blocks producing a same-named relation in
+different databases, or a relation a later block drops and recreates,
+both leave more than one candidate, and DanKG refuses rather than
+guess which one a reader meant.
+
+Once resolved, `table:NAME` behaves exactly like a block-named
+`xdeps=`: never concatenated into the reading block's own chain, and
+its staleness hash folds in the producing block's own hash by verified
+reference, recomputed the same recursive way
+`eval::result::verified_hash` already handles a named `xdeps=` target.
+A missing producing block, an ambiguous one, and a cycle through one
+are all refused rather than silently trusted, the same trust boundary
+decision 31 already holds `xdeps=name` to.
+
+<!-- dankg:depends target=#code-evaluation quote="are all refused rather than silently trusted" -->
+
+## Open questions (Relation-targeted dependency)
+
+- Same-named relations in two different `[db.*]` targets both refuse
+  today. Whether a qualified form, `table:db.NAME`, is worth adding, or
+  refusing and asking the author to rename is good enough, has not come
+  up against a real corpus yet.
+
 ## What this buys an agent
 
 project.md's third key feature is that an LLM can run DanKG because it
@@ -2014,10 +2057,9 @@ file.
   running pipeline.
 - A `Reads` edge is inferred from a SQL block's own query text. A
   block written in a different language can consume a relation
-  without naming it in any parseable SQL. It then has no way to
-  declare that dependency. One option: extend `deps=` with an
-  explicit target, `deps=table:orders`, resolved to whichever block's
-  snapshot last produced that relation, not to a block by name.
+  without naming it in any parseable SQL. Decision 35
+  (*Relation-targeted dependency*, above) resolves this:
+  `xdeps=table:NAME` names the relation instead of a block.
 - Do `Produces`/`Reads` edges feed `dankg check`'s staleness hash, or
   only `dankg graph`'s picture of lineage? An edge that never
   invalidates anything downstream still explains where a table came
