@@ -22,6 +22,10 @@ to *find* that range, and it replaces nothing else in the file.
 use super::files::Files;
 use super::plan::{self, BlockRef};
 use super::run;
+use crate::config::Config;
+use crate::graph::build::strip_extension;
+use crate::graph::model::{Graph, NodeId};
+use crate::graph::query::find_producer;
 use crate::hash;
 use crate::md::{Block, Document};
 ```
@@ -37,6 +41,27 @@ each is a *referenced* block's own last recorded hash, never its
 source, folded in by value rather than by concatenation, because the
 whole reason an `xdeps` edge exists is to reach a block this target's
 own interpreter cannot run.
+
+```rust name=hash_template_for path=eval/result.rs
+/// The string `expected_hash`/`verified_hash` hash a chain's own command
+/// against: a `db=` target's own name and path folded in alongside its
+/// command, so two `[db.*]` sections sharing an identical `command=`
+/// still hash differently (decision 16); a `lang=` target's own
+/// `command` alone. Shared by `session::run_one` and `main::check_cmd`'s
+/// own staleness loop, on purpose: two independent copies of this exact
+/// branch is what let one drift from the other and silently mis-verify
+/// (or skip) every `db=` block's staleness before this existed.
+pub fn hash_template_for(config: &Config, chain: &[BlockRef]) -> Result<String, String> {
+    let target = chain.last().ok_or("an empty chain has no target to hash")?;
+    if target.db.is_some() {
+        let db = run::db_command_for(config, chain).ok_or_else(|| format!("`{}` has no configured database", target.name))?;
+        Ok(format!("{} #db={} path={}", db.command, db.name, db.path.as_deref().unwrap_or("")))
+    } else {
+        let lang = run::command_for(config, chain).ok_or_else(|| format!("`{}` has no configured language", target.name))?;
+        Ok(lang.command)
+    }
+}
+```
 
 ```rust name=expected_hash path=eval/result.rs
 /// Covers the target's transitive dependency sources, in the order they
@@ -115,11 +140,14 @@ pub fn recorded_provenance(doc: &Document, index: usize, name: &str) -> (Vec<Str
 /// in every member's `xdeps` the same way. `verified_hash` below calls
 /// this same function on *its own* target's chain, so a broken `xdeps`
 /// buried behind several `deps=` hops is caught at every level of the
-/// recursion, not just the outermost one.
+/// recursion, not just the outermost one. `table_xdeps` entries
+/// (decision 35) are folded in the same way, resolved through `graph`
+/// instead of `resolve_xdeps`'s own block-name lookup.
 fn chain_xdep_hashes(
     blocks: &[BlockRef],
     files: &Files,
     config: &crate::config::Config,
+    graph: Option<&Graph>,
     chain: &[BlockRef],
     visiting: &mut std::collections::HashSet<usize>,
     cache: &mut std::collections::HashMap<usize, Result<u64, String>>,
@@ -127,10 +155,39 @@ fn chain_xdep_hashes(
     let mut hashes = Vec::new();
     for b in chain {
         for i in plan::resolve_xdeps(blocks, b).map_err(|e| e.to_string())? {
-            hashes.push(verified_hash(blocks, files, config, i, visiting, cache)?);
+            hashes.push(verified_hash(blocks, files, config, graph, i, visiting, cache)?);
+        }
+        for name in plan::table_xdeps(b) {
+            // Decision 35: resolved against the whole corpus's own
+            // `Produces` edges, never just `blocks`/`files`' own lazily-
+            // reached set. `graph` is `None` only when the caller never
+            // built one -- a bug in the caller (`xdep_hashes`'s own doc
+            // comment), since anything reaching this arm at all means a
+            // `table:` entry was found, and finding one is what should
+            // have triggered building it.
+            let graph = graph
+                .ok_or_else(|| format!("`{}` xdeps on `table:{name}`, but no corpus context was built to resolve it", b.name))?;
+            let producer = find_producer(graph, name).map_err(|e| format!("`{}` xdeps on `table:{name}`: {e}", b.name))?;
+            let index = block_index_for(blocks, &producer).ok_or_else(|| {
+                format!("`{}` xdeps on `table:{name}`, produced by `{producer}`, which is not a loaded block", b.name)
+            })?;
+            hashes.push(verified_hash(blocks, files, config, Some(graph), index, visiting, cache)?);
         }
     }
     Ok(hashes)
+}
+
+/// Maps a relation's producing-block `NodeId` (`graph::query::
+/// find_producer`'s own return) back to its index in `blocks`. `NodeId`s
+/// carry a file with its extension stripped (`graph::build::
+/// strip_extension`, the same way every heading/block node's own id is
+/// built); `BlockRef.file` does not. A block whose own declared `name`
+/// collides with something else in its file gets a `Slugger`-suffixed
+/// slug that no longer matches its raw name -- a documented limitation,
+/// not solved here, the same class of gap decision 34 already accepts
+/// for title collisions generally.
+fn block_index_for(blocks: &[BlockRef], id: &NodeId) -> Option<usize> {
+    blocks.iter().position(|b| strip_extension(b.file) == id.file && b.name == id.slug)
 }
 
 /// `blocks[index]`'s own hash, verified fresh right now rather than
@@ -153,6 +210,7 @@ fn verified_hash(
     blocks: &[BlockRef],
     files: &Files,
     config: &crate::config::Config,
+    graph: Option<&Graph>,
     index: usize,
     visiting: &mut std::collections::HashSet<usize>,
     cache: &mut std::collections::HashMap<usize, Result<u64, String>>,
@@ -166,16 +224,14 @@ fn verified_hash(
     }
     let result = (|| {
         let chain = plan::plan_for(blocks, b.file, b.name).map_err(|e| e.to_string())?;
-        let xdep_hashes = chain_xdep_hashes(blocks, files, config, &chain, visiting, cache)?;
+        let xdep_hashes = chain_xdep_hashes(blocks, files, config, graph, &chain, visiting, cache)?;
 
         let (_, doc) = files.get(b.file).ok_or_else(|| format!("{}: not loaded", b.file))?;
         let Some(stored) = recorded_hash(doc, b.index, b.name) else {
             return Err(format!("`{}` has no recorded result yet -- run it first", b.name));
         };
-        let Some(lang) = run::command_for(config, &chain) else {
-            return Err(format!("`{}`'s language is unconfigured -- cannot verify it", b.name));
-        };
-        if expected_hash(&chain, &lang.command, &xdep_hashes) == stored {
+        let hash_template = hash_template_for(config, &chain)?;
+        if expected_hash(&chain, &hash_template, &xdep_hashes) == stored {
             Ok(stored)
         } else {
             Err(format!("`{}` is itself stale -- run it first", b.name))
@@ -193,16 +249,24 @@ fn verified_hash(
 /// across its whole run, since the same upstream block is often
 /// reachable from many of the blocks it checks; `run_one` is content
 /// with a fresh one every call, since it only ever verifies one
-/// target's own chain.
+/// target's own chain. `graph` resolves a `table:` entry (decision 35)
+/// against the whole corpus's own `Produces` edges; `None` when the
+/// caller has not built one, which is only ever correct when nothing
+/// reachable from `chain` carries a `table:` entry at all -- `dankg
+/// check` already has one on hand for free (it already loads the whole
+/// corpus); `run_one` builds one lazily, only once it finds it actually
+/// needs to, keeping the common case exactly as file-scoped and cheap as
+/// it already is (decision 19).
 pub fn xdep_hashes(
     files: &Files,
     config: &crate::config::Config,
     blocks: &[BlockRef],
+    graph: Option<&Graph>,
     chain: &[BlockRef],
     cache: &mut std::collections::HashMap<usize, Result<u64, String>>,
 ) -> Result<Vec<u64>, String> {
     let mut visiting = std::collections::HashSet::new();
-    chain_xdep_hashes(blocks, files, config, chain, &mut visiting, cache)
+    chain_xdep_hashes(blocks, files, config, graph, chain, &mut visiting, cache)
 }
 ```
 
@@ -357,6 +421,57 @@ mod tests {
     }
 
     #[test]
+    fn hash_template_for_uses_the_langs_command_for_a_lang_target() {
+        let d = doc("```sh name=a\necho hi\n```\n");
+        let blocks = top_level_blocks(&d, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
+        let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
+        assert_eq!(hash_template_for(&config, &chain).unwrap(), "sh {file}");
+    }
+
+    #[test]
+    fn hash_template_for_folds_in_the_dbs_own_name_and_path() {
+        let d = doc("```sql db=warehouse name=a\nselect 1;\n```\n");
+        let blocks = top_level_blocks(&d, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
+        let config =
+            Config::parse("[db.warehouse]\ncommand = duckdb -csv {db} -f {file}\npath = w.duckdb\n", &mut Diags::new("t"));
+        let template = hash_template_for(&config, &chain).unwrap();
+        assert!(template.contains("warehouse"), "{template:?}");
+        assert!(template.contains("w.duckdb"), "{template:?}");
+    }
+
+    #[test]
+    fn hash_template_for_distinguishes_two_dbs_sharing_an_identical_command() {
+        // The bug this whole function exists to make structurally
+        // impossible: two `[db.*]` sections with byte-identical
+        // `command=` but different `path=` must still hash differently.
+        let same_command = "duckdb -csv {db} -f {file}";
+        let d1 = doc("```sql db=a name=x\nselect 1;\n```\n");
+        let blocks1 = top_level_blocks(&d1, "t.md");
+        let chain1 = plan_for(&blocks1, "t.md", "x").unwrap();
+        let config1 =
+            Config::parse(&format!("[db.a]\ncommand = {same_command}\npath = one.duckdb\n"), &mut Diags::new("t"));
+
+        let d2 = doc("```sql db=b name=x\nselect 1;\n```\n");
+        let blocks2 = top_level_blocks(&d2, "t.md");
+        let chain2 = plan_for(&blocks2, "t.md", "x").unwrap();
+        let config2 =
+            Config::parse(&format!("[db.b]\ncommand = {same_command}\npath = two.duckdb\n"), &mut Diags::new("t"));
+
+        assert_ne!(hash_template_for(&config1, &chain1).unwrap(), hash_template_for(&config2, &chain2).unwrap());
+    }
+
+    #[test]
+    fn hash_template_for_reports_an_unconfigured_database() {
+        let d = doc("```sql db=missing name=a\nselect 1;\n```\n");
+        let blocks = top_level_blocks(&d, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
+        let config = Config::none();
+        assert!(hash_template_for(&config, &chain).unwrap_err().contains("no configured database"));
+    }
+
+    #[test]
     fn expected_hash_changes_with_source_or_command() {
         let d = doc("```python name=a\nx=1\n```\n");
         let blocks = top_level_blocks(&d, "t.md");
@@ -431,7 +546,7 @@ mod tests {
         let blocks = files.all_blocks();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let top = blocks.iter().find(|b| b.name == "top").unwrap();
-        assert_eq!(xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top), &mut HashMap::new()).unwrap(), vec![h]);
+        assert_eq!(xdep_hashes(&files, &config, &blocks, None, std::slice::from_ref(top), &mut HashMap::new()).unwrap(), vec![h]);
     }
 
     #[test]
@@ -443,7 +558,7 @@ mod tests {
         let blocks = files.all_blocks();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let top = blocks.iter().find(|b| b.name == "top").unwrap();
-        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top), &mut HashMap::new()).unwrap_err();
+        let err = xdep_hashes(&files, &config, &blocks, None, std::slice::from_ref(top), &mut HashMap::new()).unwrap_err();
         assert!(err.contains("setup"), "{err:?}");
         assert!(err.contains("run it first"), "{err:?}");
     }
@@ -465,9 +580,9 @@ mod tests {
         let blocks = files.all_blocks();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let top = blocks.iter().find(|b| b.name == "top").unwrap();
-        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top), &mut HashMap::new()).unwrap_err();
+        let err = xdep_hashes(&files, &config, &blocks, None, std::slice::from_ref(top), &mut HashMap::new()).unwrap_err();
         assert!(err.contains("setup"), "{err:?}");
-        assert!(err.contains("unconfigured"), "{err:?}");
+        assert!(err.contains("no configured language"), "{err:?}");
     }
 
     #[test]
@@ -495,8 +610,8 @@ mod tests {
         let c = blocks.iter().find(|x| x.name == "c").unwrap();
 
         let mut cache = HashMap::new();
-        assert_eq!(xdep_hashes(&files, &config, &blocks, std::slice::from_ref(b), &mut cache).unwrap(), vec![h]);
-        assert_eq!(xdep_hashes(&files, &config, &blocks, std::slice::from_ref(c), &mut cache).unwrap(), vec![h]);
+        assert_eq!(xdep_hashes(&files, &config, &blocks, None, std::slice::from_ref(b), &mut cache).unwrap(), vec![h]);
+        assert_eq!(xdep_hashes(&files, &config, &blocks, None, std::slice::from_ref(c), &mut cache).unwrap(), vec![h]);
     }
 
     #[test]
@@ -517,7 +632,7 @@ mod tests {
         let blocks = files.all_blocks();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let top = blocks.iter().find(|b| b.name == "top").unwrap();
-        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(top), &mut HashMap::new()).unwrap_err();
+        let err = xdep_hashes(&files, &config, &blocks, None, std::slice::from_ref(top), &mut HashMap::new()).unwrap_err();
         assert!(err.contains("setup"), "{err:?}");
         assert!(err.contains("itself stale"), "{err:?}");
     }
@@ -531,7 +646,7 @@ mod tests {
         let blocks = files.all_blocks();
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         let a = blocks.iter().find(|b| b.name == "a").unwrap();
-        let err = xdep_hashes(&files, &config, &blocks, std::slice::from_ref(a), &mut HashMap::new()).unwrap_err();
+        let err = xdep_hashes(&files, &config, &blocks, None, std::slice::from_ref(a), &mut HashMap::new()).unwrap_err();
         assert!(err.contains("cycle"), "{err:?}");
     }
 

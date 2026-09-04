@@ -25,6 +25,7 @@ use super::sql;
 use crate::config::Config;
 use crate::diag::Diags;
 use crate::graph::index::{self, Corpus};
+use crate::graph::resolve;
 use crate::md::{Document, Inline};
 use std::fmt::Write as _;
 use std::fs;
@@ -368,6 +369,26 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
     let mut files = Files::new(root);
     files.discover(&entry_file, &mut diags)?;
 
+    // `xdeps=table:NAME` (decision 35) resolves against the whole
+    // corpus's own `Produces` edges, not just whatever `deps=`/`xdeps=`
+    // chains this one file's own discovery happened to reach -- a
+    // relation belongs to a database, not to whichever file's chain
+    // found it first. Building that corpus context costs a full walk
+    // (`index::load` + `resolve::resolve`, the same pair `main::
+    // check_cmd` already pays once per run), so it only happens when
+    // something here actually needs it, keeping the common case exactly
+    // as file-scoped and cheap as it already was (decision 19).
+    let needs_corpus = files.all_blocks().iter().any(|b| !plan::table_xdeps(b).is_empty());
+    let graph = if needs_corpus {
+        let mut corpus_diags = Diags::new("dankg");
+        let corpus = index::load(&[path.to_string()], true, &mut corpus_diags)?;
+        files = Files::new(corpus.root.clone());
+        files.load_all(&corpus.paths, &mut corpus_diags);
+        Some(resolve::resolve(&corpus.files, &mut corpus_diags))
+    } else {
+        None
+    };
+
     let blocks = files.all_blocks();
     let chain = plan::plan_for_index(&blocks, &entry_file, position).map_err(|e| e.to_string())?;
     let target = chain.last().expect("plan_for_index never returns an empty chain");
@@ -376,16 +397,17 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
     // discipline `run_single` already applies to language configuration:
     // an unresolvable `xdeps` target should fail fast, not after paying
     // for a spawn that was going to be thrown away anyway.
-    let xdep_hashes = result::xdep_hashes(&files, config, &blocks, &chain, &mut std::collections::HashMap::new())?;
+    let xdep_hashes =
+        result::xdep_hashes(&files, config, &blocks, graph.as_ref(), &chain, &mut std::collections::HashMap::new())?;
     let timeout = Duration::from_secs(target.timeout.unwrap_or(eval_run::DEFAULT_TIMEOUT_SECS));
     let code = eval_run::concatenated_source(&chain);
 
     // A `db=` target spawns through `[db.*]`, never `[lang.*]` (decision
-    // 16). The string hashed for staleness folds in the target database's
-    // own name and path, not just its command: two `[db.*]` sections can
-    // share an identical `command=` while pointing at different `path=`s,
-    // and `db.command` alone would not tell those two targets apart.
-    let (output, hash_template, produces, reads) = if target.db.is_some() {
+    // 16). `hash_template_for` is the one place the resulting template
+    // string is built, shared with `main::check_cmd`'s own staleness
+    // loop, so the two can never again silently disagree about it.
+    let hash_template = result::hash_template_for(config, &chain)?;
+    let (output, produces, reads) = if target.db.is_some() {
         let db = eval_run::db_command_for(config, &chain)
             .ok_or_else(|| format!("`{name}` has no configured database"))?;
         // *Provenance without a driver*: a snapshot before and after the
@@ -396,13 +418,12 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
         let output = eval_run::run_db(&db, &code, timeout)?;
         let after = eval_run::list_relations(&db, timeout)?;
         let (produces, reads) = infer_provenance(before, after, &code);
-        let template = format!("{} #db={} path={}", db.command, db.name, db.path.as_deref().unwrap_or(""));
-        (output, template, produces, reads)
+        (output, produces, reads)
     } else {
         let lang = eval_run::command_for(config, &chain)
             .ok_or_else(|| format!("`{name}` has no configured language"))?;
         let output = eval_run::run(&lang, &code, timeout)?;
-        (output, lang.command, Vec::new(), Vec::new())
+        (output, Vec::new(), Vec::new())
     };
 
     if !no_write {

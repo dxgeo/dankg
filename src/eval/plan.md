@@ -468,8 +468,22 @@ pub fn resolve_xdeps(blocks: &[BlockRef], block: &BlockRef) -> Result<Vec<usize>
     block
         .xdeps
         .iter()
+        .filter(|dep| !dep.starts_with("table:"))
         .map(|dep| resolve_dep(blocks, block.file, dep).map_err(|e| xdep_error(block.name.to_string(), dep, e)))
         .collect()
+}
+
+/// `block`'s `xdeps=table:NAME` entries (decision 35), stripped of the
+/// prefix, in declaration order. A relation name is not a block name --
+/// `resolve_dep`'s lookup cannot resolve it, and a relation's producing
+/// block may not even be loaded here (decision 19 scopes `Files` to what
+/// `deps=`/`xdeps=` chains actually reach, never the whole corpus, but a
+/// relation belongs to a database, not to whichever file's chain happens
+/// to reach it). `eval::result` resolves these separately, against a
+/// corpus-wide `Graph`, only building one when this is non-empty for
+/// anything the chain would verify.
+pub fn table_xdeps<'a>(block: &BlockRef<'a>) -> Vec<&'a str> {
+    block.xdeps.iter().filter_map(|dep| dep.strip_prefix("table:")).collect()
 }
 ```
 
@@ -933,6 +947,39 @@ mod tests {
         let top = blocks.iter().find(|b| b.name == "top").unwrap();
         let indices = resolve_xdeps(&blocks, top).unwrap();
         assert_eq!((blocks[indices[0]].file, blocks[indices[0]].name), ("lib.md", "setup"));
+    }
+
+    #[test]
+    fn resolve_xdeps_skips_table_entries() {
+        let d = doc("```sql name=top xdeps=table:orders\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        assert_eq!(resolve_xdeps(&blocks, top).unwrap(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn resolve_xdeps_resolves_the_non_table_entries_alongside_a_table_one() {
+        let d = doc("```sh name=setup\n:\n```\n\n```sql name=top xdeps=setup,table:orders\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        let indices = resolve_xdeps(&blocks, top).unwrap();
+        assert_eq!(blocks[indices[0]].name, "setup");
+    }
+
+    #[test]
+    fn table_xdeps_extracts_the_stripped_names_in_order() {
+        let d = doc("```sql name=top xdeps=table:orders,setup,table:customers\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        assert_eq!(table_xdeps(top), vec!["orders", "customers"]);
+    }
+
+    #[test]
+    fn table_xdeps_is_empty_with_no_table_entries() {
+        let d = doc("```sh name=top xdeps=setup\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        assert!(table_xdeps(top).is_empty());
     }
 
     #[test]

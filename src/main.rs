@@ -4,7 +4,7 @@ use dankg::cli::{self, Command, Format};
 use dankg::depends;
 use dankg::diag::{Diags, Level};
 use dankg::eval::files as eval_files;
-use dankg::eval::{plan, result, run as eval_run, session};
+use dankg::eval::{plan, result, session};
 use dankg::graph::build;
 use dankg::graph::index::{self, Corpus};
 use dankg::graph::{resolve, view, EdgeKind, Graph, NodeId};
@@ -219,15 +219,20 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
                 eprintln!("stale: {rel_path} `{}` (plan changed since this result was written)", b.name);
                 continue;
             };
-            // A language dropped from config since the result was written
-            // cannot be re-verified. That is reported by the missing
-            // `[lang.*]` section itself, not double-counted as stale here.
-            let Some(lang) = eval_run::command_for(&corpus.config, &chain) else { continue };
+            // A language or database dropped from config since the result
+            // was written cannot be re-verified. That is reported by the
+            // missing `[lang.*]`/`[db.*]` section itself, not double-
+            // counted as stale here. `hash_template_for` is the same
+            // function `session::run_one` hashes a fresh result against,
+            // so a `db=` block is verified against the right template
+            // here too, not silently skipped or checked against the
+            // wrong one.
+            let Ok(hash_template) = result::hash_template_for(&corpus.config, &chain) else { continue };
             // The whole corpus is already loaded (this function's own
             // opening paragraph), so every `xdeps` target this block
             // could possibly name is already resolvable here, exactly as
             // it would be during a real `dankg eval`.
-            let xdep_hashes = match result::xdep_hashes(&files, &corpus.config, &all_blocks, &chain, &mut xdep_cache) {
+            let xdep_hashes = match result::xdep_hashes(&files, &corpus.config, &all_blocks, Some(&index_graph), &chain, &mut xdep_cache) {
                 Ok(hashes) => hashes,
                 Err(msg) => {
                     stale += 1;
@@ -235,7 +240,7 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
                     continue;
                 }
             };
-            if result::expected_hash(&chain, &lang.command, &xdep_hashes) != stored_hash {
+            if result::expected_hash(&chain, &hash_template, &xdep_hashes) != stored_hash {
                 stale += 1;
                 eprintln!("stale: {rel_path} `{}`", b.name);
             }
