@@ -16,6 +16,7 @@ real edge once every file has been seen.
 
 use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
 use super::slug::{slugify, Slugger};
+use crate::eval::result::recorded_provenance;
 use crate::md::{Block, Document, Inline};
 
 /// Every real heading level is 1..=6 (0 is reserved for the synthetic
@@ -174,7 +175,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                     reciprocated: false,
                 });
                 nodes.push(Node {
-                    id: block_id,
+                    id: block_id.clone(),
                     title: name.to_string(),
                     file: path.to_string(),
                     line: *line,
@@ -186,6 +187,48 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                     resolved: true,
                     kind: NodeKind::Block,
                 });
+
+                // Provenance without a driver: a db= block's own
+                // inferred Produces/Reads (decision 36's write-back),
+                // materialized the moment its result marker names any.
+                // A relation belongs to a database, not a file (decision
+                // 35), so its own NodeId's "file" is the synthetic
+                // db:NAME namespace, never a path; two files' blocks
+                // naming the same relation dedupe once the whole corpus
+                // is assembled (`Graph::sort`). `doc.blocks`' own index
+                // is found by line rather than threaded through
+                // `flatten`, since every block starts on a distinct
+                // line within one document.
+                if let Some(db) = info.db() {
+                    if let Some(code_index) =
+                        doc.blocks.iter().position(|b| matches!(b, Block::Code { line: l, .. } if l == line))
+                    {
+                        let (produces, reads) = recorded_provenance(doc, code_index, name);
+                        let db_ns = format!("db:{db}");
+                        for rel in &produces {
+                            let rel_id = NodeId::new(&db_ns, rel.clone());
+                            push_relation_node(nodes, &rel_id, rel);
+                            containment.push(Edge {
+                                from: block_id.clone(),
+                                to: rel_id,
+                                kind: EdgeKind::Produces,
+                                line: 0,
+                                reciprocated: false,
+                            });
+                        }
+                        for rel in &reads {
+                            let rel_id = NodeId::new(&db_ns, rel.clone());
+                            push_relation_node(nodes, &rel_id, rel);
+                            containment.push(Edge {
+                                from: rel_id,
+                                to: block_id.clone(),
+                                kind: EdgeKind::Reads,
+                                line: 0,
+                                reciprocated: false,
+                            });
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -244,6 +287,31 @@ fn file_node(
     };
     nodes.insert(0, node);
     id
+}
+
+/// Adds a relation node for `id`, unless one is already present -- a
+/// relation both produced and read within the same file would otherwise
+/// duplicate here even before corpus-wide dedup (`Graph::sort`) ever
+/// runs. `level` reuses `BLOCK_LEVEL`: the same "stay above every real
+/// heading level" reasoning applies, and `set_extents` already skips
+/// every non-`Heading` node regardless.
+fn push_relation_node(nodes: &mut Vec<Node>, id: &NodeId, title: &str) {
+    if nodes.iter().any(|n| &n.id == id) {
+        return;
+    }
+    nodes.push(Node {
+        id: id.clone(),
+        title: title.to_string(),
+        file: id.file.clone(),
+        line: 0,
+        end_line: 0,
+        level: BLOCK_LEVEL,
+        parent: None,
+        tags: Vec::new(),
+        external: Vec::new(),
+        resolved: true,
+        kind: NodeKind::Relation,
+    });
 }
 ```
 
@@ -695,6 +763,58 @@ mod tests {
         let b = f.nodes.iter().find(|n| n.id.slug == "b").unwrap();
         assert_eq!(a.parent.as_ref().unwrap().slug, "one");
         assert_eq!(b.parent.as_ref().unwrap().slug, "two");
+    }
+
+    #[test]
+    fn a_db_blocks_produces_marker_becomes_a_relation_node_and_edge() {
+        let f = build_src(
+            "a.md",
+            "```sql db=warehouse name=setup\n:\n```\n\n<!-- dankg:result name=setup hash=0000000000000001 produces=orders -->\n\n```\nok\n```\n",
+        );
+        let relation = f.nodes.iter().find(|n| n.kind == NodeKind::Relation).expect("relation node exists");
+        assert_eq!(relation.id, NodeId::new("db:warehouse", "orders"));
+        let block = f.nodes.iter().find(|n| n.id.slug == "setup").unwrap();
+        assert!(
+            f.containment.iter().any(|e| e.from == block.id && e.to == relation.id && e.kind == EdgeKind::Produces),
+            "{:?}",
+            f.containment
+        );
+    }
+
+    #[test]
+    fn a_db_blocks_reads_marker_becomes_a_relation_node_and_reverse_edge() {
+        let f = build_src(
+            "a.md",
+            "```sql db=warehouse name=report\n:\n```\n\n<!-- dankg:result name=report hash=0000000000000001 reads=orders -->\n\n```\nok\n```\n",
+        );
+        let relation = f.nodes.iter().find(|n| n.kind == NodeKind::Relation).expect("relation node exists");
+        let block = f.nodes.iter().find(|n| n.id.slug == "report").unwrap();
+        assert!(
+            f.containment.iter().any(|e| e.from == relation.id && e.to == block.id && e.kind == EdgeKind::Reads),
+            "{:?}",
+            f.containment
+        );
+    }
+
+    #[test]
+    fn a_block_with_no_db_never_gets_a_relation_even_with_a_produces_marker() {
+        // Cannot happen through real write-back (only a db= block's own
+        // run infers produces=/reads=), but graph::build should not
+        // crash or invent a namespace for a block that names no database.
+        let f = build_src(
+            "a.md",
+            "```sh name=setup\n:\n```\n\n<!-- dankg:result name=setup hash=0000000000000001 produces=orders -->\n\n```\nok\n```\n",
+        );
+        assert!(f.nodes.iter().all(|n| n.kind != NodeKind::Relation));
+    }
+
+    #[test]
+    fn two_blocks_producing_and_reading_the_same_relation_share_one_node() {
+        let f = build_src(
+            "a.md",
+            "```sql db=warehouse name=setup\n:\n```\n\n<!-- dankg:result name=setup hash=0000000000000001 produces=orders -->\n\n```\nok\n```\n\n```sql db=warehouse name=report\n:\n```\n\n<!-- dankg:result name=report hash=0000000000000001 reads=orders -->\n\n```\nok\n```\n",
+        );
+        assert_eq!(f.nodes.iter().filter(|n| n.kind == NodeKind::Relation).count(), 1);
     }
 }
 ```

@@ -74,6 +74,25 @@ pub fn db_command_for(config: &Config, chain: &[BlockRef]) -> Option<Db> {
     let db = chain.last()?.db?;
     config.db(db)
 }
+
+/// Runs `db`'s configured `list` command (decision 37), read-only, and
+/// parses its stdout as one relation identifier per non-empty line --
+/// `list`'s own contract, nothing else. `None` when `db.list` is
+/// unconfigured: reported by the caller, not refused here, the same
+/// allowlist posture an unconfigured `command` already gets. `list` never
+/// substitutes `{file}` -- there is no source block driving it, so no
+/// temp file is written; a config template that names `{file}` anyway
+/// just gets an empty one.
+pub fn list_relations(db: &Db, timeout: Duration) -> Result<Option<Vec<String>>, String> {
+    let Some(list) = db.list.as_deref() else { return Ok(None) };
+    let db_path = db.path.as_deref().unwrap_or_default();
+    let label = format!("[db.{}] list", db.name);
+    let output = run_at(list, &label, &[("db", db_path)], std::path::Path::new(""), timeout)?;
+    if !output.success {
+        return Err(format!("{label} failed: {}", output.stderr));
+    }
+    Ok(Some(output.stdout.lines().map(str::to_string).filter(|l| !l.trim().is_empty()).collect()))
+}
 ```
 
 `run` writes `source` to a fresh temporary file (named for `lang.ext`,
@@ -349,6 +368,31 @@ mod tests {
         let blocks = top_level_blocks(&doc, "t.md");
         let chain = plan_for(&blocks, "t.md", "a").unwrap();
         assert!(db_command_for(&c, &chain).is_none());
+    }
+
+    #[test]
+    fn list_relations_is_none_when_unconfigured() {
+        let db = Db { name: "t".into(), command: "duckdb -csv {db} -f {file}".into(), path: Some(":memory:".into()), list: None };
+        assert_eq!(list_relations(&db, Duration::from_secs(5)).unwrap(), None);
+    }
+
+    #[test]
+    fn list_relations_reports_a_table_a_prior_run_created() {
+        // `:memory:` does not survive across separate process spawns, so
+        // this needs a real file-backed database -- the one case in this
+        // module that does. Real `duckdb` throughout, nothing mocked.
+        let db_path = std::env::temp_dir().join(format!("dankg-run-test-{}-list.duckdb", std::process::id()));
+        let _ = fs::remove_file(&db_path);
+        let db = Db {
+            name: "t".into(),
+            command: "duckdb -csv {db} -f {file}".into(),
+            path: Some(db_path.to_string_lossy().into_owned()),
+            list: Some("duckdb -csv {db} -c \"select table_name from duckdb_tables()\"".into()),
+        };
+        run_db(&db, "CREATE TABLE orders AS SELECT 1 AS n;\n", Duration::from_secs(5)).unwrap();
+        let relations = list_relations(&db, Duration::from_secs(5)).unwrap().unwrap();
+        let _ = fs::remove_file(&db_path);
+        assert!(relations.contains(&"orders".to_string()), "{relations:?}");
     }
 
     #[test]

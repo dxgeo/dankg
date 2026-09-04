@@ -67,6 +67,12 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
             (EdgeKind::Contains, _) => "==>",
             (EdgeKind::Link, true) => "---",
             (EdgeKind::Link, false) => "-->",
+            // Produces/Reads render like an ordinary reference for now --
+            // decision 38 left their own visual treatment (weight, a
+            // distinct arrow style) for a later pass once a real corpus
+            // has relation nodes to look at.
+            (EdgeKind::Produces | EdgeKind::Reads, true) => "---",
+            (EdgeKind::Produces | EdgeKind::Reads, false) => "-->",
         };
         let _ = writeln!(out, "    {from} {arrow} {to}");
     }

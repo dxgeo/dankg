@@ -11,7 +11,14 @@
 use std::fmt;
 
 /// A node's address: the linking path with its extension removed, then the
-/// heading slug. Stable across runs, so it is safe to put in committed output.
+/// heading slug. Stable across runs, so it is safe to put in committed
+/// output. `file` means "the namespace `slug` is unique within" -- a real
+/// path for a heading or block, but a synthetic `db:NAME` for a relation
+/// node (decision: *Provenance without a driver*), since a relation
+/// belongs to a database, not to whichever file's block happened to
+/// produce or read it first. Reusing the same two-field shape rather than
+/// inventing a second identity scheme is deliberate: a relation is just a
+/// node whose namespace is not a file.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId {
     pub file: String,
@@ -36,6 +43,14 @@ pub enum EdgeKind {
     Contains,
     /// An explicit reference written by the author.
     Link,
+    /// Block to relation (decision: *Provenance without a driver*).
+    /// Inferred, never authored: a `db=` block's own before/after `list`
+    /// diff, plus its SQL's own write targets. Costs 0 to enter against
+    /// `--depth` (decision 38); the ordinary 1 to leave.
+    Produces,
+    /// Relation to block, `Produces`'s own reverse direction. Inferred
+    /// from a SQL block's own read targets, minus whatever it produces.
+    Reads,
 }
 
 impl EdgeKind {
@@ -43,6 +58,8 @@ impl EdgeKind {
         match self {
             EdgeKind::Contains => "contains",
             EdgeKind::Link => "link",
+            EdgeKind::Produces => "produces",
+            EdgeKind::Reads => "reads",
         }
     }
 }
@@ -52,11 +69,15 @@ impl EdgeKind {
 /// the same one `eval::plan` and `dankg eval --list` use, so "this is a
 /// node you can navigate to" and "this is a node `dankg eval` can
 /// evaluate" never disagree). A block is always a leaf. Nothing nests
-/// inside one.
+/// inside one. A relation is a database table or view a `db=` block's
+/// own `Produces`/`Reads` edge names (decision: *Provenance without a
+/// driver*): corpus-wide, not file-scoped, unlike the other two -- see
+/// `NodeId`'s own doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Heading,
     Block,
+    Relation,
 }
 
 impl NodeKind {
@@ -64,6 +85,7 @@ impl NodeKind {
         match self {
             NodeKind::Heading => "heading",
             NodeKind::Block => "block",
+            NodeKind::Relation => "relation",
         }
     }
 
@@ -71,6 +93,7 @@ impl NodeKind {
         match text {
             "heading" => Some(NodeKind::Heading),
             "block" => Some(NodeKind::Block),
+            "relation" => Some(NodeKind::Relation),
             _ => None,
         }
     }
@@ -166,6 +189,18 @@ impl Graph {
     /// Impose a total order, so that identical input always produces identical
     /// output and a rendered graph can be committed and diffed.
     pub fn sort(&mut self) {
+        // Two different files' blocks can name the same relation
+        // (decision: *Provenance without a driver* -- a relation
+        // belongs to a database, not to whichever file's block produced
+        // or read it first), so a node id is no longer guaranteed
+        // unique going in, unlike every other node kind. Dedup by id,
+        // keeping the first occurrence, *before* the real display sort
+        // below: a straight `(file, line, id)` sort would not put two
+        // such duplicates next to each other, so `dedup_by`'s
+        // adjacency requirement would miss them.
+        self.nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        self.nodes.dedup_by(|a, b| a.id == b.id);
+
         self.nodes.sort_by(|a, b| {
             (&a.file, a.line, &a.id).cmp(&(&b.file, b.line, &b.id))
         });
@@ -213,7 +248,7 @@ mod tests {
 
     #[test]
     fn node_kind_round_trips_through_text() {
-        for kind in [NodeKind::Heading, NodeKind::Block] {
+        for kind in [NodeKind::Heading, NodeKind::Block, NodeKind::Relation] {
             assert_eq!(NodeKind::parse(kind.as_str()), Some(kind));
         }
         assert_eq!(NodeKind::parse("nope"), None);
@@ -297,5 +332,17 @@ mod tests {
         a.sort();
         b.sort();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sort_dedupes_a_relation_named_by_two_different_files() {
+        let mut rel_a = node("db:t", "orders");
+        rel_a.kind = NodeKind::Relation;
+        rel_a.file = "db:t".to_string();
+        let mut rel_b = rel_a.clone();
+        rel_b.file = "other.md".to_string(); // as if a different file's pass pushed it too
+        let mut g = Graph { nodes: vec![node("a", "x"), rel_a, rel_b], edges: vec![] };
+        g.sort();
+        assert_eq!(g.nodes.iter().filter(|n| n.id == NodeId::new("db:t", "orders")).count(), 1);
     }
 }

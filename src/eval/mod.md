@@ -1,6 +1,6 @@
 # Eval mod
 
-`dankg eval`'s five pieces. Nothing under this module is reachable from
+`dankg eval`'s six pieces. Nothing under this module is reachable from
 `dankg graph`. This command evaluates code only when invoked directly. It
 never evaluates code as a side effect of rendering or checking a corpus
 ([decision 9](../../architecture.md#decision-9-eval-trigger)).
@@ -18,12 +18,15 @@ never evaluates code as a side effect of rendering or checking a corpus
 //! - `session` the interactive `dankg eval` flow (plan, confirm, evaluate,
 //!   write back) and `run_one`, shared with `tui::eval`'s in-grid
 //!   cycle-and-run.
+//! - `sql`     a hand-rolled scanner for what a `db=` block's own SQL
+//!   writes to and reads from (decision: *Provenance without a driver*).
 
 pub mod files;
 pub mod plan;
 pub mod result;
 pub mod run;
 pub mod session;
+pub mod sql;
 
 pub use session::EvalTarget;
 ```
