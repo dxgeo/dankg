@@ -9,7 +9,7 @@
 //! alike.
 
 use crate::cmd;
-use crate::config::{Config, Lang};
+use crate::config::{Config, Db, Lang};
 use crate::eval::plan::BlockRef;
 use std::fs;
 use std::io::Read;
@@ -56,6 +56,16 @@ pub fn command_for(config: &Config, chain: &[BlockRef]) -> Option<Lang> {
     config.lang(lang)
 }
 
+/// `command_for`'s own counterpart for a `db=`-targeted chain (decision
+/// 16): the `[db.*]` section `chain`'s target names, or `None` when it
+/// names none or that section is unconfigured. `plan::check_consistent_db`
+/// already guarantees every block in `chain` agrees on `db`, the same way
+/// `check_consistent_lang` already guarantees agreement on `lang`.
+pub fn db_command_for(config: &Config, chain: &[BlockRef]) -> Option<Db> {
+    let db = chain.last()?.db?;
+    config.db(db)
+}
+
 /// Runs `source` through `lang`'s configured command, honouring
 /// `timeout`. Writes `source` to a fresh temporary file (named for
 /// `lang.ext`, if it has one, since some interpreters dispatch on
@@ -65,7 +75,22 @@ pub fn command_for(config: &Config, chain: &[BlockRef]) -> Option<Lang> {
 pub fn run(lang: &Lang, source: &str, timeout: Duration) -> Result<Output, String> {
     let path = temp_path(lang.ext.as_deref());
     fs::write(&path, source).map_err(|e| format!("could not write a temporary file: {e}"))?;
-    let result = run_at(lang, &path, timeout);
+    let label = format!("[lang.{}] command", lang.name);
+    let result = run_at(&lang.command, &label, &[], &path, timeout);
+    let _ = fs::remove_file(&path); // best-effort: nothing downstream depends on this succeeding
+    result
+}
+
+/// `run`'s own counterpart for a `db=`-targeted chain: `{db}` substitutes
+/// `db.path` alongside `run_at`'s own `{file}`. No `[db.*]` section
+/// configures its own `ext` (decision 16's own example never dispatches on
+/// one), so the temp file carries none.
+pub fn run_db(db: &Db, source: &str, timeout: Duration) -> Result<Output, String> {
+    let path = temp_path(None);
+    fs::write(&path, source).map_err(|e| format!("could not write a temporary file: {e}"))?;
+    let db_path = db.path.as_deref().unwrap_or_default();
+    let label = format!("[db.{}] command", db.name);
+    let result = run_at(&db.command, &label, &[("db", db_path)], &path, timeout);
     let _ = fs::remove_file(&path); // best-effort: nothing downstream depends on this succeeding
     result
 }
@@ -81,10 +106,23 @@ fn temp_path(ext: Option<&str>) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
-fn run_at(lang: &Lang, path: &std::path::Path, timeout: Duration) -> Result<Output, String> {
+/// The shared spawn/timeout/kill-tree core both `run` and `run_db` reduce
+/// to: neither differs in how a process is watched, only in which command
+/// template resolves and which substitutions beyond `{file}` it takes.
+/// `label` names the config key an empty-once-substituted command is
+/// reported against.
+fn run_at(
+    command: &str,
+    label: &str,
+    extra: &[(&str, &str)],
+    path: &std::path::Path,
+    timeout: Duration,
+) -> Result<Output, String> {
     let file = path.to_string_lossy();
-    let Some(argv) = cmd::build(&lang.command, &[("file", &file)]) else {
-        return Err(format!("`[lang.{}] command` is empty once substituted", lang.name));
+    let mut subs = vec![("file", file.as_ref())];
+    subs.extend_from_slice(extra);
+    let Some(argv) = cmd::build(command, &subs) else {
+        return Err(format!("`{label}` is empty once substituted"));
     };
 
     let mut command = Command::new(&argv[0]);
@@ -244,6 +282,37 @@ mod tests {
     }
 
     #[test]
+    fn db_command_for_resolves_the_targets_db() {
+        let c = config("[db.warehouse]\ncommand = duckdb -csv {db} -f {file}\npath = w.duckdb\n");
+        let mut d = crate::diag::Diags::new("t.md");
+        let doc = Document::parse("```sql db=warehouse name=a\nselect 1;\n```\n", &mut d);
+        let blocks = top_level_blocks(&doc, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
+        let db = db_command_for(&c, &chain).unwrap();
+        assert_eq!(db.command, "duckdb -csv {db} -f {file}");
+    }
+
+    #[test]
+    fn db_command_for_is_none_when_the_db_is_unconfigured() {
+        let c = config("");
+        let mut d = crate::diag::Diags::new("t.md");
+        let doc = Document::parse("```sql db=warehouse name=a\nselect 1;\n```\n", &mut d);
+        let blocks = top_level_blocks(&doc, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
+        assert!(db_command_for(&c, &chain).is_none());
+    }
+
+    #[test]
+    fn db_command_for_is_none_for_a_block_with_no_db() {
+        let c = config("[lang.sql]\ncommand = sqlite3 {file}\n");
+        let mut d = crate::diag::Diags::new("t.md");
+        let doc = Document::parse("```sql name=a\nselect 1;\n```\n", &mut d);
+        let blocks = top_level_blocks(&doc, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
+        assert!(db_command_for(&c, &chain).is_none());
+    }
+
+    #[test]
     fn truncate_leaves_short_output_alone() {
         assert_eq!(truncate("hi".to_string()), "hi");
     }
@@ -313,5 +382,33 @@ mod tests {
     fn run_reports_a_program_that_does_not_exist() {
         let lang = Lang { name: "ghost".into(), command: "dankg-eval-nonexistent-binary {file}".into(), ext: None };
         assert!(run(&lang, "x\n", Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn run_db_executes_sql_against_a_real_duckdb_process() {
+        // Real `duckdb` binary, real round-trip output -- nothing mocked,
+        // mirroring `run_captures_stdout_and_exit_status`'s own real-`sh`
+        // shape above. `:memory:` proves `{db}` substitution works with no
+        // file left behind to clean up.
+        let db = Db {
+            name: "t".into(),
+            command: "duckdb -csv {db} -f {file}".into(),
+            path: Some(":memory:".into()),
+            list: None,
+        };
+        let out = run_db(&db, "CREATE TABLE x AS SELECT 1 AS n;\nSELECT * FROM x;\n", Duration::from_secs(5)).unwrap();
+        assert!(out.success, "stderr: {}", out.stderr);
+        assert_eq!(out.stdout, "n\n1\n");
+    }
+
+    #[test]
+    fn run_db_reports_a_program_that_does_not_exist() {
+        let db = Db {
+            name: "ghost".into(),
+            command: "dankg-eval-nonexistent-binary {db} {file}".into(),
+            path: Some("x.duckdb".into()),
+            list: None,
+        };
+        assert!(run_db(&db, "select 1;\n", Duration::from_secs(5)).is_err());
     }
 }

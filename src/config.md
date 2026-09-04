@@ -41,8 +41,10 @@ const KNOWN: &[(&str, &[&str])] = &[
     ("keys", &["up", "down", "left", "right", "quit", "reset", "pan", "eval"]),
 ];
 
-/// Section families, named `<prefix><name>`. `db.` is reserved for milestone 8
-/// and parsed now so that a config written ahead of it does not warn.
+/// Section families, named `<prefix><name>`. `db.`'s `list` (decision 37)
+/// is parsed now even though `--live` and *Provenance without a driver*'s
+/// own before/after diff (decisions 35-38) are not implemented yet, so a
+/// config written ahead of them does not warn.
 /// `tangle.`'s `command` is optional (decision 25): a language with no
 /// separate build step just materializes its tree and stops. `glue` is
 /// independent of `command` and just as optional (decision 26): an external
@@ -51,7 +53,7 @@ const KNOWN: &[(&str, &[&str])] = &[
 /// `command` builds it.
 const FAMILIES: &[(&str, &[&str])] = &[
     ("lang.", &["command", "ext"]),
-    ("db.", &["command", "path"]),
+    ("db.", &["command", "path", "list"]),
     ("tangle.", &["command", "ext", "glue"]),
 ];
 
@@ -133,6 +135,21 @@ pub struct Lang {
     pub name: String,
     pub command: String,
     pub ext: Option<String>,
+}
+
+/// One `[db.*]` section (decision 16). `path` substitutes `{db}` in
+/// `command`, the same way a block's own temp file substitutes `{file}`.
+/// `list` (decision 37) is the protocol-agnostic catalog listing `--live`
+/// spawns and *Provenance without a driver*'s own before/after diff runs;
+/// parsed here so a config written ahead of either still parses clean, the
+/// same "parsed ahead of milestone" precedent this family has already
+/// held since before any of it was implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Db {
+    pub name: String,
+    pub command: String,
+    pub path: Option<String>,
+    pub list: Option<String>,
 }
 
 /// One `[tangle.*]` section (decision 25). `command` is optional. Take a
@@ -311,6 +328,26 @@ impl Config {
 
     pub fn lang(&self, name: &str) -> Option<Lang> {
         self.langs().into_iter().find(|l| l.name == name)
+    }
+
+    /// Every configured `[db.*]` section, in config order (decision 16).
+    pub fn dbs(&self) -> Vec<Db> {
+        self.sections
+            .iter()
+            .filter_map(|s| {
+                let name = s.name.strip_prefix("db.")?;
+                Some(Db {
+                    name: name.to_string(),
+                    command: s.get("command")?.to_string(),
+                    path: s.get("path").map(str::to_string),
+                    list: s.get("list").map(str::to_string),
+                })
+            })
+            .collect()
+    }
+
+    pub fn db(&self, name: &str) -> Option<Db> {
+        self.dbs().into_iter().find(|d| d.name == name)
     }
 
     /// `[tangle.<name>]`, if configured. Unlike `[lang.*]`, its absence
@@ -527,10 +564,37 @@ mod tests {
     }
 
     #[test]
-    fn db_sections_parse_ahead_of_milestone_eight() {
-        let (c, d) = parse("[db.warehouse]\ncommand = duckdb -csv {db} < {file}\npath = data/w.duckdb\n");
+    fn db_returns_the_named_section() {
+        let (c, d) = parse("[db.warehouse]\ncommand = duckdb -csv {db} -f {file}\npath = data/w.duckdb\n");
         assert!(d.is_empty(), "{:?}", d.items());
-        assert_eq!(c.get("db.warehouse", "path"), Some("data/w.duckdb"));
+        assert_eq!(
+            c.db("warehouse"),
+            Some(Db {
+                name: "warehouse".into(),
+                command: "duckdb -csv {db} -f {file}".into(),
+                path: Some("data/w.duckdb".into()),
+                list: None,
+            })
+        );
+        assert_eq!(c.db("nope"), None);
+    }
+
+    #[test]
+    fn db_list_key_parses_ahead_of_live_and_provenance() {
+        // decisions 35-38 (`--live`, `Produces`/`Reads` inference) are not
+        // implemented yet; `list` must still parse clean rather than warn.
+        let (c, d) = parse(
+            "[db.warehouse]\ncommand = duckdb -csv {db} -f {file}\nlist = duckdb -csv {db} -c \"select 1\"\n",
+        );
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.db("warehouse").unwrap().list, Some("duckdb -csv {db} -c \"select 1\"".into()));
+    }
+
+    #[test]
+    fn dbs_lists_every_section_in_config_order() {
+        let (c, d) = parse("[db.a]\ncommand = x\n\n[db.b]\ncommand = y\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.dbs().iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
     }
 
     #[test]

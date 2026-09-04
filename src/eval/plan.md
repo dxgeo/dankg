@@ -101,6 +101,12 @@ pub struct BlockRef<'a> {
     /// `deps=`/`xdeps=` target's own `produces=`, never resolved on its
     /// own: see `check_file_deps`.
     pub reads: Option<&'a str>,
+    /// `db=NAME` (decision 16), the `[db.NAME]` section this block targets.
+    /// `None` runs through `[lang.*]` exactly as it already does.
+    /// `check_consistent_db` refuses a chain that disagrees on this the
+    /// same way `check_consistent_lang` already refuses one that disagrees
+    /// on `lang`.
+    pub db: Option<&'a str>,
 }
 ```
 
@@ -124,6 +130,12 @@ pub enum PlanError {
     /// is concatenated into one file and run through `target`'s one
     /// interpreter. Code in the wrong language would just fail there.
     MixedLang { target: String, target_lang: String, block: String, block_lang: String },
+    /// `block` declares a different `db` than `target`. `MixedLang`'s own
+    /// reasoning, once over: the whole chain is concatenated and piped
+    /// into `target`'s one spawned command, so a dependency naming a
+    /// different `[db.*]` section would silently run against the wrong
+    /// database rather than its own.
+    MixedDb { target: String, block: String },
     /// `block`'s `deps=dep` named a cross-file path that climbs above the
     /// root. This is the same refusal a written link's target already
     /// gets (`graph::resolve::join_normalize`), reused rather than
@@ -159,6 +171,13 @@ impl fmt::Display for PlanError {
                     f,
                     "`{block}` is `{block_lang}` but `{target}`, whose chain it is part of, is `{target_lang}`; \
                      one interpreter runs the whole concatenated file"
+                )
+            }
+            PlanError::MixedDb { target, block } => {
+                write!(
+                    f,
+                    "`{block}` targets a different `db` than `{target}`, whose chain it is part of; \
+                     one spawned command runs the whole concatenated file against one database"
                 )
             }
             PlanError::DepEscapesRoot { block, dep } => {
@@ -217,6 +236,7 @@ fn block_ref<'a>(
         path: info.path(),
         produces: info.produces(),
         reads: info.reads(),
+        db: info.db(),
     })
 }
 ```
@@ -646,6 +666,7 @@ fn plan_from<'a>(blocks: &'a [BlockRef<'a>], home: &str, index: usize) -> Result
     visit(blocks, home, index, &mut stack, &mut done, &mut order)?;
     let chain: Vec<BlockRef> = order.into_iter().map(|i| blocks[i].clone()).collect();
     check_consistent_lang(&chain)?;
+    check_consistent_db(&chain)?;
     Ok(chain)
 }
 
@@ -665,6 +686,24 @@ fn check_consistent_lang(chain: &[BlockRef]) -> Result<(), PlanError> {
                 block: b.name.to_string(),
                 block_lang: lang.to_string(),
             });
+        }
+    }
+    Ok(())
+}
+
+/// `db=`'s own `check_consistent_lang`: a chain that disagrees on which
+/// `[db.*]` section it targets would still concatenate and spawn one
+/// command, silently against whichever database `target` happens to name.
+/// A block with no `db=` at all is not compared, the same way a
+/// languageless block skips `check_consistent_lang`.
+fn check_consistent_db(chain: &[BlockRef]) -> Result<(), PlanError> {
+    let Some((target, deps)) = chain.split_last() else { return Ok(()) };
+    let Some(target_db) = target.db else { return Ok(()) };
+    for b in deps {
+        if let Some(db) = b.db
+            && db != target_db
+        {
+            return Err(PlanError::MixedDb { target: target.name.to_string(), block: b.name.to_string() });
         }
     }
     Ok(())
@@ -845,6 +884,21 @@ mod tests {
                 block_lang: "sh".into(),
             }
         );
+    }
+
+    #[test]
+    fn a_dependency_targeting_a_different_db_is_refused() {
+        let d = doc("```sql db=staging name=setup\n:\n```\n\n```sql db=warehouse name=top deps=setup\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        let err = plan_for(&blocks, FILE, "top").unwrap_err();
+        assert_eq!(err, PlanError::MixedDb { target: "top".into(), block: "setup".into() });
+    }
+
+    #[test]
+    fn a_dependency_with_no_db_is_not_refused_by_check_consistent_db() {
+        let d = doc("```sql name=setup\n:\n```\n\n```sql db=warehouse name=top deps=setup\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        assert!(plan_for(&blocks, FILE, "top").is_ok(), "a dependency with no db= is not compared");
     }
 
     #[test]
