@@ -228,6 +228,12 @@ A SQL block's inferred `Reads` edges are written back with its result, one resol
 
 **Rationale:** An edge recorded only for `dankg graph`'s picture of lineage never feeds `check`, so a downstream block can drift stale against its real upstream table with nothing to notice. Recording an inferred `Reads` edge in the same `table:NAME` form decision 35 already resolves and verifies means an inferred dependency costs no second mechanism. Hashing the relation's own content instead was considered and rejected: a source can change while its output happens to look the same, the exact coincidence [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md) found dangerous.
 
+## Decision 37: Live catalog, opt-in only
+
+`dankg graph`/`tui` never touch a database by default: `graph` still only displays stored results. `--live` is the explicit opt-in, spawning each `[db.*]`'s own configured `list` command read-only and reading its stdout as one relation identifier per line -- no protocol assumed, the same allowlist rule as `[lang.*]` (decision 1). The same `list` command is what *Provenance without a driver*'s own before/after diff already runs (decisions 35, 36): one protocol-agnostic primitive, two callers. A `[db.*]` with no configured `list` is reported, not run. Every listed identifier with no `Produces` edge in the current index renders as its own kind: a relation the corpus does not explain. Nothing from `--live` itself is cached or written back.
+
+**Rationale:** A corpus only knows the relations some block's own run happened to produce. A table created by hand, by a tool outside `dankg`, or documented once by a section since deleted, is invisible to it, and that is exactly the gap `--live` closes: the reader asked, `dankg` spawned one read-only command, and anything it found with no explanation gets flagged. Making that command itself protocol-agnostic keeps decision 1 intact for this too: DanKG must not learn a wire protocol or link a client library just to ask "what tables exist," so the reader supplies the one command that answers it, exactly as `[db.*] command` already does for running a block's own SQL. The same reasoning is why the automatic diff runs through `list` too, rather than assuming DuckDB's own catalog functions: DuckDB is only the first engine this gets tested against, not a special case baked into the code.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -1978,12 +1984,17 @@ for code.
 
 The point of this milestone is the edges, not the execution.
 
-DanKG snapshots `duckdb_tables()` and `duckdb_views()` before a block
-runs and again afterwards, and diffs the two. Relations that appeared
-or changed are the block's outputs. Relations the block's SQL names
-but did not create are its inputs. Both are ordinary command output,
-parsed the same way any other block's stdout is: no bindings, no
-catalog format to track.
+DanKG runs the block's own `[db.*]`'s configured `list` command
+(decision 37) before the block runs and again afterwards, and diffs
+the two. Relations that appeared or changed are the block's outputs.
+Relations the block's SQL names but did not create are its inputs.
+Both readings come from the same plain, protocol-agnostic listing
+`--live` also uses. DuckDB is the first engine this gets tested
+against, not an assumption the diff itself makes: no bindings, no
+catalog format to track, just `list`'s own contract of one identifier
+per line, however it was produced.
+
+<!-- dankg:depends target=#decision-37-live-catalog-opt-in-only quote="reading its stdout as one relation identifier per line" -->
 
 Each relation becomes a node with id `<db>::<schema>.<table>`, and two new edge
 kinds join `Contains` and `Link`:
@@ -2001,10 +2012,11 @@ renders in the same graph as everything else.
 ## Relation-targeted dependency
 
 Decision 35. `Produces` and `Reads` above are inferred, not authored:
-DanKG diffs `duckdb_tables()`/`duckdb_views()` around a block's run,
-and reads a SQL block's own query text for what it named but did not
-create. A block written in another language has no query for DanKG to
-read, so it has no way to declare a `Reads` dependency at all today.
+DanKG diffs the configured `list` command's own output around a
+block's run, and reads a SQL block's own query text for what it named
+but did not create. A block written in another language has no query
+for DanKG to read, so it has no way to declare a `Reads` dependency at
+all today.
 
 <!-- dankg:depends target=#provenance-without-a-driver quote="Relations the block's SQL names but did not create are its inputs." -->
 
@@ -2043,7 +2055,7 @@ SQL block's own `Reads` edges never go through that hand-written form.
 They come from diffing the catalog after the block already ran, not
 before,
 
-<!-- dankg:depends target=#provenance-without-a-driver quote="before a block runs and again afterwards, and diffs the two" -->
+<!-- dankg:depends target=#provenance-without-a-driver quote="before the block runs and again afterwards, and diffs the two" -->
 
 which means `check` -- which never executes anything -- cannot
 discover them on its own. Only a run of `eval` can.
@@ -2072,6 +2084,75 @@ writes a fresh hash with no staleness yet to check against.
   should flag *that* drift on its own, separately from a stale hash on
   an unchanged relation set, is open.
 
+## Live catalog
+
+Decision 37. `Produces` only ever describes what a block's own recorded
+run created (*Provenance without a driver*, above). It says nothing
+about a relation nobody in the corpus ever ran a block against --
+created by hand, by a tool `dankg` never touched, or documented once by
+a section since deleted. `dankg graph`'s default stays exactly what it
+already is:
+
+<!-- dankg:depends target=#code-evaluation quote="`dankg graph` only ever *displays* stored results" -->
+
+`--live` is the one explicit door across that line. For every `[db.*]`
+carrying its own configured `list` command, DanKG spawns it read-only
+and reads its stdout as one relation identifier per line. `list` is
+new, but the pattern is not: `[db.*] command` already runs a block's
+own SQL through whatever engine a reader configured (decision 16),
+never asking DanKG to know its protocol. `list` asks the same reader
+for the one command that answers "what exists," not "what does this
+block's SQL say":
+
+```
+# .dankg/config
+[db.warehouse]
+command = duckdb -csv {db} < {file}
+list    = duckdb -csv {db} -c "select table_name from duckdb_tables() union select view_name from duckdb_views()"
+path    = data/warehouse.duckdb
+```
+
+A Postgres warehouse configures the identical shape against
+`information_schema`, a REST-fronted catalog against whatever endpoint
+it exposes: `list`'s contract is stdout, one identifier per line,
+nothing else. DanKG parses that and nothing about how it was produced,
+the same indifference decision 1 already holds `command` to. *Provenance
+without a driver*'s own before/after diff (decisions 35, 36) runs
+through this exact command too, not DuckDB's own catalog functions:
+decision 16 already promised DuckDB would be the first engine tested
+against, not a special case baked into the code, and the original
+sketch broke that promise before `list` existed to fix it.
+
+<!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
+
+<!-- dankg:depends target=#duckdb-and-why-the-dependency-policy-survives quote="DuckDB is the first implementation, not a special case in the code" -->
+
+A `[db.*]` with no configured `list` is reported and skipped, not run
+\-- the same allowlist rule an unconfigured language already gets, and
+no reason to refuse the rest of a multi-database corpus over one
+section that never opted in.
+
+<!-- dankg:depends target=#duckdb-and-why-the-dependency-policy-survives quote="a `sql` block with no configured command is reported and never run" -->
+
+Every listed identifier with no matching `Produces` edge in the current
+index renders as its own node kind: a relation the corpus does not
+explain. Nothing from `--live` itself is cached or written back: a
+second run may draw a different orphan, or none at all, with no
+corresponding diff, unlike every other view `dankg` draws.
+
+<!-- dankg:depends target=#milestones quote="so `--no-cache` is byte-identical" -->
+
+## Open questions (Live catalog)
+
+- Typing `--live` is already the ask decision 9 requires, so it runs
+  without a blocking prompt of its own. Whether it should still print
+  the exact command about to run first, the courtesy `eval`'s own plan
+  step gives before its prompt, is a smaller, separate question.
+- `list`'s only contract is stdout, one identifier per line. Whether
+  that identifier must already match a `Produces` edge's own
+  `<db>::<schema>.<table>` shape, or DanKG normalizes it, is
+  unresolved.
+
 ## What this buys an agent
 
 project.md's third key feature is that an LLM can run DanKG because it
@@ -2086,10 +2167,9 @@ file.
 
 ## Open questions for this milestone
 
-- Does `dankg graph` ever touch the database? It must not execute, but reading
-  the catalog to show relations that no block produced is tempting. Currently
-  no: `graph` displays stored results only, and an unknown relation is an
-  unresolved node like any other dangling link.
+- Does `dankg graph` ever touch the database? Decision 37 (*Live
+  catalog*, above) resolves this: never by default, `--live` is the
+  explicit opt-in.
 - Are relation nodes counted against `--depth`, or are they always
   shown with their producing block? Probably the latter. A table one
   hop from its ETL is not really a hop.
@@ -2116,8 +2196,8 @@ file.
   relation is the *inferred* half of this milestone's own value: a
   file's producer has no catalog to diff, so `produces=file:PATH` is
   always an explicit declaration, never inferred the free way a
-  relation's `Produces` edge is from `duckdb_tables()`/`duckdb_views()`.
-  The relation kind stays the richer, database-requiring layer for
+  relation's `Produces` edge is from its database's own configured
+  `list` command (decision 37). The relation kind stays the richer, database-requiring layer for
   whoever already has one; decision 33 is what the common,
   database-free case gets instead.
 
