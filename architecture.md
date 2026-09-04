@@ -234,6 +234,12 @@ A SQL block's inferred `Reads` edges are written back with its result, one resol
 
 **Rationale:** A corpus only knows the relations some block's own run happened to produce. A table created by hand, by a tool outside `dankg`, or documented once by a section since deleted, is invisible to it, and that is exactly the gap `--live` closes: the reader asked, `dankg` spawned one read-only command, and anything it found with no explanation gets flagged. Making that command itself protocol-agnostic keeps decision 1 intact for this too: DanKG must not learn a wire protocol or link a client library just to ask "what tables exist," so the reader supplies the one command that answers it, exactly as `[db.*] command` already does for running a block's own SQL. The same reasoning is why the automatic diff runs through `list` too, rather than assuming DuckDB's own catalog functions: DuckDB is only the first engine this gets tested against, not a special case baked into the code.
 
+## Decision 38: Relation nodes cost nothing to enter
+
+An edge landing on a relation node -- either direction of `Produces`/`Reads` -- costs 0 against `--depth`. The same edge kind leaving a relation, onto a block, costs the ordinary 1. A relation therefore renders alongside every block already in view that touches it, at no budget cost, while a further block reached through it still costs exactly the hop a direct edge would.
+
+**Rationale:** Containment already costs a hop (*View selection*, above), and that is flagged there as a problem, not a model to repeat here. A relation reads more like an attribute of the block that produces or reads it than like a fifth heading a reader had to click through to reach -- "a table one hop from its ETL is not really a hop." Zero-cost entry only, though: if leaving a relation were free too, every block that ever touched it would collapse to zero distance from every other, and `--depth` would stop bounding anything once a corpus had one widely-shared table. Lineage stays exactly the traversal *Provenance without a driver* already promises, just one that never double-charges for stopping to look at the table itself. One real hop still buys every other block touching the same relation, sibling producer or downstream reader alike, once a reader spends it. That is not a leak to guard against. A shared table's other writers are exactly the kind of structure the induced-subgraph rule already refuses to hide once it is one hop away, and `--depth 0` is the reader's own filter for not wanting it yet.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -2153,6 +2159,58 @@ corresponding diff, unlike every other view `dankg` draws.
   `<db>::<schema>.<table>` shape, or DanKG normalizes it, is
   unresolved.
 
+## Relation depth
+
+Decision 38. *View selection* already counts a hop in both directions,
+and even lets containment count as one, flagged there as making a
+deeply nested file feel shallow at a low `--depth`.
+
+<!-- dankg:depends target=#view-selection quote="Hops are counted in *both* directions" -->
+<!-- dankg:depends target=#view-selection quote="Containment counts as a hop too" -->
+
+A relation risks the same problem, one layer worse: every block that
+touches a shared table would need naming individually, or a reader
+would need `--all`, just to see what a block sitting right next to its
+own ETL means.
+
+The fix is not exempting a relation from the view. It is exempting the
+one edge that brings a relation in from the budget that limits
+everything else. Stepping onto a relation node -- a `Produces` edge
+from a block already in view, or a `Reads` edge likewise -- costs 0.
+Stepping off one, onto a block the relation names, costs the ordinary
+1, exactly like a `Link` edge. A relation therefore always renders next
+to any block already selected that touches it, at any `--depth`,
+including 0, but does not itself shorten the distance between two
+otherwise-unrelated blocks that happen to share it.
+
+No new machinery draws the result. The *induced subgraph* rule already
+renders every edge between two selected nodes, not just the edge that
+discovered either one: a relation with two blocks already in view, one
+producing and one reading, shows both edges the moment either block
+earns its own way in.
+
+<!-- dankg:depends target=#view-selection quote="survives even when it was not the edge that brought" -->
+
+One hop still buys every other block touching that same relation, a
+sibling producer into a shared table exactly as much as a downstream
+reader. That is deliberate, not a leak to close later. The corpus
+already refuses to hide structure it can see once two nodes are both
+in view; a relation's other writers are exactly that structure, one
+hop away. A reader not wanting it yet already has the filter:
+`--depth 0`.
+
+<!-- dankg:depends target=#view-selection quote="Dropping it would render a graph missing structure it can plainly see." -->
+
+## Open questions (Relation depth)
+
+- The layout phase weights containment edges 2 and link edges 1,
+  pulling a parent in line with its children (*Layout*, above).
+  Whether a `Produces`/`Reads` edge needs its own weight, or inherits
+  link's, is undecided; a relation drawn far off to the side of its own
+  ETL would undercut the entire point of costing nothing to reach it.
+
+<!-- dankg:depends target=#layout quote="Containment edges carry weight 2 and link edges weight 1." -->
+
 ## What this buys an agent
 
 project.md's third key feature is that an LLM can run DanKG because it
@@ -2170,9 +2228,9 @@ file.
 - Does `dankg graph` ever touch the database? Decision 37 (*Live
   catalog*, above) resolves this: never by default, `--live` is the
   explicit opt-in.
-- Are relation nodes counted against `--depth`, or are they always
-  shown with their producing block? Probably the latter. A table one
-  hop from its ETL is not really a hop.
+- Are relation nodes counted against `--depth`? Decision 38 (*Relation
+  depth*, above) resolves this: entering one is free, leaving one for
+  a further block still costs the ordinary hop.
 - Write-back for a `SELECT`: the result block holds the query output
   as a markdown table, truncated at the same 64 KiB. Whether the row
   count belongs in the hash, so that new data marks the result stale,
