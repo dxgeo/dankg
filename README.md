@@ -223,11 +223,15 @@ The file still resolves correctly. But the colliding heading's slug is
 order-dependent. A later rename or reorder can silently repoint it.
 `check` tells you whether that risk is real. A collision with a
 written link or `dankg:depends` marker already pointing at one of its
-two slugs prints as referenced. One with neither prints as cosmetic
-(see architecture.md, *Title collisions*).
+two slugs prints as referenced. One with neither prints as cosmetic.
+It also reports whether the pair is sibling (same immediate parent) or
+differently-nested. A reader is far more likely to confuse two
+siblings sharing a title than two headings under clearly different
+sections (see architecture.md, *Title collisions*).
 
 <!-- dankg:depends target=architecture.md#title-collisions quote="That slug is order-dependent, though." -->
 <!-- dankg:depends target=architecture.md#title-collisions quote="A collision with a reference prints as a live risk." -->
+<!-- dankg:depends target=architecture.md#title-collisions quote="A sibling pair looks identical to a reader scanning the one section they are both under." -->
 
 ### `fmt` — normalize markdown
 

@@ -180,7 +180,9 @@ fn format_files(paths: &[String], check: bool) -> Result<bool, String> {
 /// Each collision is also cross-referenced against `index_graph`'s link
 /// edges and the `depends_targets` the third pass already collected, so
 /// the report distinguishes a live risk (something already points at one
-/// of the two slugs) from a cosmetic one (nothing does).
+/// of the two slugs) from a cosmetic one (nothing does), and separately
+/// reports whether the pair is `sibling` (same immediate parent) or
+/// differently-nested (`TitleCollision::sibling`, `graph/build.rs`).
 fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
@@ -305,9 +307,13 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     // are both checked, so this needs nothing new to load.
     let mut title_dupes = 0usize;
     let mut title_dupes_referenced = 0usize;
+    let mut title_dupes_sibling = 0usize;
     for file in &corpus.files {
         for collision in build::title_collisions(&file.nodes) {
             title_dupes += 1;
+            if collision.sibling {
+                title_dupes_sibling += 1;
+            }
             let refs = index_graph.incoming_link_count(&collision.node.id)
                 + index_graph.incoming_link_count(&collision.first.id)
                 + depends_targets
@@ -320,8 +326,9 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
             } else {
                 "no incoming references; cosmetic".to_string()
             };
+            let shape = if collision.sibling { "sibling" } else { "differently-nested" };
             eprintln!(
-                "dup-title: {}:{} `{}` shares its title with {}:{} -- resolved as #{} instead of #{} ({note})",
+                "dup-title: {}:{} `{}` shares its title with {shape} {}:{} -- resolved as #{} instead of #{} ({note})",
                 collision.node.file,
                 collision.node.line,
                 collision.node.title,
@@ -342,7 +349,9 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     eprintln!("{stale} stale of {checked} eval result(s)");
     eprintln!("{prose_stale} of {prose_checked} prose dependency marker(s) advisory-stale");
     eprintln!("{} stale of {filedep_checked} file dependency declaration(s)", filedep_issues.len());
-    eprintln!("{title_dupes} duplicate-title node(s), advisory ({title_dupes_referenced} referenced)");
+    eprintln!(
+        "{title_dupes} duplicate-title node(s), advisory ({title_dupes_referenced} referenced, {title_dupes_sibling} sibling)"
+    );
     Ok(unresolved == 0 && stale == 0 && filedep_issues.is_empty())
 }
 

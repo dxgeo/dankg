@@ -212,9 +212,9 @@ Adds a `blocks` array (name, `line`, `end_line`) per file, straight off the same
 
 ## Decision 34: Title collision check
 
-`dankg check` reports every heading whose title collides with an earlier heading's in the same file. It classifies each as *referenced* (a written link or `dankg:depends` marker already targets one of the pair's two slugs) or *cosmetic* (nothing does). Neither classification fails the exit code. `graph::build::title_collisions` scopes the underlying collision detection to headings. A named, top-level block sharing its own containing heading's title is excluded.
+`dankg check` reports every heading whose title collides with an earlier heading's in the same file. It classifies each as *referenced* (a written link or `dankg:depends` marker already targets one of the pair's two slugs) or *cosmetic* (nothing does). It also classifies each, separately, as *sibling* (same immediate parent) or *differently-nested*. Neither classification fails the exit code. `graph::build::title_collisions` scopes the underlying collision detection to headings. A named, top-level block sharing its own containing heading's title is excluded.
 
-**Rationale:** A colliding heading still gets a distinct slug from `Slugger` (*Slugs and node identity*, below). The file resolves correctly exactly as written. But that slug is order-dependent. Renaming, reordering, or deleting the earlier same-titled heading silently repoints anything already pinned to the later one's suffix. Only a pair something actually references is at real risk of that. Splitting referenced from cosmetic makes the report actionable. The reader no longer has to verify it by hand. A block is excluded for a different reason. It cannot precede the heading that contains it. That particular pair can never actually reorder.
+**Rationale:** A colliding heading still gets a distinct slug from `Slugger` (*Slugs and node identity*, below). The file resolves correctly exactly as written. But that slug is order-dependent. Renaming, reordering, or deleting the earlier same-titled heading silently repoints anything already pinned to the later one's suffix. Only a pair something actually references is at real risk of that. Splitting referenced from cosmetic makes the report actionable. The reader no longer has to verify it by hand. Sibling versus differently-nested is a different question. It asks whether a *human* reading the raw document, not a link resolver, is likely to confuse the two. A block is excluded for a different reason. It cannot precede the heading that contains it. That particular pair can never actually reorder.
 
 # Terminology
 
@@ -1892,14 +1892,23 @@ prose-dependency pass, above. A collision with a reference prints as a
 live risk. A collision with none prints as cosmetic. It is safe to
 leave for whenever the author gets to it.
 
+Every collision also prints as *sibling* (the two headings share the
+same immediate parent, or both have none) or *differently-nested*
+(they do not). `Node` already carries `parent`. This needs nothing new
+to load. A sibling pair looks identical to a reader scanning the one
+section they are both under. A differently-nested pair rarely does.
+Whichever surrounding section the reader is already in disambiguates
+it. This is a second, independent axis, not a replacement for
+referenced/cosmetic. A sibling pair can still be cosmetic. A
+differently-nested pair can still be referenced.
+
 ## Open questions (Title collisions)
 
-- Every report today is file-scoped, deliberately (see this section's
-  own opening paragraph). A heading nested under a clearly different
-  parent section is less likely to confuse a reader than two *siblings*
-  sharing a title. This holds even before counting references. Whether
-  the report should also distinguish that shape -- sibling versus
-  differently-nested -- is still open.
+- `sibling` compares only the immediate parent, not the full ancestor
+  chain. Two headings could share a grandparent under different
+  immediate parents. Or they could nest many levels apart under the
+  same top-level section. Whether a graded "how many ancestors differ"
+  measure would tell a reader more than this binary split is open.
 
 # Literate database management
 

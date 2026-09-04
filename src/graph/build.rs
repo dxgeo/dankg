@@ -262,6 +262,14 @@ fn set_extents(nodes: &mut [Node], line_count: u32) {
 pub struct TitleCollision<'a> {
     pub node: &'a Node,
     pub first: &'a Node,
+    /// `node.parent == first.parent`: the two headings sit directly under
+    /// the same parent (or both have none, both top-level). Two siblings
+    /// sharing a title look identical to a reader scanning the one
+    /// section they are both under. Two headings nested under clearly
+    /// different parents rarely do, even though both trip the same slug
+    /// collision -- whichever surrounding section a reader is in already
+    /// disambiguates them.
+    pub sibling: bool,
 }
 
 /// Every collision among `nodes`' headings (one file's worth, in document
@@ -278,7 +286,7 @@ pub fn title_collisions(nodes: &[Node]) -> Vec<TitleCollision<'_>> {
         }
         let base = slugify(&node.title);
         match seen.get(&base) {
-            Some(&first) => out.push(TitleCollision { node, first }),
+            Some(&first) => out.push(TitleCollision { node, first, sibling: node.parent == first.parent }),
             None => {
                 seen.insert(base, node);
             }
@@ -508,6 +516,32 @@ mod tests {
         assert_eq!(collisions.len(), 1);
         assert_eq!(collisions[0].node.id.slug, "notes-1");
         assert_eq!(collisions[0].first.id.slug, "notes");
+    }
+
+    #[test]
+    fn two_top_level_headings_with_no_parent_are_siblings() {
+        let f = build_src("a.md", "# Notes\n\n# Notes\n");
+        let collisions = title_collisions(&f.nodes);
+        assert!(collisions[0].sibling, "both have no parent, so both are alike");
+    }
+
+    #[test]
+    fn two_headings_under_different_parents_are_not_siblings() {
+        let f = build_src(
+            "a.md",
+            "# Section A\n\n## Notes\n\ntext\n\n# Section B\n\n## Notes\n\ntext\n",
+        );
+        let collisions = title_collisions(&f.nodes);
+        assert_eq!(collisions.len(), 1);
+        assert!(!collisions[0].sibling, "each Notes has a different Section as its parent");
+    }
+
+    #[test]
+    fn two_headings_under_the_same_parent_are_siblings() {
+        let f = build_src("a.md", "# Section\n\n## Notes\n\ntext\n\n## Notes\n\ntext\n");
+        let collisions = title_collisions(&f.nodes);
+        assert_eq!(collisions.len(), 1);
+        assert!(collisions[0].sibling, "both Notes share the same Section parent");
     }
 
     #[test]
