@@ -5,6 +5,7 @@ pub mod cache;
 pub mod ignore;
 pub mod index;
 pub mod model;
+pub mod query;
 pub mod resolve;
 pub mod slug;
 pub mod view;

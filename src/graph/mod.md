@@ -1,6 +1,6 @@
 # Graph mod
 
-`dankg graph`'s eight pieces, plus the two re-exports (`Corpus`, and the
+`dankg graph`'s nine pieces, plus the two re-exports (`Corpus`, and the
 `Edge`/`EdgeKind`/`Graph`/`Node`/`NodeId`/`NodeKind` family) that let a
 caller elsewhere in the crate write `graph::Corpus` instead of reaching
 into `graph::index::Corpus` directly.
@@ -11,6 +11,7 @@ pub mod cache;
 pub mod ignore;
 pub mod index;
 pub mod model;
+pub mod query;
 pub mod resolve;
 pub mod slug;
 pub mod view;
