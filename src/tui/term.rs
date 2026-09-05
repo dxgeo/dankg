@@ -74,7 +74,23 @@ unsafe extern "C" {
     fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32;
     fn tcsetattr(fd: i32, optional_actions: i32, termios_p: *const Termios) -> i32;
     fn cfmakeraw(termios_p: *mut Termios);
-    fn ioctl(fd: i32, request: u64, argp: *mut Winsize) -> i32;
+    // `ioctl`'s real prototype is `int ioctl(int, unsigned long, ...)` --
+    // variadic. Declaring the third argument as an ordinary fixed
+    // parameter compiles, but silently gets the calling convention wrong
+    // on Apple's arm64 ABI, which requires every variadic argument to be
+    // passed on the stack even when it is pointer-sized and would
+    // otherwise go in a register under a fixed-arity call (Apple's own
+    // "Writing ARM64 Code for Apple Platforms", *the variadic calling
+    // convention*). A fixed-arity Rust declaration puts `argp` in a
+    // register instead, so the real `ioctl` reads garbage for it: the
+    // call fails (or writes nowhere useful) with no crash, `size` returns
+    // `Err`, and the caller's 24x80 fallback silently masks a real
+    // terminal of any other size. Declaring the tail as `...` here makes
+    // rustc emit the correct, platform-specific variadic convention --
+    // stack-passed on Apple's arm64, register-passed wherever a fixed
+    // and a variadic call would not actually differ -- the same as any
+    // C compiler would for a genuinely variadic call.
+    fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn isatty(fd: i32) -> i32;
 }
 
@@ -83,7 +99,10 @@ unsafe extern "C" {
 /// or the non-interactive shell this was developed under, for instance.
 pub fn size() -> io::Result<(u16, u16)> {
     let mut ws = Winsize::default();
-    let rc = unsafe { ioctl(STDIN_FILENO, TIOCGWINSZ, &mut ws) };
+    // `&mut ws` alone infers as `&mut Winsize` here, not the `*mut
+    // Winsize` a variadic C call needs -- an explicit cast, since there
+    // is no fixed parameter type left for inference to borrow from.
+    let rc = unsafe { ioctl(STDIN_FILENO, TIOCGWINSZ, &mut ws as *mut Winsize) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }

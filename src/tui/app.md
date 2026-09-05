@@ -37,6 +37,13 @@ does not jump on every keypress that was already visible.
 //! screen (`draw::scroll_to_show`). This is not centred. This way, the
 //! reader's sense of where things are does not jump on every keypress
 //! that was already visible.
+//!
+//! `dankg tui` also starts from a narrower default depth than `dankg
+//! graph` (`config::DEFAULT_TUI_DEPTH`), since a character grid has no
+//! zoom to fall back on. `/` is the reader's way back out across a large
+//! corpus: it jumps to the first node whose title matches, anywhere in
+//! the whole index, re-centring the view around it when it was not
+//! already on screen (`App::confirm_search`).
 
 use super::{draw, editor, eval, expand, input, term};
 use crate::config::{Config, Keymap};
@@ -92,6 +99,11 @@ struct App {
     expanded: Vec<NodeId>,
     graph: Graph,
     layout: Layout,
+    /// `build`'s own resolved `[tui] depth`, kept so `/`'s re-centring
+    /// (`confirm_search`) can select a fresh view at the same width the
+    /// initial load used, without re-reading config or needing its own
+    /// `Diags`.
+    default_depth: u32,
     selected: NodeId,
     /// Top-left corner of the visible window into the drawn grid, in grid
     /// rows/columns. Normally `render` is the only thing that moves these,
@@ -110,10 +122,18 @@ struct App {
     /// navigation key cancels it too, since the cycle belongs to whichever
     /// node was selected when it started.
     block_select: Option<BlockSelect>,
+    /// `Some` while `/`-jumping: the title text typed so far. `enter`
+    /// jumps to the first match and clears it; `esc` cancels with no
+    /// jump. Modal the same way `block_select` is -- every key but
+    /// enter/esc/backspace/a-character is swallowed while it is active
+    /// (`event_loop`), so navigation cannot run out from under a search
+    /// still being typed.
+    search: Option<String>,
     /// The one line `render` reserves at the bottom of the viewport: the
-    /// block-cycle list while `block_select` is active, or the last eval
-    /// outcome afterward. `None` means rendering the graph at full height,
-    /// with no status line at all. There is nothing transient to say.
+    /// block-cycle list while `block_select` is active, the `/query` typed
+    /// so far while `search` is active, or the last eval outcome
+    /// afterward. `None` means rendering the graph at full height, with
+    /// no status line at all. There is nothing transient to say.
     status: Option<String>,
     /// `?` toggles this: a full-screen keybinding reference, replacing the
     /// graph rather than overlaying it. There is no compositing here.
@@ -135,6 +155,9 @@ iteration instead of silently vanishing. The help screen is fully modal:
 every key but its own dismissers is swallowed before it ever reaches the
 match below. This way, nothing about the graph (selection, panning, an
 in-progress eval cycle) can change while it has replaced the screen.
+`/`-searching is modal the same way, one step narrower: only enter,
+esc, backspace, and a character reach it, so navigation cannot run out
+from under a query still being typed.
 
 ```rust name=run_and_event_loop path=tui/app.rs
 /// `dankg tui <path>...`. Needs a real terminal. There is nothing sound
@@ -180,8 +203,21 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
             continue;
         }
 
+        if app.search.is_some() {
+            match key {
+                input::Key::Enter => app.confirm_search(),
+                input::Key::Esc => app.cancel_search(),
+                input::Key::Backspace => app.search_backspace(),
+                input::Key::Char(c) => app.search_push(c),
+                _ => {}
+            }
+            render(app, out)?;
+            continue;
+        }
+
         match key {
             input::Key::Char('?') => app.toggle_help(),
+            input::Key::Char('/') => app.start_search(),
             input::Key::Up => {
                 app.clear_transient();
                 app.up();
@@ -295,8 +331,10 @@ fn help_lines(keys: &Keymap) -> Vec<String> {
         ),
         "  enter              open the selected node in your editor".to_string(),
         "                     (or run the cycled block, while eval-cycling)".to_string(),
+        "                     (or jump to the typed match, while searching)".to_string(),
         "  tab                expand the selected node's hidden neighbours".to_string(),
-        "  esc                cancel an eval cycle".to_string(),
+        "  /                  jump to a node by title; esc cancels".to_string(),
+        "  esc                cancel an eval cycle or a search".to_string(),
         String::new(),
         format!("  {}                  cycle the selected node's named blocks; enter runs it", keys.eval),
         format!("  {}                  toggle panning (arrows/hjkl move the viewport instead)", keys.pan),
@@ -379,11 +417,12 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     }
 
     let (total_rows, total_cols) = draw::dimensions(&app.layout);
-    // One row reserved at the bottom for `app.status`, when there is one.
-    // This is a fixed upper bound on how much of the viewport the graph
-    // itself can ever claim, so leaving room for it never depends on how
-    // tall the graph's own content happens to be this frame.
-    let status_rows = usize::from(app.status.is_some());
+    // One row reserved at the bottom for `app.status`, or the `/query`
+    // typed so far while `app.search` is active. This is a fixed upper
+    // bound on how much of the viewport the graph itself can ever claim,
+    // so leaving room for it never depends on how tall the graph's own
+    // content happens to be this frame.
+    let status_rows = usize::from(app.status.is_some() || app.search.is_some());
     let content_rows = term_rows.saturating_sub(status_rows).max(1);
 
     if app.panning {
@@ -411,7 +450,13 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     }
 
     let mut lines = draw::render_ansi(&visible);
-    if let Some(status) = &app.status {
+    // A search in progress takes the one reserved row over `app.status`:
+    // it is what the reader is actively typing, and the two never both
+    // hold something real at once (`start_search` clears any prior
+    // status via `clear_transient`).
+    if let Some(query) = &app.search {
+        lines.push(format!("/{query}").chars().take(term_cols).collect());
+    } else if let Some(status) = &app.status {
         lines.push(status.chars().take(term_cols).collect());
     }
     write_frame(out, &lines, term_rows)
@@ -429,25 +474,34 @@ a node's hidden neighbours that the latter alone would not carry.
 /// the view, lay it out. Shared by the initial load and every reload after
 /// returning from the editor. Returns the whole resolved corpus alongside
 /// the selected view. `tab` needs it to find a node's hidden neighbours.
+/// The resolved default depth comes back too, so `/`'s own re-centring
+/// (below) can select around a fresh entry the same width the initial
+/// load did, without re-reading config or needing a `Diags` of its own.
+///
+/// `[tui] depth` (`Config::tui_depth`), not `[graph] depth`: the TUI's
+/// own, deliberately narrower default (`config::DEFAULT_TUI_DEPTH`). A
+/// character grid has no zoom to fall back on the way HTML's output
+/// does, so the width a scrollable, zoomable page affords already reads
+/// as sprawling here, especially over a large corpus.
 fn build(
     paths: &[String],
     cache: bool,
     depth: Option<u32>,
     all: bool,
-) -> Result<(PathBuf, Config, Keymap, Graph, Graph, Layout, Diags), String> {
+) -> Result<(PathBuf, Config, Keymap, Graph, Graph, Layout, u32, Diags), String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
     let index = resolve::resolve(&corpus.files, &mut diags);
-    let default_depth = corpus.config.depth(&mut diags);
+    let default_depth = corpus.config.tui_depth(&mut diags);
     let keys = corpus.config.keymap(&mut diags);
     let graph = view::select_view(&index, &corpus.entries, depth, all, default_depth);
     let laid = layout::layout(&graph);
-    Ok((corpus.root, corpus.config, keys, index, graph, laid, diags))
+    Ok((corpus.root, corpus.config, keys, index, graph, laid, default_depth, diags))
 }
 
 impl App {
     fn load(paths: &[String], cache: bool, depth: Option<u32>, all: bool) -> Result<App, String> {
-        let (root, config, keys, index, graph, laid, diags) = build(paths, cache, depth, all)?;
+        let (root, config, keys, index, graph, laid, default_depth, diags) = build(paths, cache, depth, all)?;
         let selected = laid
             .nodes
             .first()
@@ -467,11 +521,13 @@ impl App {
             expanded: Vec::new(),
             graph,
             layout: laid,
+            default_depth,
             selected,
             scroll_row: 0,
             scroll_col: 0,
             panning: false,
             block_select: None,
+            search: None,
             status: None,
             help: false,
             diags,
@@ -502,7 +558,8 @@ impl App {
     /// a stale expansion risks a confusing placement more than starting
     /// clean costs the reader a keypress.
     fn reload(&mut self) {
-        let Ok((root, config, keys, index, graph, laid, diags)) = build(&self.paths, self.cache, self.depth, self.all)
+        let Ok((root, config, keys, index, graph, laid, default_depth, diags)) =
+            build(&self.paths, self.cache, self.depth, self.all)
         else {
             return;
         };
@@ -524,6 +581,7 @@ impl App {
         self.base_layout = laid.clone();
         self.graph = graph;
         self.layout = laid;
+        self.default_depth = default_depth;
         self.scroll_row = 0;
         self.scroll_col = 0;
         // A cycle belongs to the selection that was current when it
@@ -582,6 +640,87 @@ impl App {
     fn clear_transient(&mut self) {
         self.block_select = None;
         self.status = None;
+    }
+}
+```
+
+`/`, "jump to a node by title" (architecture.md, *Terminal UI*): `start_search`
+opens the typed-query buffer, `search_push`/`search_backspace` edit it one
+character at a time, and `esc`/`enter` (`cancel_search`/`confirm_search`)
+close it. This is the whole of it -- `event_loop`'s own modal check routes
+every key but those to these five while `search` is `Some`.
+
+```rust name=search path=tui/app.rs
+impl App {
+    /// `/`: opens the typed-query buffer. Cancels any in-progress block
+    /// cycle first (`clear_transient`), the same as any other action that
+    /// is about to move the selection out from under one.
+    fn start_search(&mut self) {
+        self.clear_transient();
+        self.search = Some(String::new());
+    }
+
+    fn search_push(&mut self, c: char) {
+        if let Some(q) = &mut self.search {
+            q.push(c);
+        }
+    }
+
+    fn search_backspace(&mut self) {
+        if let Some(q) = &mut self.search {
+            q.pop();
+        }
+    }
+
+    /// `esc`, while searching: cancels with no jump. The typed text is
+    /// discarded, not kept for a later re-open.
+    fn cancel_search(&mut self) {
+        self.search = None;
+    }
+
+    /// `enter`, while searching: jumps to the first node whose title
+    /// contains the typed text, case-insensitively. Search order matters
+    /// here: the currently drawn view (`graph`) is tried before the whole
+    /// corpus (`index`), so a title that already matches something on
+    /// screen just moves the selection there rather than re-centring the
+    /// whole view around it for no reason. A match found only in `index`
+    /// instead becomes a fresh entry -- the view is rebuilt around it at
+    /// `default_depth`, exactly the width the initial load builds one at
+    /// -- since the entire point of searching the whole corpus is
+    /// reaching a node the reader cannot already see. No match leaves the
+    /// selection and view alone and reports so on the status line, the
+    /// same "nowhere else to report to" reasoning `enter`'s editor spawn
+    /// already follows for its own best-effort failures.
+    fn confirm_search(&mut self) {
+        let query = self.search.take().unwrap_or_default();
+        if query.is_empty() {
+            return;
+        }
+        let needle = query.to_lowercase();
+        let find = |g: &Graph| -> Option<NodeId> {
+            g.nodes.iter().find(|n| n.title.to_lowercase().contains(&needle)).map(|n| n.id.clone())
+        };
+
+        match find(&self.graph).or_else(|| find(&self.index)) {
+            Some(id) if self.graph.contains(&id) => {
+                self.selected = id;
+            }
+            Some(id) => {
+                let graph = view::select(&self.index, std::slice::from_ref(&id), self.default_depth);
+                let laid = layout::layout(&graph);
+                self.expanded.clear();
+                self.base_graph = graph.clone();
+                self.base_layout = laid.clone();
+                self.graph = graph;
+                self.layout = laid;
+                self.selected = id;
+                self.scroll_row = 0;
+                self.scroll_col = 0;
+            }
+            None => {
+                self.status = Some(format!("/{query}: not found"));
+            }
+        }
     }
 }
 ```
@@ -793,11 +932,13 @@ impl App {
             expanded: Vec::new(),
             graph: base,
             layout: laid,
+            default_depth: crate::config::DEFAULT_TUI_DEPTH,
             selected,
             scroll_row: 0,
             scroll_col: 0,
             panning: false,
             block_select: None,
+            search: None,
             status: None,
             help: false,
             diags: Diags::new("test"),
@@ -885,6 +1026,80 @@ mod tests {
         a.toggle_expand();
         assert_eq!(a.graph.nodes.len(), 1, "collapsed back to just Entry");
         assert!(a.expanded.is_empty());
+    }
+
+    #[test]
+    fn slash_opens_an_empty_query_and_typing_and_backspace_edit_it() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        assert!(a.search.is_none());
+        a.start_search();
+        assert_eq!(a.search.as_deref(), Some(""));
+        a.search_push('f');
+        a.search_push('o');
+        assert_eq!(a.search.as_deref(), Some("fo"));
+        a.search_backspace();
+        assert_eq!(a.search.as_deref(), Some("f"));
+    }
+
+    #[test]
+    fn esc_cancels_search_without_moving_the_selection() {
+        let mut a = app(&[("a.md", "# One\n\n## Two\n")]);
+        let before = a.selected.clone();
+        a.start_search();
+        a.search_push('t');
+        a.cancel_search();
+        assert!(a.search.is_none());
+        assert_eq!(a.selected, before);
+    }
+
+    #[test]
+    fn search_jumps_to_a_visible_node_by_title_case_insensitively() {
+        let mut a = app(&[("a.md", "# One\n\n## Alpha\n\n## Beta\n")]);
+        a.start_search();
+        for c in "BETA".chars() {
+            a.search_push(c);
+        }
+        a.confirm_search();
+        assert!(a.search.is_none(), "confirming closes the query");
+        assert_eq!(a.selected.slug, "beta");
+    }
+
+    #[test]
+    fn search_matches_a_substring_not_just_the_whole_title() {
+        let mut a = app(&[("a.md", "# One\n\n## Alphabet\n")]);
+        a.start_search();
+        for c in "phab".chars() {
+            a.search_push(c);
+        }
+        a.confirm_search();
+        assert_eq!(a.selected.slug, "alphabet");
+    }
+
+    #[test]
+    fn search_recentres_the_view_when_the_match_is_outside_it() {
+        let mut a = app_with_hidden_child();
+        assert_eq!(a.graph.nodes.len(), 1, "Child starts hidden, same as the tab tests above");
+        a.start_search();
+        for c in "child".chars() {
+            a.search_push(c);
+        }
+        a.confirm_search();
+        assert_eq!(a.selected.slug, "child");
+        assert!(a.graph.nodes.iter().any(|n| n.id.slug == "child"), "the view now includes the match");
+        assert!(a.graph.nodes.iter().any(|n| n.id.slug == "entry"), "and what depth 1 from it still reaches");
+    }
+
+    #[test]
+    fn search_with_no_match_reports_on_the_status_line_and_leaves_selection_alone() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        let before = a.selected.clone();
+        a.start_search();
+        for c in "nope".chars() {
+            a.search_push(c);
+        }
+        a.confirm_search();
+        assert_eq!(a.selected, before);
+        assert_eq!(a.status.as_deref(), Some("/nope: not found"));
     }
 
     #[test]
@@ -976,6 +1191,64 @@ mod tests {
     #[test]
     fn term_dimensions_passes_through_a_real_size() {
         assert_eq!(term_dimensions(Ok((40, 120))), (40, 120));
+    }
+
+    /// Writes a small corpus to a fresh temp directory and returns its
+    /// root, so `build` (which reads real config off disk via
+    /// `index::load`, unlike `graph_of`'s in-memory-only corpus) has
+    /// something real to walk. Every call gets its own directory (a
+    /// counter, not just the pid), the same reasoning `app_with_real_file`
+    /// below already follows: tests run in parallel.
+    fn write_corpus(files: &[(&str, &str)]) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("dankg-tui-build-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, content) in files {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, content).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn build_defaults_to_the_tui_specific_depth_not_graph_depth() {
+        // An unset `[tui] depth` must not fall back to `[graph] depth`
+        // (decision: *Terminal UI*) -- the whole point of a separate,
+        // narrower default is that configuring one never silently moves
+        // the other.
+        let dir = write_corpus(&[
+            (".dankg/config", "[graph]\ndepth = 5\n"),
+            ("a.md", "# A\n\n[to b](b.md#b)\n"),
+            ("b.md", "# B\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let (.., default_depth, _diags) = build(&[path], false, None, false).unwrap();
+        assert_eq!(default_depth, crate::config::DEFAULT_TUI_DEPTH);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_honors_an_explicit_tui_depth_over_the_narrower_default() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ndepth = 3\n"),
+            ("a.md", "# A\n\n[to b](b.md#b)\n"),
+            ("b.md", "# B\n\n[to c](c.md#c)\n"),
+            ("c.md", "# C\n\n[to d](d.md#d)\n"),
+            ("d.md", "# D\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let (_, _, _, _, graph, _, default_depth, _) = build(&[path], false, None, false).unwrap();
+        assert_eq!(default_depth, 3);
+        assert!(
+            graph.nodes.iter().any(|n| n.id.to_string() == "d#d"),
+            "depth 3 from a should reach d, 3 hops away: {:?}",
+            graph.nodes.iter().map(|n| n.id.to_string()).collect::<Vec<_>>()
+        );
     }
 
     /// `eval::blocks_in_section`/`eval::run` re-read from disk, unlike

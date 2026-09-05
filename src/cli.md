@@ -121,14 +121,18 @@ options:
   --no-write       run and print output, but do not write results back
   --lang <lang>    which fence language tangle assembles
 
-`tui` needs a real terminal and draws the same view `graph` would, with the
-selected node's source line handed to `[editor] command` on enter (arrows or
-hjkl to move, tab to reveal a node's hidden neighbours, enter to open, e to
-cycle a node's named blocks and enter to run the cycled one in place, p to
-toggle panning the viewport instead of the selection, r to collapse back to
-the entry view, q to quit, ? for a full-screen keybinding reference). The
-letter keys -- everything but the arrows, enter, tab, esc, and `?` -- are
-remappable in `[keys]`.
+`tui` needs a real terminal and draws the view `graph` would draw at the
+same `--depth`/`--all`, but defaults to its own narrower depth
+(`[tui] depth`, unset falls back to a smaller default than `[graph]
+depth`'s own) since a character grid has no zoom to fall back on. The
+selected node's source line is handed to `[editor] command` on enter
+(arrows or hjkl to move, tab to reveal a node's hidden neighbours, enter
+to open, / to jump to a node by title with enter to confirm and esc to
+cancel, e to cycle a node's named blocks and enter to run the cycled one
+in place, p to toggle panning the viewport instead of the selection, r
+to collapse back to the entry view, q to quit, ? for a full-screen
+keybinding reference). The letter keys -- everything but the arrows,
+enter, tab, esc, `/`, and `?` -- are remappable in `[keys]`.
 
 `graph`, `index`, and `tui` discover the root by walking up for a `.dankg/` directory,
 falling back to the directory the named paths share, and then index every
