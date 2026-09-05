@@ -8,7 +8,8 @@ only answers a question about one already assembled.
 ```rust name=module_doc path=graph/query.rs
 //! Read-only lookups over an already-built `Graph`.
 
-use super::model::{EdgeKind, Graph, NodeId, NodeKind};
+use super::build::relation_node;
+use super::model::{EdgeKind, Graph, Node, NodeId, NodeKind};
 ```
 
 `find_producer` is decision 35's own resolution rule, exactly as written:
@@ -48,6 +49,29 @@ pub fn find_producer(graph: &Graph, relation_name: &str) -> Result<NodeId, Strin
             many.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ")
         )),
     }
+}
+```
+
+`live_orphans` is decision 37's own filter: `dankg graph --live` spawns `db_name`'s configured `list` and hands every identifier it reported here. Anything `graph` already has a node for -- produced, read, or listed by an earlier database in the same run -- is already explained, so only a name with no node at all comes back. This never mutates `graph` itself: nothing from `--live` is cached or written back, so building the new nodes is the caller's decision, not this function's.
+
+```rust name=live_orphans path=graph/query.rs
+/// Relation names `db_name`'s configured `list` command reported that
+/// `graph` has no node for at all -- a table created by hand, by a tool
+/// `dankg` never touched, or documented once by a section since deleted.
+/// Duplicates within `relations` collapse to one node, the same as two
+/// files naming the same relation already do at build time.
+pub fn live_orphans(graph: &Graph, db_name: &str, relations: &[String]) -> Vec<Node> {
+    let db_ns = format!("db:{db_name}");
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for name in relations {
+        let id = NodeId::new(&db_ns, name.as_str());
+        if graph.contains(&id) || !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(relation_node(&id, name));
+    }
+    out
 }
 ```
 
@@ -130,6 +154,43 @@ mod tests {
         };
         let err = find_producer(&g, "orders").unwrap_err();
         assert!(err.contains("ambiguous"), "{err:?}");
+    }
+
+    #[test]
+    fn live_orphans_returns_a_node_for_a_name_the_graph_does_not_have() {
+        let g = Graph { nodes: vec![], edges: vec![] };
+        let orphans = live_orphans(&g, "warehouse", &["ghost_table".to_string()]);
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].id, NodeId::new("db:warehouse", "ghost_table"));
+        assert_eq!(orphans[0].kind, NodeKind::Relation);
+        assert_eq!(orphans[0].title, "ghost_table");
+    }
+
+    #[test]
+    fn live_orphans_skips_a_name_the_graph_already_explains() {
+        let rel = relation("warehouse", "orders");
+        let g = Graph { nodes: vec![rel.clone()], edges: vec![produces(("a", "setup"), &rel.id)] };
+        assert!(live_orphans(&g, "warehouse", &["orders".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn live_orphans_dedupes_a_name_listed_twice() {
+        let g = Graph { nodes: vec![], edges: vec![] };
+        let orphans = live_orphans(&g, "warehouse", &["ghost_table".to_string(), "ghost_table".to_string()]);
+        assert_eq!(orphans.len(), 1);
+    }
+
+    #[test]
+    fn live_orphans_is_scoped_to_its_own_database() {
+        // A relation this graph already explains in `staging` is still an
+        // orphan when `--live` lists `warehouse`: a `db:NAME` namespace
+        // belongs to one database (`NodeId`'s own doc comment), so the same
+        // bare name in a different database is a different node.
+        let rel = relation("staging", "orders");
+        let g = Graph { nodes: vec![rel.clone()], edges: vec![produces(("a", "setup"), &rel.id)] };
+        let orphans = live_orphans(&g, "warehouse", &["orders".to_string()]);
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].id, NodeId::new("db:warehouse", "orders"));
     }
 }
 ```

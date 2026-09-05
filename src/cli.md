@@ -55,6 +55,11 @@ pub enum Command {
         depth: Option<u32>,
         /// Skip view selection. Render the whole index.
         all: bool,
+        /// Spawn every `[db.*]`'s own `list` and add a node for whatever
+        /// it reports that the index does not already explain (decision
+        /// 37). Never automatic: this is the explicit ask decision 9
+        /// requires, and nothing it finds is cached or written back.
+        live: bool,
     },
     Index { paths: Vec<String>, cache: bool },
     Fmt { paths: Vec<String>, check: bool },
@@ -86,7 +91,7 @@ pub const USAGE: &str = "\
 dankg -- a plaintext knowledge grapher
 
 usage:
-  dankg graph <path>... [--format <fmt>] [--depth N | --all] [-o <file>]
+  dankg graph <path>... [--format <fmt>] [--depth N | --all] [--live] [-o <file>]
   dankg index [<path>]  [--no-cache]
   dankg fmt   <path>... [--check]
   dankg tui   <path>... [--depth N | --all] [--no-cache]
@@ -101,6 +106,9 @@ options:
   --format <fmt>   json (default), html, dot, mermaid
   --depth <n>      hops from the entry to draw; default from [graph] depth
   --all            draw the whole index (graph/tui), or every eval DAG leaf
+  --live           spawn every [db.*]'s own list command (graph only) and add
+                   a node for whatever it reports that the corpus does not
+                   already explain
   -o, --output     write to a file instead of stdout, or a directory (tangle)
   --no-cache       ignore .dankg/cache/ and write nothing back to it
   --check          report files not in normal form; write nothing
@@ -130,6 +138,17 @@ whole root, because backlinks are only honest when every file has been seen.
 `--format json` always emits the whole index, which is what makes it the
 scriptable surface; `--depth` and `--all` shape the drawn formats. Naming a
 directory rather than a file draws everything, since the corpus is the entry.
+
+`--live` (decision 37) is the one door `graph` opens to a database. Every
+other run only ever displays what an earlier `dankg eval` already wrote
+back. With `--live`, `graph` spawns each `[db.*]`'s own `list` command,
+read-only, and adds a node for every relation it names that the corpus
+does not already explain -- a table created by hand, by a tool `dankg`
+never touched, or documented once by a section since deleted. A `[db.*]`
+with no `list` configured is reported and skipped, the same allowlist
+rule an unconfigured `[lang.*]` already gets. Nothing `--live` finds is
+cached or written back: a second run may turn up a different orphan, or
+none at all.
 
 `--format html` writes one self-contained page: nothing to fetch, nothing to
 serve. It carries the whole index, so a node the view left out can be expanded
@@ -233,6 +252,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
     let mut cache = true;
     let mut depth = None;
     let mut all = false;
+    let mut live = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -245,6 +265,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
             }
             "--no-cache" => cache = false,
             "--all" | "-a" => all = true,
+            "--live" => live = true,
             "--depth" | "-d" => {
                 let value = args.next().ok_or("`--depth` needs a value")?;
                 depth = Some(parse_depth(&value)?);
@@ -270,7 +291,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
     if all && depth.is_some() {
         return Err("`--all` and `--depth` ask for different things".to_string());
     }
-    Ok(Command::Graph { paths, format, output, cache, depth, all })
+    Ok(Command::Graph { paths, format, output, cache, depth, all, live })
 }
 
 fn parse_depth(value: &str) -> Result<u32, String> {
@@ -523,6 +544,7 @@ mod tests {
                 cache: true,
                 depth: None,
                 all: false,
+                live: false,
             }
         );
     }
@@ -580,6 +602,25 @@ mod tests {
         assert!(parse(args(&["graph", "a.md", "--depth", "lots"]))
             .unwrap_err()
             .contains("whole number"));
+    }
+
+    #[test]
+    fn live_defaults_off_and_combines_with_depth_and_all() {
+        let Command::Graph { live, .. } = parse(args(&["graph", "a.md"])).unwrap() else { panic!() };
+        assert!(!live);
+
+        let Command::Graph { live, depth, .. } = parse(args(&["graph", "a.md", "--live", "--depth", "2"])).unwrap()
+        else {
+            panic!()
+        };
+        assert!(live);
+        assert_eq!(depth, Some(2));
+
+        let Command::Graph { live, all, .. } = parse(args(&["graph", "a.md", "--all", "--live"])).unwrap() else {
+            panic!()
+        };
+        assert!(live);
+        assert!(all);
     }
 
     #[test]
