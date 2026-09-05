@@ -5,7 +5,11 @@
 # converting `architecture.org`/`project.org` to `.md` in the first place.
 #
 # `[lang.*]`/`[tangle.*]` sections are added here as `src/` modules
-# actually convert; nothing under docs alone needs either yet.
+# actually convert, or as docs prose starts citing a block's own recorded
+# output instead of a hand count.
+
+[lang.sh]
+command = sh {file}
 
 [tangle.rust]
 ext = rs
