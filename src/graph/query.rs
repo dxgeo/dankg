@@ -53,6 +53,34 @@ pub fn live_orphans(graph: &Graph, db_name: &str, relations: &[String]) -> Vec<N
     out
 }
 
+/// Every `Link`/`Produces`/`Reads` edge touching `id`, partitioned by
+/// kind and by which side `id` is on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeLinks {
+    /// `Link` edges `id` is the `from` of: `id -> outgoing[i]`.
+    pub outgoing: Vec<NodeId>,
+    /// `Link` edges `id` is the `to` of: `backlinks[i] -> id`.
+    pub backlinks: Vec<NodeId>,
+    /// `Produces` edges `id` is the `from` of: relations `id` writes.
+    pub produces: Vec<NodeId>,
+    /// `Reads` edges `id` is the `to` of: relations `id` reads.
+    pub reads: Vec<NodeId>,
+}
+
+pub fn links_for(graph: &Graph, id: &NodeId) -> NodeLinks {
+    let mut out = NodeLinks::default();
+    for edge in &graph.edges {
+        match edge.kind {
+            EdgeKind::Link if edge.from == *id => out.outgoing.push(edge.to.clone()),
+            EdgeKind::Link if edge.to == *id => out.backlinks.push(edge.from.clone()),
+            EdgeKind::Produces if edge.from == *id => out.produces.push(edge.to.clone()),
+            EdgeKind::Reads if edge.to == *id => out.reads.push(edge.from.clone()),
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +194,59 @@ mod tests {
         let orphans = live_orphans(&g, "warehouse", &["orders".to_string()]);
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].id, NodeId::new("db:warehouse", "orders"));
+    }
+
+    fn link(from: (&str, &str), to: (&str, &str)) -> Edge {
+        Edge {
+            from: NodeId::new(from.0, from.1),
+            to: NodeId::new(to.0, to.1),
+            kind: EdgeKind::Link,
+            line: 0,
+            reciprocated: false,
+        }
+    }
+
+    fn contains(from: (&str, &str), to: (&str, &str)) -> Edge {
+        Edge {
+            from: NodeId::new(from.0, from.1),
+            to: NodeId::new(to.0, to.1),
+            kind: EdgeKind::Contains,
+            line: 0,
+            reciprocated: false,
+        }
+    }
+
+    #[test]
+    fn outgoing_and_incoming_links_are_partitioned_by_direction() {
+        let g = Graph { nodes: vec![], edges: vec![link(("a", "a"), ("b", "b"))] };
+        assert_eq!(links_for(&g, &NodeId::new("a", "a")).outgoing, vec![NodeId::new("b", "b")]);
+        assert_eq!(links_for(&g, &NodeId::new("b", "b")).backlinks, vec![NodeId::new("a", "a")]);
+    }
+
+    #[test]
+    fn produces_and_reads_partition_by_kind_and_side() {
+        let rel = relation("warehouse", "orders");
+        let g = Graph {
+            nodes: vec![rel.clone()],
+            edges: vec![
+                produces(("a", "setup"), &rel.id),
+                Edge { from: rel.id.clone(), to: NodeId::new("b", "report"), kind: EdgeKind::Reads, line: 0, reciprocated: false },
+            ],
+        };
+        assert_eq!(links_for(&g, &NodeId::new("a", "setup")).produces, vec![rel.id.clone()]);
+        assert_eq!(links_for(&g, &NodeId::new("b", "report")).reads, vec![rel.id]);
+    }
+
+    #[test]
+    fn containment_edges_are_never_counted_as_links() {
+        let g = Graph { nodes: vec![], edges: vec![contains(("a", "a"), ("a", "b"))] };
+        assert_eq!(links_for(&g, &NodeId::new("a", "a")), NodeLinks::default());
+        assert_eq!(links_for(&g, &NodeId::new("a", "b")), NodeLinks::default());
+    }
+
+    #[test]
+    fn a_node_touching_nothing_returns_every_field_empty() {
+        let g = Graph { nodes: vec![], edges: vec![] };
+        assert_eq!(links_for(&g, &NodeId::new("a", "a")), NodeLinks::default());
     }
 }

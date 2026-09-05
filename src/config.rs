@@ -23,11 +23,11 @@ pub const FILE: &str = "config";
 /// Entry plus this many hops, when a view is selected. See decision 7.
 pub const DEFAULT_DEPTH: u32 = 2;
 /// `dankg tui`'s own default, deliberately smaller than `DEFAULT_DEPTH`.
-/// A terminal draws one fixed-size character grid with no zoom the way
-/// HTML's output gets (*Terminal UI*), so the same width a scrollable,
-/// zoomable page affords already reads as sprawling on a character grid,
-/// especially over a large corpus. `tab`-to-expand and `/`-to-jump are
-/// the reader's own way to widen it back out, one node at a time.
+/// A terminal tree has no zoom the way HTML's output gets (*Terminal
+/// UI*), so the same width a scrollable, zoomable page affords already
+/// reads as sprawling stamped into one, especially over a large corpus.
+/// Right-to-expand and `/`-to-jump are the reader's own way to widen it
+/// back out, one node at a time.
 pub const DEFAULT_TUI_DEPTH: u32 = 1;
 
 /// Sections DanKG reads today, with the keys each one accepts.
@@ -35,7 +35,7 @@ const KNOWN: &[(&str, &[&str])] = &[
     ("graph", &["depth"]),
     ("tui", &["depth"]),
     ("editor", &["command"]),
-    ("keys", &["up", "down", "left", "right", "quit", "reset", "pan", "eval"]),
+    ("keys", &["up", "down", "left", "right", "quit", "reset", "eval"]),
 ];
 
 /// Section families, named `<prefix><name>`. `db.`'s `list` (decision 37)
@@ -70,10 +70,10 @@ impl Section {
 /// Single-character key bindings for the TUI, read from `[keys]`. Arrow
 /// keys are not represented here. They are physical direction keys rather
 /// than mnemonics, so nothing about them is meaningful to remap. They
-/// always work alongside whatever a letter is bound to. Enter and Tab are
-/// the same story: terminal special keys, not letters. `[keys]` only ever
-/// touches the seven single-character actions the interaction table
-/// already names by letter.
+/// always work alongside whatever a letter is bound to. Enter, Tab, `/`,
+/// and `?` are the same story for their own reasons: `[keys]` only ever
+/// touches the six single-character actions the interaction table names
+/// by letter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Keymap {
     pub up: char,
@@ -82,7 +82,6 @@ pub struct Keymap {
     pub right: char,
     pub quit: char,
     pub reset: char,
-    pub pan: char,
     /// Cycles through the selected node's named blocks (entering cycle mode
     /// on the first press), so `enter` can run whichever one is cycled to.
     pub eval: char,
@@ -90,12 +89,12 @@ pub struct Keymap {
 
 impl Default for Keymap {
     fn default() -> Keymap {
-        Keymap { up: 'k', down: 'j', left: 'h', right: 'l', quit: 'q', reset: 'r', pan: 'p', eval: 'e' }
+        Keymap { up: 'k', down: 'j', left: 'h', right: 'l', quit: 'q', reset: 'r', eval: 'e' }
     }
 }
 
 impl Keymap {
-    fn fields(&self) -> [(&'static str, char); 8] {
+    fn fields(&self) -> [(&'static str, char); 7] {
         [
             ("up", self.up),
             ("down", self.down),
@@ -103,7 +102,6 @@ impl Keymap {
             ("right", self.right),
             ("quit", self.quit),
             ("reset", self.reset),
-            ("pan", self.pan),
             ("eval", self.eval),
         ]
     }
@@ -373,14 +371,13 @@ impl Config {
         let where_ = || self.source.clone().unwrap_or_else(|| DIR.to_string());
 
         let mut map = default;
-        let mut slots: [(&str, &mut char); 8] = [
+        let mut slots: [(&str, &mut char); 7] = [
             ("up", &mut map.up),
             ("down", &mut map.down),
             ("left", &mut map.left),
             ("right", &mut map.right),
             ("quit", &mut map.quit),
             ("reset", &mut map.reset),
-            ("pan", &mut map.pan),
             ("eval", &mut map.eval),
         ];
         for (name, slot) in &mut slots {

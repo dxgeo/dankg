@@ -99,11 +99,11 @@ dankg tui notes/
 
 Keys:
 
-- Arrow keys or `hjkl` — move
-- `tab` — expand a node's hidden neighbours
-- `enter` — open the selected node in your configured `[editor] command`
+- Arrow keys or `hjkl` — move; left/right collapse/expand a node or step to its parent/first child
+- `tab` — toggle focus between the tree and the cross-reference panel (previews the hovered link before you commit to it)
+- `enter` — open the selected node in your configured `[editor] command` (or jump to a focused panel link)
+- `/` — jump to a node by title, anywhere in the corpus; `n`/`p` repeat it forward/backward
 - `e` then `enter` — cycle and run a node's named code blocks in place
-- `p` — pan
 - `r` — reset
 - `q` — quit
 - `?` — full keybinding reference

@@ -106,18 +106,24 @@ options:
   --no-write       run and print output, but do not write results back
   --lang <lang>    which fence language tangle assembles
 
-`tui` needs a real terminal and draws the view `graph` would draw at the
-same `--depth`/`--all`, but defaults to its own narrower depth
-(`[tui] depth`, unset falls back to a smaller default than `[graph]
-depth`'s own) since a character grid has no zoom to fall back on. The
-selected node's source line is handed to `[editor] command` on enter
-(arrows or hjkl to move, tab to reveal a node's hidden neighbours, enter
-to open, / to jump to a node by title with enter to confirm and esc to
-cancel, e to cycle a node's named blocks and enter to run the cycled one
-in place, p to toggle panning the viewport instead of the selection, r
-to collapse back to the entry view, q to quit, ? for a full-screen
-keybinding reference). The letter keys -- everything but the arrows,
-enter, tab, esc, `/`, and `?` -- are remappable in `[keys]`.
+`tui` needs a real terminal and draws the whole corpus as a collapsible
+tree, plus a cross-reference panel for the selected node's own links,
+backlinks, and relations. The named file(s) start expanded to `[tui]
+depth`/`--depth`/`--all` (unset falls back to a smaller default than
+`[graph] depth`'s own, since a character grid has no zoom to fall back
+on); every other file in the corpus still appears, collapsed to one
+line. The selected node's source line is handed to `[editor] command`
+on enter (arrows or hjkl to move; left/right collapse/expand a node or
+step to its parent/first child; tab toggles focus between the tree and
+the panel, where up/down move its own cursor, the tree previews
+whichever link is under the cursor before you commit to it, and enter
+makes that jump permanent; / to jump to a node by title anywhere in the
+corpus, enter to confirm, esc to cancel; n/p jump to the next/previous
+match of the last search; e to cycle a node's named blocks and enter to
+run the cycled one in place; r to collapse back to the entry view; q to
+quit; ? for a full-screen keybinding reference). The letter keys --
+everything but the arrows, enter, tab, esc, `/`, `n`, `p`, and `?` --
+are remappable in `[keys]`.
 
 `graph`, `index`, and `tui` discover the root by walking up for a `.dankg/` directory,
 falling back to the directory the named paths share, and then index every

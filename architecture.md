@@ -691,21 +691,17 @@ reaches it, no scheme required.
 
 ## What is reused unchanged
 
-`graph/` and `layout/` do not change. The TUI consumes the same `Layout` the
-HTML renderer does, selected by the identical `graph::view::select_view`
-(decision 7) -- but from its own, narrower default depth
-(`config::DEFAULT_TUI_DEPTH`), not decision 7's shared one. A character
-grid has no zoom to fall back on the way HTML's pan-and-zoom page does, so
-the width a scrollable, zoomable page affords already reads as sprawling
-here, especially over a large corpus (see *Jump and default depth*,
-below). `--depth`/`--all` on the command line resolve through the same
-mechanism either way. One piece of the existing box-metrics work already
-speaks the TUI's language: `CHAR_WIDTH` and friends are computed in
-character units so an HTML-expanded box matches the layout's sizing. A
-terminal cell *is* that unit. So rendering the same Sugiyama output as
-text needs no rescaling.
-
-<!-- dankg:depends target=#decision-7-view-scope quote="Entry + 2 hops, expandable in the browser." -->
+`graph/` does not change. The tree's own structure is `Node.parent`,
+already computed by `graph::build` for every heading and block; the
+named entry file(s) resolve to top-level roots via the identical
+`graph::view::entry_nodes` `dankg graph` itself uses to find its own
+entries. `graph::query::links_for` (new this pass) follows the same
+read-only-lookup convention `find_producer`/`live_orphans` already
+established there: a pure function over an already-built `&Graph`,
+nothing it computes ever mutates the corpus. `layout/` is *not* reused.
+The TUI stopped consuming a `Layout` entirely when it moved from a
+Sugiyama graph rendering to a tree -- see *The tree and the
+cross-reference panel*, below.
 
 ## What is new
 
@@ -714,66 +710,42 @@ src/tui/
   term.rs     raw mode, alternate screen, size query; a Drop guard restores
               the terminal on panic so a crash never leaves a broken shell
   input.rs    hand-parsed ANSI escape sequences -> key events
-  draw.rs     Layout -> character grid, box-drawing glyphs for nodes and
-              polylines; one buffered write per frame, no diffing
-  app.rs      event loop, selection state, viewport scroll, status line
+  draw.rs     tree/panel rows -> character grid, two independently
+              scrolled panes joined by one divider column; no graph or
+              layout knowledge at all; one buffered write per frame
+  app.rs      event loop, the tree (children/expanded), the panel, focus
   editor.rs   suspend term.rs, spawn [editor] command with {file}/{line},
               wait, resume, re-index (the file may have just changed)
   eval.rs     find a node's named blocks, run one via eval::session
-              (milestone 8) without leaving the graph view
-  expand.rs   tab-to-expand: hidden-neighbour lookup and nearest-free-slot
-              placement, mirroring the HTML renderer's script
+              (milestone 8) without leaving the tree
 ```
 
 ## Interaction
 
-- `arrows/hjkl`: move selection. Up/down cross ranks. Left/right stay in one.
-- `enter`: suspend, spawn the configured editor at the node's line, resume. Or, while cycling a node's blocks, run the cycled one.
-- `tab`: expand the selected node's hidden neighbours. A placement on the existing grid, not a second layout, same rule as HTML.
-- `/`: jump to a node by title (see *Jump and default depth*, above). `enter` confirms, `esc` cancels.
-- `e`: cycle the selected node's named blocks. `enter` runs the cycled one, in place, without leaving the graph (see *Eval* below)
-- `esc`: cancel an in-progress block cycle or an in-progress search.
-- `p`: toggle panning. Direction keys move the viewport, not selection.
+- `arrows/hjkl`: move. Up/down walk the visible tree rows (or the panel's own rows, while it has focus). Left/right collapse/expand a node, or step onto its parent/first child if it is already collapsed/expanded (the standard file-tree convention).
+- `enter`: suspend, spawn the configured editor at the node's line, resume. Or, while cycling a node's blocks, run the cycled one. Or, while the panel has focus, jump to the focused link.
+- `tab`: toggle focus between the tree and the cross-reference panel. Its old job -- revealing hidden neighbours onto a 2D graph grid -- has no equivalent once there is no grid.
+- `/`: jump to a node by title, anywhere in the corpus (see *Jump and default depth*, below). `enter` confirms, `esc` cancels.
+- `n`/`p`: jump to the next/previous match of the last confirmed search, wrapping past either end -- vim's own `n`/`N`, under DanKG's own letters since `p` was already free once panning retired.
+- `e`: cycle the selected node's named blocks. `enter` runs the cycled one, in place, without leaving the tree (see *Eval* below)
+- `esc`: cancel an in-progress block cycle or an in-progress search; return focus from the panel to the tree.
 - `r`: collapse back to the entry view
 - `q`: quit, restoring the terminal
 - `?`: toggle a full-screen keybinding reference
 
-Movement follows the rank/order structure `layout/order.rs` already computed,
-so "down" is well-defined without inventing a second notion of adjacency.
+Movement follows the flattened list of currently-visible tree rows, so
+"down" is well-defined without inventing a second notion of adjacency --
+the tree-view successor to what `layout/order.rs`'s rank/order structure
+once gave the Sugiyama renderer.
 
 Every letter here but the mode-independent bindings above is remappable in
-`[keys]` (decision 18). Arrows, enter, tab, esc, `/` and `?` are not, since
-they are not graph-navigation letters to begin with. `/` and `?` specifically
-are fixed because both are close to universal across terminal tools (`/` to
-search in vim/less/htop, `?` for help in the same set) and neither is itself
-a graph action.
-
-## Panning
-
-`p` repurposes the direction keys from moving the selection to moving the
-viewport directly (`App::pan`), for surveying a region of the graph with
-nothing selected nearby. That was the gap the *Open questions* below used to
-name. A status line exists now (see *Eval* below), but panning still says
-nothing in words there. Toggling pan on and off is exactly the kind of thing
-that happens on nearly every keypress while surveying a graph. A status line
-that changed that often would be more noise than signal. The indicator stays
-visual instead. Whichever screen edges still have grid beyond them render an
-arrow (`draw::overlay_pan_arrows`), stamped onto the already-windowed frame
-after scrolling, not into the full grid before it. So the glyphs sit at the
-real screen edges wherever the viewport currently is. An edge with nothing
-further to pan into simply grows no arrow, which makes the indicator double
-as feedback: panned all the way down, `↓` stops appearing.
-
-`render` stops calling `scroll_to_show` while panning is on, which is what
-lets the viewport actually separate from the selection. Otherwise the very
-next frame would snap the scroll straight back to wherever the (unmoved)
-selection sits. `pan` clamps only the near end, at zero, because that is all
-it can know. The far end (not scrolling past the last row or column of
-content) is clamped in `render`, the one place that already has both the
-terminal size and `draw::dimensions`'s full-grid extent in hand. Toggling
-panning back off needs no explicit re-clamp of its own. The very next frame
-resumes calling `scroll_to_show`, which snaps the viewport back onto the
-selection the same way any other selection move would.
+`[keys]` (decision 18). Arrows, enter, tab, esc, `/`, `n`, `p`, and `?` are
+not, since they are not tree-navigation letters to begin with. `/` and `?`
+specifically are fixed because both are close to universal across terminal
+tools (`/` to search in vim/less/htop, `?` for help in the same set); `n`/
+`p` are fixed alongside `/` for the identical reason -- they are the other
+half of the same search feature, not independent actions a reader would
+want rebound on their own.
 
 ## Eval in the TUI
 
@@ -867,17 +839,17 @@ correctly rather than the reference silently going stale next to a config
 that no longer matches it.
 
 Help mode is fully modal in the event loop. Every key but the dismissers
-(`?`, esc, `keys.quit`) is swallowed before it reaches the graph's own match
-arms, so nothing about the selection, panning, or an in-progress eval cycle
-can change while help is on screen. `write_frame` (the buffered-write,
-no-trailing-`\r\n`-on-the-last-line logic decision-critical to not scrolling
-the alternate screen: see the Terminal UI intro) is shared between the
-graph frame and the help screen, the only two things this module ever
-renders. It deliberately does not clip columns itself, since a graph line
-carries ANSI dimming codes that count as characters but not screen columns.
-Column-clipping those would cut one off mid-escape-sequence. Plain-text
-callers (the status line, help's own lines) clip themselves before handing
-`write_frame` anything.
+(`?`, esc, `keys.quit`) is swallowed before it reaches the tree/panel's own
+match arms, so nothing about the selection, panel focus, or an in-progress
+eval cycle can change while help is on screen. `write_frame` (the
+buffered-write, no-trailing-`\r\n`-on-the-last-line logic decision-critical
+to not scrolling the alternate screen: see the Terminal UI intro) is shared
+between the tree/panel frame and the help screen, the only two things this
+module ever renders. It deliberately does not clip columns itself, since a
+frame line carries ANSI attribute codes that count as characters but not
+screen columns. Column-clipping those would cut one off mid-escape-sequence.
+Plain-text callers (the status line, help's own lines) clip themselves
+before handing `write_frame` anything.
 
 ### A byte lost after a standalone Esc
 
@@ -905,64 +877,110 @@ existing suite only ever fed `decode` and `read_key` complete, single
 sequences in one shot, never a standalone Esc immediately followed by
 another real keystroke in the same read.
 
-## Tab-to-expand
+## The tree and the cross-reference panel
 
-`expand::expand_view` mirrors the HTML renderer's `freeSlot`/`expand`
-(`render/assets.rs`). A revealed node drops into the nearest free
-slot on the rank its edge puts it on, never a second Sugiyama pass,
-the same reasoning as "Expansion is a placement, not a second layout"
-above. It cannot reuse that code: one edits a DOM incrementally, this
-rebuilds the whole `Layout` from scratch on every toggle, which the
-TUI can afford because `draw.rs` already redraws the whole grid every
-frame with no diffing (see its own header comment).
+`dankg tui` rendered a Sugiyama graph layout, boxes and polylines on a
+character grid, until this pass replaced it with a nerdtree-style
+collapsible tree plus a persistent detail panel. The corpus's own graph
+is overwhelmingly a containment hierarchy -- on this repo's own
+self-hosted corpus, 496 `Contains` edges against 56 `Link` edges and a
+handful of `Produces`/`Reads` -- so a general-DAG layout was spending
+its whole visual budget (crossing lines, wide ranks) on structure the
+data barely has. A tree matches its actual shape.
 
-Rebuilding from scratch also means collapse needs no ownership
-bookkeeping. An anchor no longer reachable, because whatever revealed
-it was itself just collapsed, is silently skipped when `expanded` is
-replayed, so whatever it had revealed folds away too. The HTML
-renderer's `collapse` has to reassign or recursively remove nodes
-another expansion might still reach. Here that behaviour falls out of
-the rebuild for free.
+The tree always represents the *whole* resolved corpus (`App::index`),
+unconditionally -- not a `--depth`-limited view the way `dankg graph`
+selects one. Every top-level node (`Node.parent: None`, excluding
+`Relation`) is a top-level tree row from the first frame, whichever
+file(s) were named on the command line or not. `--depth`/`[tui] depth`/`--all` no longer decide what is *loaded*; they decide only how
+many containment levels below the named entry file(s) start
+*pre-expanded* (`App::initial_expansion`). Every other top-level file
+still appears, collapsed to one line -- the same thing a real file-tree
+plugin already does: it shows the whole project, not just whatever file
+happens to be open. `right` expands a collapsed node in place, or steps
+onto its first child if it is already open; `left` collapses one in
+place, or steps onto its parent -- the standard file-tree convention,
+replacing rank/order-based movement entirely. `r` re-collapses
+everything back to that initial state, not just the cursor.
 
-A hidden neighbour can sit above the base view's rank 0 as easily as
-below it: an anchor's *incoming* edge from something the view never
-reached. `LaidNode.rank` is unsigned, so revealed nodes are tracked
-with a signed rank internally, and the whole set is renumbered from its
-minimum before becoming a `Layout`. Every base node shifts down
-uniformly to make room, rather than being re-laid out.
+<!-- dankg:depends target=#decision-7-view-scope quote="Entry + 2 hops, expandable in the browser." -->
 
-`r` ("collapse back to the entry view") clears every expansion, not just
-the cursor. Returning from the editor (`enter`) clears it too, rather than
-replaying `expanded` against the freshly re-read graph: the edit that
-triggered the reload may have changed the shape of the graph the anchors
-were computed against, and a stale expansion risks a confusing placement
-more than starting clean costs a keypress.
+`Relation` nodes are deliberately never tree rows: a relation belongs to
+a database, not a file (`db:NAME`, a synthetic namespace with no
+`Node.parent`), so it has no natural place in a per-file containment
+tree. It only ever appears as panel text (below), never something the
+tree itself walks into.
+
+The right pane is what makes a corpus's "surprising cross-link" visible
+without a drawn graph to see it in: the selected node's own outgoing
+links, backlinks, and produced/read relations (`graph::query:: links_for`), refreshed every time the selection moves. Links are
+navigable -- `tab` gives the panel keyboard focus, up/down move its own
+cursor among the navigable rows, `enter` jumps to one. Relations are
+plain text, never navigable: a relation node has no file/line to jump
+to. `esc` or `left` while the panel has focus returns focus to the tree
+without acting.
+
+Jumping -- from a panel link, or from `/`-search (below) -- means
+bringing a node that may not currently be visible on screen, since the
+tree only shows what its ancestors' own expansion state allows.
+`App::reveal_and_select` force-expands every ancestor along a target's
+`Node.parent` chain, even ones the reader never opened, then selects it.
+Both callers need the identical operation, so there is exactly one
+implementation of it, rather than the panel and search each growing
+their own.
+
+`enter` is what makes a panel jump permanent, but the reader does not
+have to press it to find out where a link goes first. While the panel
+has focus, `render` previews whichever row the cursor is currently on:
+the tree shows that link's own target, ancestors opened for that one
+frame only (`App::visible_rows_with`, never touching `self.expanded`),
+in place of the real selection's faint row. Moving the panel cursor
+updates the preview immediately; leaving without pressing `enter`
+(`esc`/left) leaves `self.expanded`/`self.selected` untouched, and the
+tree pane's own `scroll_to_show` snaps back onto the real selection on
+the very next frame, the same as any other move already does. Only
+`enter` calls `reveal_and_select` for real. A panel row with nothing to
+preview (a `Relation` line, or an empty panel) simply falls back to
+showing the real selection, as if there were no preview at all.
+
+Each tree row's compact badge (`→1 ←2 ⚭`) summarizes the same
+`links_for` result the panel shows in full for the *selected* node --
+at-a-glance scanning for every *other* row, so a reader does not have to
+select something just to learn whether it connects to anything at all.
 
 ## Jump and default depth
 
-`dankg tui` selects its initial view from its own default depth
+`dankg tui` selects its initial expansion from its own default depth
 (`config::DEFAULT_TUI_DEPTH`, `[tui] depth`), not `[graph] depth`'s
-(decision 7's own "Entry + 2 hops"). The two commands share every other
-part of view selection -- the same `graph::view::select_view`, the same
-`--depth`/`--all` override -- but a terminal has no zoom the way HTML's
-pan-and-zoom page does. The same width that reads as comfortable on a
-scrollable, zoomable page already looks sprawling stamped into a
-character grid, and a large, sprawling corpus (this one, self-hosting,
-is the case that motivated it) makes that worse, not better. Starting
-narrower trades that for more `tab`-to-expand along the way, one node
-at a time.
+(decision 7's own "Entry + 2 hops"). A terminal tree has no zoom the way
+HTML's pan-and-zoom page does. The same width that reads as comfortable
+on a scrollable, zoomable page already looks sprawling stamped into one,
+and a large, sprawling corpus (this one, self-hosting, is the case that
+motivated it) makes that worse, not better. Starting narrower trades
+that for more `right`-to-expand along the way, one node at a time.
 
 `/` is the reader's way back out across a corpus a narrower default
 otherwise makes harder to explore blind. It opens a typed-query buffer
 (`App::start_search`/`search_push`/`search_backspace`) and, on `enter`
-(`App::confirm_search`), jumps to the first node whose title contains
-the text, case-insensitively. The currently drawn view is searched
-first, so a title already on screen just moves the selection there. A
-match found only in the whole corpus (`App::index`) instead becomes a
-fresh entry: the view is rebuilt around it via `view::select` at the
-same default depth the initial load used, exactly as if that node's
-file had been named on the command line. `esc` cancels with no jump; no
-match leaves the selection alone and reports so on the status line.
+(`App::confirm_search`), searches the whole corpus (`App::index`)
+directly -- there is no separate drawn view to try first anymore, since
+the tree already spans everything -- case-insensitively, and hands off
+to `reveal_and_select` exactly like a panel jump does. `esc` cancels
+with no jump; no match leaves the selection alone and reports so on the
+status line.
+
+Confirming a search is only the first hit, not the only one: `n`/`p`
+(vim's own `n`/`N`, DanKG's own letters, `p` free again once panning
+retired) cycle forward/backward through every remaining match of
+`last_search`, the pattern kept alive after `search` itself closes.
+Both directions, and the initial confirm, reduce to one search-from-here
+primitive (`App::jump_to_search_match`): the next/previous match
+relative to the *current selection's* own position in the corpus, not
+relative to wherever the last match happened to land, wrapping past
+either end. Searching from the cursor rather than from the last hit is
+what keeps `n`/`p` behaving sensibly even after the reader has moved
+around by hand in between -- the identical reason vim's own `n`/`N`
+work the same way.
 
 ## Scope decisions this would actually need
 
@@ -982,23 +1000,22 @@ match leaves the selection alone and reports so on the status line.
 
 ## Scrolling
 
-A drawn grid is almost always bigger than the terminal. Even a modest
-view runs to dozens of rows and a hundred-odd columns, since no box
-ever shrinks to fit. HTML solves this by being a scrollable page. A
+A large corpus's tree is almost always taller than the terminal, and the
+panel can be too. HTML solves this by being a scrollable page; a
 terminal is a fixed grid, so `app.rs`'s `render` queries the real size
-(`term::size`) every frame and clips the drawing to it (`draw::window`),
-scrolling just far enough to keep the selection on screen
-(`draw::scroll_to_show`). This is "just far enough" rather than
-centring the selection: the reader's sense of where things are on
-screen should not jump on every keypress that was already visible,
-only on one that would otherwise leave the window.
-
-Without panning, movement alone drives the scroll. The selection is
-always what render keeps visible, and there was no way to look at a
-region with nothing selected nearby. `p` (see *Panning* above) changes
-that. `scroll_row`/`scroll_col` move directly instead of following the
-selection, reusing the same fields and the same terminal-clipped
-`draw::window`, just under different control.
+(`term::size`) every frame and clips each pane to it independently
+(`draw::window`), scrolling just far enough to keep that pane's own
+current row on screen (`draw::scroll_to_show`). This is "just far
+enough" rather than centring: the reader's sense of where things are on
+screen should not jump on every keypress that was already visible, only
+on one that would otherwise leave the window. The tree's `scroll_row`
+and the panel's `scroll_panel` are entirely independent fields, each
+following only its own pane's current row -- there is no shared
+viewport position the way a single 2D grid once needed one, and nothing
+like the old pan mode's "detach the viewport from the selection
+entirely" is needed either: each pane is already just a vertical list,
+and switching which one has focus (`tab`) is what changes which current
+row a reader is looking at, not a second scrolling mode layered on top.
 
 # Code evaluation
 
@@ -2396,11 +2413,10 @@ left  = h
 right = l
 quit  = q
 reset = r
-pan   = p
 ```
 
-`[tui] depth` is `dankg tui`'s own default, separate from `[graph] depth` (*Jump and default depth*, under *Terminal UI*): a character
-grid has no zoom, so the same width that reads fine on a scrollable,
+`[tui] depth` is `dankg tui`'s own default, separate from `[graph] depth` (*Jump and default depth*, under *Terminal UI*): a terminal tree
+has no zoom, so the same width that reads fine on a scrollable,
 zoomable page already looks sprawling here. Unset, it falls back to
 `config::DEFAULT_TUI_DEPTH`, narrower than `[graph] depth`'s own
 default. `--depth`/`--all` on the command line still override either
@@ -2762,26 +2778,6 @@ just the `Result` variant, and is a pure function specifically so this
 case has a unit test rather than depending on catching a multiplexer
 in the act again.
 
-## A placement algorithm inherits no floor it was not given one
-
-`expand::free_slot` (tab-to-expand's nearest-free-slot placement,
-mirroring the HTML renderer's `freeSlot`) has no lower bound: asked to
-avoid a box to its right, "the nearest clear spot" can legally be a
-negative x. The base Sugiyama layout never produces one. `layout/coord.rs`
-starts every rank at `MARGIN` and there are tests asserting left edges
-are `>= 0`, so nothing downstream had ever needed to guard against it.
-`draw.rs`'s `put` silently drops anything at a negative column rather
-than erroring, so a crowded expansion could make a freshly revealed
-node disappear with no trace, exactly the failure mode "The renderer
-and its script cannot be type-checked against each other" above
-describes for a different pair of files: the bug is invisible until
-something happens to exercise the exact shape that trips it, here
-five links crowding one anchor from the same side. `expand::assemble`
-now re-establishes the invariant explicitly, shifting every node right
-if the minimum placement went negative, rather than trusting a second,
-ad hoc placement algorithm to have preserved an invariant the first
-one enforced only by construction.
-
 # Testing
 
 - CommonMark conformance table against the vendored spec, baseline-gated,
@@ -2833,17 +2829,38 @@ one enforced only by construction.
 - `[keys]` parsing: defaults with no section, individual remaps, a
   multi-character value rejected in favour of its default, and a collision
   between two actions reverting the whole map rather than half of it.
-- Panning: direction keys move the viewport and never the selection while
-  panning is on and move the selection as before while it is off, a pan
-  cannot go negative, and `render` clamps a scroll panned past the far edge
-  back onto the grid.
+- The tree: every top-level file becomes a root even when not named on
+  the command line, only the named entry starts expanded, right
+  expands-or-steps-onto-the-first-child and left collapses-or-steps-
+  onto-the-parent, up/down never land on a collapsed node's hidden
+  children, and `r` re-collapses everything back to the initial state.
+  The panel: its rows list outgoing links then backlinks then produces
+  then reads, relation rows are excluded from what its own cursor can
+  land on, `tab` toggles focus and back, and `enter` on a focused row
+  both jumps and force-expands every ancestor of its target -- the
+  same `reveal_and_select` `/`-search's own `enter` uses, checked to
+  reach a match outside whatever the initial expansion left open.
+  `render` is checked to mark the focused pane's current row in reverse
+  video and the other pane's own remembered row faint. The panel's own
+  live preview: hovering a row surfaces its target without moving the
+  real selection, moving the panel cursor moves the preview with it,
+  `render` is checked to actually reveal a previewed target's hidden
+  ancestors for that one frame, and leaving the panel without `enter`
+  is checked to leave both `expanded` and the selection untouched.
+  `/`, `n`, and `p`: confirming lands on the first match at or after the
+  current selection rather than always the corpus's first one, `n`/`p`
+  cycle forward/backward and wrap at either end, both search from the
+  *current* selection rather than the last match (checked by moving
+  away by hand between two searches), `n`/`p` are checked as a no-op
+  with no prior search, and cancelling the search prompt is checked to
+  leave the last confirmed pattern alone for `n`/`p` to keep cycling.
 - Eval in the TUI: cycling finds only the blocks inside a node's own
   line range, wraps, and is a silent no-op with none to find. Running
   writes back and reports `ok`/`failed` on the status line and clears
   the cycle either way. Navigation and `esc` both cancel a cycle, the
-  former via the same `clear_transient` path movement, `tab` and `r`
+  former via the same `clear_transient` path movement, `tab`, and `r`
   all share. `render` is checked to draw the help screen instead of
-  the graph while `help` is on. `read_key` is checked to carry an
+  the tree while `help` is on. `read_key` is checked to carry an
   unused byte from a standalone Esc into the next call rather than
   losing it, and to resolve a `pending` buffer that already decodes to
   a full key without blocking on a read that would hang forever
@@ -2946,23 +2963,36 @@ one enforced only by construction.
    says so on screen. `tests/data/corpus.golden.html` sits alongside the other
    goldens.
 7. \[DONE\] Terminal UI: `src/tui/` (term, input, draw, app, editor,
-   expand) over the existing `layout/` output. No change to `graph/`
-   or `layout/`. Selecting a node hands off to the configured
-   `[editor] command` (decision 17) directly, which a browser click
-   structurally cannot do for a terminal editor. `tab` grows the view
-   onto the existing grid the same way the HTML renderer's script
-   does, without a second layout. The drawn grid scrolls to keep the
-   selection on screen when it outgrows the terminal, which is the
-   common case rather than the exception. `p` detaches that scroll
-   into an explicit pan mode, edge arrows its only indicator. `e`
-   cycles a selected node's named blocks and `enter` runs the cycled
-   one through `eval::session::run_one` (milestone 8) without leaving
-   the graph, reporting the outcome on a one-row status line reserved
-   at the bottom of the viewport. `?` is a full-screen keybinding
-   reference. See *Terminal UI* above. Letter keybindings are
-   remappable in `[keys]` (decision 18). Unix termios first, Windows
-   Console API deferred. `/` (jump to a node by title) is the one
-   interaction-table key still unbound.
+   eval). No change to `graph/`. Originally rendered the same
+   Sugiyama layout `layout/`/the drawn formats do, over `graph::view:: select_view`'s own depth-limited subgraph, with `tab` growing that
+   view in place and `p` detaching the scroll into a pan mode. Later
+   rewritten to a nerdtree-style collapsible tree plus a persistent
+   cross-reference panel, since the corpus's own graph is
+   overwhelmingly a containment hierarchy (496 `Contains` edges
+   against 56 `Link` edges on this repo's own self-hosted corpus) and
+   a general-DAG layout was spending its visual budget on structure
+   the data barely has. `layout/` is no longer consulted by the TUI at
+   all; the tree is built straight from `Node.parent` over the whole
+   resolved corpus (`App::index`), unconditionally -- `--depth`/`[tui] depth`/`--all` now decide only how many levels start pre-expanded
+   under the named entry file(s), not what is loaded. `tab` now
+   toggles focus between the tree and the panel; `p`/pan is retired,
+   since two independently-scrolled vertical panes need no 2D
+   viewport to detach. `graph::query::links_for` (new) is what the
+   panel reads: a selected node's outgoing links, backlinks, and
+   produced/read relations, navigable via `enter` once the panel has
+   focus, which force-expands a jump target's whole ancestor chain
+   (`App::reveal_and_select`) -- the same operation `/` (jump to a
+   node by title, shipped after this milestone's initial cut) already
+   needed for its own jump, so the two share one implementation.
+   Selecting a node still hands off to the configured `[editor] command` (decision 17) directly, which a browser click structurally
+   cannot do for a terminal editor. `e` cycles a selected node's named
+   blocks and `enter` runs the cycled one through
+   `eval::session::run_one` (milestone 8) without leaving the tree,
+   reporting the outcome on a one-row status line reserved at the
+   bottom of the viewport. `?` is a full-screen keybinding reference.
+   See *Terminal UI* above. Letter keybindings are remappable in
+   `[keys]` (decision 18). Unix termios first, Windows Console API
+   deferred.
 8. \[DONE\] `eval/` (plan, run, result) + `dankg check`. Scoped to
    one file at a time (decision 19): `plan.rs` walks `doc.blocks`
    directly rather than recursing into lists the way the graph's
