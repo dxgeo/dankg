@@ -16,6 +16,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # The `db=`/`xdeps=table:` tests spawn a real `duckdb` process
+      # (milestone 9); neither runner image ships one. The official
+      # installer detects OS/arch itself, so one step covers both.
+      - name: Install duckdb
+        run: |
+          curl -fsSL https://install.duckdb.org | sh
+          echo "$HOME/.duckdb/cli/latest" >> "$GITHUB_PATH"
+
       # Broken out from the general test run below so a stale
       # `src/*.rs` (forgotten `dankg tangle` + commit after editing a
       # literate `.md`) shows up as its own red check, not buried
