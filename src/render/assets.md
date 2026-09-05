@@ -267,10 +267,11 @@ footer b { font-weight: 600; color: var(--fg); }
 The script's whole job is stated once at the top of its own source. It is
 worth repeating here: this is not a re-run of the layout. The ranks Rust
 computed stay fixed as a grid. A revealed node drops into the nearest free
-slot on the rank its edge puts it on. `freeSlot` is a direct port of
-`tui::expand::free_slot`'s own algorithm. Both are answering the identical
-question against the identical kind of grid, just in two different
-languages.
+slot on the rank its edge puts it on: scan outward from where the edge
+would place it, rank by rank, until an empty slot turns up. The TUI once
+answered this identical question against the identical kind of grid,
+before it moved from a Sugiyama layout to a tree view of its own; this
+script is the one place that placement logic still lives.
 
 Running Sugiyama again in the browser would move every box already on
 screen. That is exactly what a reader who just clicked one link does not
