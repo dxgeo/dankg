@@ -1,7 +1,18 @@
 /target
 .DS_Store
+__pycache__/
 
 # Cache entries are derived data, never committed. The leading `**/` matters:
 # a pattern with a slash in the middle anchors to this file's directory, so a
 # bare `.dankg/cache/` would miss the one under tests/data/corpus/.
 **/.dankg/cache/
+
+# `dankg tangle` output is wholly derived from the .md it was assembled
+# from (architecture.org, Tangle > Output); the markdown is what's
+# committed, never the generated tree.
+**/.dankg/build/
+
+# Sidecar manifest `dankg tangle` writes into src/ now that [tangle.rust]
+# glue is configured (decision 28) -- consumed only by that glue command,
+# never something to commit.
+/src/.dankg-tangle-manifest.json

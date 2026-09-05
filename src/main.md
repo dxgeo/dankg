@@ -1,0 +1,648 @@
+# Main
+
+This is the binary entry point: `src/main.rs`. It is not part of the
+`dankg` library crate `src/lib.md` declares, so it is hand-placed with
+`path=`, exactly the way every other crate/binary root in this corpus is
+(`src/lib.md`, *Crate root*). `dispatch` is the whole job: parse argv
+into a [`cli::Command`](cli.md), run the one function each variant
+maps to, and turn its `Result` into
+the right `ExitCode`. Every command's own logic lives in the library
+crate (`session::run`, `tangle::run`, `tui::run`), never here.
+
+```rust name=module_doc path=main.rs
+use dankg::cli::{self, Command, Format};
+use dankg::config::Config;
+use dankg::depends;
+use dankg::diag::{Diags, Level};
+use dankg::eval::files as eval_files;
+use dankg::eval::run as eval_run;
+use dankg::eval::{plan, result, session};
+use dankg::graph::build;
+use dankg::graph::index::{self, Corpus};
+use dankg::graph::{query, resolve, view, EdgeKind, Graph, NodeId};
+use dankg::layout;
+use dankg::md::{fmt, Document};
+use dankg::render::{dot, html, json, mermaid};
+use dankg::tangle;
+use dankg::tui;
+use std::fmt::Write as _;
+use std::fs;
+use std::io::Write;
+use std::process::ExitCode;
+use std::time::Duration;
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let command = match cli::parse(args) {
+        Ok(c) => c,
+        Err(message) => {
+            eprintln!("error: {message}\n");
+            eprint!("{}", cli::USAGE);
+            return ExitCode::from(2);
+        }
+    };
+
+    match command {
+        Command::Help => {
+            print!("{}", cli::USAGE);
+            ExitCode::SUCCESS
+        }
+        Command::Version => {
+            println!("dankg {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        Command::Graph { paths, format, output, cache, depth, all, live } => {
+            report(graph(&paths, format, output.as_deref(), cache, depth, all, live))
+        }
+        Command::Index { paths, cache } => report(index_report(&paths, cache)),
+        Command::Tui { paths, cache, depth, all } => report(tui::run(&paths, cache, depth, all)),
+        Command::Fmt { paths, check } => match format_files(&paths, check) {
+            Ok(true) => ExitCode::SUCCESS,
+            // `--check` is a gate: "some file is not in normal form" is a
+            // non-zero exit, not an error.
+            Ok(false) => ExitCode::from(1),
+            Err(message) => {
+                eprintln!("error: {message}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Eval { paths, target, yes, no_write, cache } => {
+            report(session::run(&paths, &target, yes, no_write, cache))
+        }
+        Command::Check { paths, cache } => match check_cmd(&paths, cache) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::from(1),
+            Err(message) => {
+                eprintln!("error: {message}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Tangle { paths, lang, output, cache } => {
+            report(tangle_cmd(&paths, &lang, output.as_deref(), cache))
+        }
+    }
+}
+```
+
+```rust name=tangle_cmd_and_report path=main.rs
+/// `dankg tangle`: never automatic, the same principle as `eval` (decision
+/// 9). Unlike `eval`, it has no confirm prompt. Tangle does not run the
+/// reader's program. It only assembles and optionally builds it.
+fn tangle_cmd(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -> Result<(), String> {
+    let report = tangle::run(paths, lang, output, cache)?;
+    if report.files.is_empty() {
+        eprintln!("no `{lang}` blocks found under {}", paths.join(", "));
+        return Ok(());
+    }
+    eprintln!("tangled {} file(s) into {}", report.files.len(), report.dir.display());
+    if report.ran_glue {
+        eprintln!("ran `[tangle.{lang}] glue`");
+    }
+    if report.ran_command {
+        eprintln!("ran `[tangle.{lang}] command`");
+    }
+    Ok(())
+}
+
+fn report(result: Result<(), String>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+```
+
+`format_files` always verifies a reformatted document round-trips before
+writing it. `dankg fmt`'s entire safety guarantee is that a formatter bug
+can never quietly corrupt a file. A file on disk is not the place to
+discover one for the first time.
+
+```rust name=format_files path=main.rs
+/// Rewrite each file into normal form, or report which ones would change.
+///
+/// Returns whether every file was already formatted (under `--check`) or was
+/// successfully handled (otherwise).
+fn format_files(paths: &[String], check: bool) -> Result<bool, String> {
+    let mut diags = Diags::new("dankg");
+    let mut clean = true;
+    let mut changed = 0usize;
+
+    for path in paths {
+        let source = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+
+        let mut file_diags = Diags::new(path);
+        let doc = Document::parse(&source, &mut file_diags);
+        let formatted = fmt::format(&doc);
+
+        // Verify before writing, always. Round-tripping is the strongest
+        // test this parser has. A file on disk is not the place to
+        // discover a formatter bug.
+        if let Err(why) = fmt::verify(&doc, &formatted) {
+            diags.warn_in(path, 1, format!("{why}; left unchanged"));
+            diags.absorb(file_diags);
+            clean = false;
+            continue;
+        }
+        diags.absorb(file_diags);
+
+        if formatted == source {
+            continue;
+        }
+        changed += 1;
+        if check {
+            // The list of files is this command's output. This way, it
+            // goes to stdout.
+            println!("{path}");
+            clean = false;
+        } else {
+            fs::write(path, &formatted).map_err(|e| format!("{path}: {e}"))?;
+        }
+    }
+
+    diags.sort();
+    diags.emit();
+    if check {
+        eprintln!("{changed} of {} file(s) would be reformatted", paths.len());
+    } else {
+        eprintln!("{changed} of {} file(s) reformatted", paths.len());
+    }
+    Ok(clean)
+}
+```
+
+`check_cmd` loads the *whole* corpus up front, unlike `dankg eval` itself
+(decision 19's per-file minimalism). `check` already visits every file
+for the unresolved-link pass regardless. This way, there is no "avoid
+reading files a target's own chain does not reach" reason to hold back.
+Loading everything is what lets a cross-file `deps=` actually resolve
+during a staleness recheck, no matter which file happens to be under
+iteration at the time. It is also what lets a `dankg:depends` marker's
+own target resolve, for exactly the same reason.
+
+A third loop checks every `dankg:depends` marker the same run already
+has everything on hand for: `index_graph` to resolve a target, `files`
+to read both the marker's own file and the target's, already loaded for
+the eval-staleness loop just above. Unlike the first two checks, this one
+never touches the returned `bool`. A missed quote, or even a target that
+no longer resolves at all, is reported and counted, never failed on:
+see `depends.md`'s own opening paragraph for why a substring match is
+too weak a signal to gate a build on.
+
+A fourth loop calls `plan::check_file_deps` once, over the same
+`all_blocks` the staleness loop already built. Unlike the third loop,
+this one *does* gate the returned `bool`: a `reads=file:PATH` that
+climbs above the root, or that names no dependency whose own
+`produces=` agrees with it, is two declared strings failing to agree,
+a far stronger signal than a prose substring match (architecture.md,
+*File dependencies*).
+
+A fifth loop calls `build::title_collisions` once per file, over
+`corpus.files`, already loaded. Like the third loop, it never gates the
+returned `bool`. The file resolves exactly as written today. A
+collision only reports a structural risk, not a broken file. This is
+the same "weak signal, never a build gate" reasoning a `dankg:depends`
+marker already gets (see `title_collisions`'s own doc comment,
+`graph/build.md`).
+
+Not every collision carries the same risk, though. Nothing breaks until
+some written link or `dankg:depends` marker actually targets one of the
+pair's two slugs. This loop checks for exactly that: `index_graph`'s own
+link edges (`Graph::incoming_link_count`) and `depends_targets` (the
+third loop's own resolved marker targets, collected there for this
+reason). A collision with a reference is flagged as a live risk. One
+with none is flagged as cosmetic. It is safe to leave for whenever the
+author gets to it.
+
+`title_collisions` also reports whether the pair is `sibling` (the same
+immediate parent, or both top-level with none) or differently-nested. A
+sibling pair looks identical to a reader scanning the one section they
+are both under. A differently-nested pair rarely does. Whichever
+surrounding section the reader is already in disambiguates it. This is
+a separate axis from referenced/cosmetic above, not a replacement for
+it. A sibling pair can still be cosmetic. A differently-nested pair
+can still be referenced.
+
+```rust name=check_cmd path=main.rs
+/// `dankg check [<path>...]`: the CI gate. Unresolved links come from the
+/// same whole-root index `graph`/`index` build. Staleness is checked
+/// separately, over one `eval_files::Files` loaded with the *whole* corpus
+/// up front. Unlike `eval` itself (decision 19), `check` already visits
+/// every file for the unresolved-link pass. This way, there is no "avoid
+/// reading files a target's own chain does not reach" reason to hold
+/// back. Loading everything is what lets a cross-file `deps=` actually
+/// resolve during a staleness recheck, regardless of which file is being
+/// iterated, and is what lets a `dankg:depends` marker's own target
+/// resolve too.
+///
+/// A third pass, over every `dankg:depends` marker in the corpus, is
+/// reported the same way but never gates the returned `bool`. A
+/// substring match is advisory by design (`depends.md`), so it is
+/// counted and printed, not failed on.
+///
+/// A fourth pass, `plan::check_file_deps` over the same `all_blocks`,
+/// *does* gate the returned `bool` (decision 33): unlike a prose
+/// marker's substring match, a `produces=`/`reads=file:PATH` mismatch is
+/// two declared strings failing to agree, a signal strong enough to fail
+/// a build on.
+///
+/// A fifth pass, `build::title_collisions` per file over `corpus.files`,
+/// never gates the returned `bool` either: a node whose title collides
+/// with an earlier one's in the same file still resolves correctly today,
+/// so this is reported the same advisory way a `dankg:depends` marker is.
+/// Each collision is also cross-referenced against `index_graph`'s link
+/// edges and the `depends_targets` the third pass already collected, so
+/// the report distinguishes a live risk (something already points at one
+/// of the two slugs) from a cosmetic one (nothing does), and separately
+/// reports whether the pair is `sibling` (same immediate parent) or
+/// differently-nested (`TitleCollision::sibling`, `graph/build.rs`).
+fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
+    let mut diags = Diags::new("dankg");
+    let corpus = index::load(paths, cache, &mut diags)?;
+    let index_graph = resolve::resolve(&corpus.files, &mut diags);
+    let unresolved = index_graph.nodes.iter().filter(|n| !n.resolved).count();
+
+    let mut files = eval_files::Files::new(corpus.root.clone());
+    files.load_all(&corpus.paths, &mut diags);
+    let all_blocks = files.all_blocks();
+
+    let mut stale = 0usize;
+    let mut checked = 0usize;
+    // Shared across the whole run, not per block: the same upstream
+    // block is often reachable via `xdeps` from many of the blocks this
+    // loop checks, and nothing loaded here changes between iterations,
+    // so a result verified once stays valid for the rest of this run.
+    let mut xdep_cache = std::collections::HashMap::new();
+    for rel_path in &corpus.paths {
+        let Some((_, doc)) = files.get(rel_path) else { continue };
+        let blocks: Vec<&plan::BlockRef> = all_blocks.iter().filter(|b| b.file == rel_path.as_str()).collect();
+
+        for (i, b) in blocks.iter().enumerate() {
+            let Some(stored_hash) = result::recorded_hash(doc, b.index, b.name) else { continue };
+            checked += 1;
+
+            // By index, not by name. The loop already holds the exact
+            // block it means. This way, there is no reason to route back
+            // through a name lookup at all. `plan_for_index` gets the
+            // *whole* corpus' blocks. This way, a cross-file `deps=`
+            // resolves here exactly as it would during a real `dankg
+            // eval`.
+            let Ok(chain) = plan::plan_for_index(&all_blocks, rel_path, i) else {
+                stale += 1;
+                eprintln!("stale: {rel_path} `{}` (plan changed since this result was written)", b.name);
+                continue;
+            };
+            // A language or database dropped from config since the result
+            // was written cannot be re-verified. That is reported by the
+            // missing `[lang.*]`/`[db.*]` section itself, not double-
+            // counted as stale here. `hash_template_for` is the same
+            // function `session::run_one` hashes a fresh result against,
+            // so a `db=` block is verified against the right template
+            // here too, not silently skipped or checked against the
+            // wrong one.
+            let Ok(hash_template) = result::hash_template_for(&corpus.config, &chain) else { continue };
+            // The whole corpus is already loaded (this function's own
+            // opening paragraph), so every `xdeps` target this block
+            // could possibly name is already resolvable here, exactly as
+            // it would be during a real `dankg eval`.
+            let xdep_hashes = match result::xdep_hashes(&files, &corpus.config, &all_blocks, Some(&index_graph), &chain, &mut xdep_cache) {
+                Ok(hashes) => hashes,
+                Err(msg) => {
+                    stale += 1;
+                    eprintln!("stale: {rel_path} `{}` ({msg})", b.name);
+                    continue;
+                }
+            };
+            if result::expected_hash(&chain, &hash_template, &xdep_hashes) != stored_hash {
+                stale += 1;
+                eprintln!("stale: {rel_path} `{}`", b.name);
+            }
+        }
+    }
+
+    // Advisory only (see this function's own doc comment): `prose_stale`
+    // is reported below but never folded into the returned `bool`.
+    // `depends_targets` is a second, separate use of the same resolution:
+    // the fifth loop, below, wants to know whether a `dankg:depends`
+    // marker anywhere in the corpus already targets a node a title
+    // collision is about to flag.
+    let mut prose_checked = 0usize;
+    let mut prose_stale = 0usize;
+    let mut depends_targets: Vec<NodeId> = Vec::new();
+    for rel_path in &corpus.paths {
+        let Some((_, doc)) = files.get(rel_path) else { continue };
+        for marker in depends::markers_in(doc) {
+            prose_checked += 1;
+            let Some(target_id) = depends::resolve_target(rel_path, &marker.target) else {
+                prose_stale += 1;
+                eprintln!("stale-prose: {rel_path}:{} depends on `{}` -- target escapes the root", marker.line, marker.target);
+                continue;
+            };
+            let Some(target_node) = index_graph.node(&target_id).filter(|n| n.resolved) else {
+                prose_stale += 1;
+                eprintln!("stale-prose: {rel_path}:{} depends on `{}` -- target not found", marker.line, marker.target);
+                continue;
+            };
+            depends_targets.push(target_id);
+            let Some((target_source, _)) = files.get(&target_node.file) else { continue };
+            let section = depends::section_text(target_source, target_node.line, target_node.end_line);
+            if depends::verify(&marker, &section) == depends::Verdict::Stale {
+                prose_stale += 1;
+                eprintln!(
+                    "stale-prose: {rel_path}:{} depends on `{}` -- quote no longer found",
+                    marker.line, marker.target
+                );
+            }
+        }
+    }
+
+    // Unlike the prose loop above, a mismatch here does gate the returned
+    // `bool` (decision 33, architecture.md's *File dependencies*): two
+    // declared strings failing to agree is a far stronger signal than a
+    // substring search over prose.
+    let (filedep_checked, filedep_issues) = plan::check_file_deps(&all_blocks);
+    for issue in &filedep_issues {
+        match issue {
+            plan::FileDepIssue::ReadsEscapesRoot { file, line, block, path } => {
+                eprintln!("stale-filedep: {file}:{line} `{block}` reads=file:{path} -- escapes the root");
+            }
+            plan::FileDepIssue::NoMatchingProducer { file, line, block, path } => {
+                eprintln!("stale-filedep: {file}:{line} `{block}` reads=file:{path} -- no dependency produces it");
+            }
+        }
+    }
+
+    // Advisory only, the same reasoning as the prose-dependency loop
+    // above: a node whose title collides with an earlier one's in the
+    // same file still resolves correctly today (`Slugger::assign` already
+    // gave it a distinct, ordinal-suffixed slug). What this reports is
+    // that the suffix is order-dependent -- renaming, reordering, or
+    // deleting the earlier same-titled node silently repoints anything
+    // already pinned to the later one's. Whether that risk is live or
+    // cosmetic depends on whether anything currently references either
+    // slug in the pair: `index_graph`'s own link edges (already built
+    // above) and `depends_targets` (already collected in the prose loop)
+    // are both checked, so this needs nothing new to load.
+    let mut title_dupes = 0usize;
+    let mut title_dupes_referenced = 0usize;
+    let mut title_dupes_sibling = 0usize;
+    for file in &corpus.files {
+        for collision in build::title_collisions(&file.nodes) {
+            title_dupes += 1;
+            if collision.sibling {
+                title_dupes_sibling += 1;
+            }
+            let refs = index_graph.incoming_link_count(&collision.node.id)
+                + index_graph.incoming_link_count(&collision.first.id)
+                + depends_targets
+                    .iter()
+                    .filter(|t| **t == collision.node.id || **t == collision.first.id)
+                    .count();
+            let note = if refs > 0 {
+                title_dupes_referenced += 1;
+                format!("{refs} incoming reference(s); a rename, reorder, or delete here can silently repoint them")
+            } else {
+                "no incoming references; cosmetic".to_string()
+            };
+            let shape = if collision.sibling { "sibling" } else { "differently-nested" };
+            eprintln!(
+                "dup-title: {}:{} `{}` shares its title with {shape} {}:{} -- resolved as #{} instead of #{} ({note})",
+                collision.node.file,
+                collision.node.line,
+                collision.node.title,
+                collision.first.file,
+                collision.first.line,
+                collision.node.id.slug,
+                collision.first.id.slug,
+            );
+        }
+    }
+
+    diags.sort();
+    diags.emit();
+    eprintln!("root: {}", corpus.display);
+    if unresolved > 0 {
+        eprintln!("{unresolved} unresolved of {} node(s)", index_graph.nodes.len());
+    }
+    eprintln!("{stale} stale of {checked} eval result(s)");
+    eprintln!("{prose_stale} of {prose_checked} prose dependency marker(s) advisory-stale");
+    eprintln!("{} stale of {filedep_checked} file dependency declaration(s)", filedep_issues.len());
+    eprintln!(
+        "{title_dupes} duplicate-title node(s), advisory ({title_dupes_referenced} referenced, {title_dupes_sibling} sibling)"
+    );
+    Ok(unresolved == 0 && stale == 0 && filedep_issues.is_empty())
+}
+```
+
+`graph` treats `--format json` as a special case up front. JSON is the
+whole index, never a view of it. It is the scriptable surface
+(`render/json.md`). A consumer that asked for the graph should not get a
+fragment, depending on which entry file they happened to name.
+
+```rust name=graph_cmd path=main.rs
+fn graph(
+    paths: &[String],
+    format: Format,
+    output: Option<&str>,
+    cache: bool,
+    depth: Option<u32>,
+    all: bool,
+    live: bool,
+) -> Result<(), String> {
+    let mut diags = Diags::new("dankg");
+    let corpus = index::load(paths, cache, &mut diags)?;
+    let mut index = resolve::resolve(&corpus.files, &mut diags);
+
+    if live {
+        add_live_orphans(&mut index, &corpus.config, &mut diags);
+    }
+
+    // JSON is the index, not a view of it. It is the scriptable surface.
+    // A consumer that asked for the graph should not get a fragment of
+    // it.
+    let view = if format == Format::Json {
+        None
+    } else {
+        let default_depth = corpus.config.depth(&mut diags);
+        Some(view::select_view(&index, &corpus.entries, depth, all, default_depth))
+    };
+    let drawn = view.as_ref().unwrap_or(&index);
+
+    let rendered = match format {
+        Format::Json => {
+            if depth.is_some() {
+                diags.warn_in("dankg", 0, "`--depth` does not apply to `--format json`, which always emits the whole index");
+            }
+            json::render(&index)
+        }
+        Format::Dot => {
+            let laid = layout::layout(drawn);
+            dot::render(drawn, &laid)
+        }
+        Format::Mermaid => {
+            let laid = layout::layout(drawn);
+            mermaid::render(drawn, &laid)
+        }
+        Format::Html => {
+            let laid = layout::layout(drawn);
+            // The whole index goes into the page beside the rendered
+            // subgraph. This way, expanding a node in the browser needs no
+            // second run and no server. `corpus.entries` are already
+            // root-relative.
+            let page = html::Page { root: &corpus.display, entries: &corpus.entries };
+            html::render(drawn, &laid, &index, &page)
+        }
+    };
+
+    match output {
+        Some(path) => fs::write(path, &rendered).map_err(|e| format!("{path}: {e}"))?,
+        None => {
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            lock.write_all(rendered.as_bytes()).map_err(|e| e.to_string())?;
+        }
+    }
+
+    diags.sort();
+    diags.emit();
+    summarize(&corpus, &index, view.as_ref(), &diags);
+    Ok(())
+}
+
+/// `--live` (decision 37): spawns every `[db.*]`'s own `list`, read-only,
+/// and adds a node to `index` for whatever it reports that the corpus
+/// does not already explain. A `[db.*]` with no `list` configured is
+/// reported and skipped, the same allowlist rule an unconfigured
+/// `[lang.*]` already gets. A `list` that fails to run is reported the
+/// same way rather than aborting the whole command: one broken database
+/// should not hide what every other one found. `query::live_orphans`
+/// itself never mutates `index` (it is a read-only lookup); this is the
+/// one caller that does, and the one place a run of `dankg graph` ever
+/// reaches into `eval::run` at all.
+fn add_live_orphans(index: &mut Graph, config: &Config, diags: &mut Diags) {
+    let timeout = Duration::from_secs(eval_run::DEFAULT_TIMEOUT_SECS);
+    for db in config.dbs() {
+        match eval_run::list_relations(&db, timeout) {
+            Ok(Some(relations)) => {
+                let orphans = query::live_orphans(index, &db.name, &relations);
+                index.nodes.extend(orphans);
+            }
+            Ok(None) => {
+                diags.warn_in("dankg", 0, format!("[db.{}] has no `list` configured; --live cannot check it", db.name));
+            }
+            Err(message) => diags.warn_in("dankg", 0, format!("[db.{}] list: {message}", db.name)),
+        }
+    }
+    index.sort();
+}
+
+/// One line each to stderr. This way, stdout stays a clean pipe.
+fn summarize(corpus: &Corpus, index: &Graph, view: Option<&Graph>, diags: &Diags) {
+    let unresolved = index.nodes.iter().filter(|n| !n.resolved).count();
+    eprintln!("root: {}", corpus.display);
+    eprintln!(
+        "indexed: {} file(s), {} nodes, {} edges",
+        corpus.stats.indexed,
+        index.nodes.len(),
+        index.edges.len()
+    );
+    if let Some(view) = view {
+        if view.nodes.len() < index.nodes.len() {
+            eprintln!("drawn: {} nodes, {} edges", view.nodes.len(), view.edges.len());
+        }
+    }
+    if unresolved > 0 {
+        eprintln!("{unresolved} unresolved of {} nodes", index.nodes.len());
+    }
+    let warnings = diags.count(Level::Warn);
+    if warnings > 0 {
+        eprintln!("{warnings} warning(s)");
+    }
+}
+```
+
+`index_report` exists for one situation. The graph is not what a reader
+expected. They need to know *why*: which root DanKG landed on, and which
+files it decided belonged to it. `index_report` answers that without
+wading through a full `--format json` dump to find out.
+
+```rust name=index_report path=main.rs
+/// `dankg index`: what the walk found and what state the cache is in.
+///
+/// This is the command you run when the graph is not what you expected.
+/// It answers the two questions that raises: which root am I in, and
+/// which files did it decide were mine.
+fn index_report(paths: &[String], cache: bool) -> Result<(), String> {
+    let mut diags = Diags::new("dankg");
+    let corpus = index::load(paths, cache, &mut diags)?;
+    let graph = resolve::resolve(&corpus.files, &mut diags);
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "root:    {} ({})",
+        corpus.display,
+        if corpus.declared { "declared by .dankg/" } else { "derived from the given paths" }
+    );
+    let _ = writeln!(
+        out,
+        "config:  {}",
+        corpus.config.source.as_deref().unwrap_or("none, defaults in use")
+    );
+    let _ = writeln!(
+        out,
+        "ignore:  {}",
+        corpus.ignore.source.as_deref().unwrap_or("none, nothing excluded")
+    );
+
+    let stats = &corpus.stats;
+    let _ = writeln!(
+        out,
+        "files:   {} indexed, {} ignored, {} skipped",
+        stats.indexed, stats.ignored, stats.skipped
+    );
+
+    let unresolved = graph.nodes.iter().filter(|n| !n.resolved).count();
+    let links = graph.edges.iter().filter(|e| e.kind == EdgeKind::Link).count();
+    let reciprocated = graph.edges.iter().filter(|e| e.reciprocated).count();
+    let _ = writeln!(out, "nodes:   {} ({unresolved} unresolved)", graph.nodes.len());
+    let _ = writeln!(
+        out,
+        "edges:   {links} link ({reciprocated} reciprocated), {} contains",
+        graph.edges.len() - links
+    );
+
+    match &corpus.cache_dir {
+        Some(dir) => {
+            let c = &stats.cache;
+            let _ = writeln!(
+                out,
+                "cache:   {} -- {} reused, {} reparsed, {} orphaned, {} error(s)",
+                index::to_slash(dir.strip_prefix(&corpus.root).unwrap_or(dir)),
+                c.hits,
+                c.misses,
+                corpus.cache_orphans,
+                c.errors
+            );
+        }
+        None if cache => {
+            let _ = writeln!(out, "cache:   off, this root has no .dankg/ to hold one");
+        }
+        None => {
+            let _ = writeln!(out, "cache:   off, --no-cache");
+        }
+    }
+
+    for entry in &corpus.entries {
+        let _ = writeln!(out, "entry:   {entry}");
+    }
+
+    print!("{out}");
+    diags.sort();
+    diags.emit();
+    Ok(())
+}
+```

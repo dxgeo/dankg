@@ -1,0 +1,672 @@
+# Render html
+
+A single self-contained HTML page. It is one file. The stylesheet and the
+script are inlined from [`render::assets`](assets.md). So there is no
+network request, no build step, and no server. Open it from a `file://`
+URL, mail it to somebody, or commit it. It is the same page either way.
+That is the whole point of a static output.
+
+Rust emits final SVG coordinates. The script does three things and no
+more: pan and zoom, expand a node's hidden neighbours, and open a node's
+source file. Everything about *where the boxes are* was already decided
+here, by the same layout every other format gets.
+
+Expansion is instant because the whole index ships in the page as a JSON
+blob beside the rendered subgraph. That is the same dump `--format json`
+emits. What the script does with it is a local placement onto the rank
+grid this layout already fixed, not a second layout engine. Re-running
+Sugiyama in the browser would move every box on screen. That is precisely
+what a reader following one link does not want. `--depth N+1` is how you
+get the real layout of the larger graph. The expanded boxes render as
+provisional, so the difference stays visible rather than implied.
+
+```rust name=module_doc path=render/html.rs
+//! A single self-contained HTML page.
+//!
+//! One file: the stylesheet and the script are inlined from `assets.rs`. So
+//! there is no network request, no build step, and no server. Open it from a
+//! file:// URL, mail it to somebody, or commit it. It is the same page either
+//! way. That is the point of a static output.
+//!
+//! Rust emits final SVG coordinates. The script does three things and no more:
+//! pan and zoom, expand a node's hidden neighbours, and open a node's source
+//! file. Everything about *where the boxes are* was decided here, by the same
+//! layout every other format gets.
+//!
+//! Expansion is instant because the whole index ships in the page as a JSON
+//! blob beside the rendered subgraph. That is the same dump `--format json`
+//! emits. What the script does with it is a local placement onto the rank grid
+//! this layout already fixed, not a second layout engine. Re-running Sugiyama
+//! in the browser would move every box on screen. That is precisely what a
+//! reader following one link does not want. `--depth N+1` is how you get the
+//! real layout of the larger graph. The expanded boxes render as provisional,
+//! so the difference is visible rather than implied.
+
+use super::assets;
+use super::json;
+use crate::graph::{EdgeKind, Graph, Node, NodeKind};
+use crate::layout::{self, Layout, Point};
+use std::fmt::Write as _;
+
+/// What the page needs that the graph does not carry: which corpus this is,
+/// and which part of it the reader asked for.
+pub struct Page<'a> {
+    /// The root as `dankg index` prints it. Header only.
+    pub root: &'a str,
+    /// Root-relative entry paths, exactly as they were named.
+    pub entries: &'a [String],
+}
+```
+
+A zero-sized `viewBox` is not a render. It is a browser bug waiting to
+happen. So an empty corpus still gets a real page saying so, rather than
+an unusable blank canvas. Both JSON blobs (the page's own metadata and the
+whole index) go into inert `<script type="application/json">` tags until
+the script itself reads them. The index blob in particular is the
+*canonical* dump, the same one `--format json` emits. It is never a
+bespoke shape of its own. So the page and a scripted `--format json`
+consumer can never disagree about what the graph actually is.
+
+```rust name=render path=render/html.rs
+pub fn render(view: &Graph, laid: &Layout, index: &Graph, page: &Page<'_>) -> String {
+    // A zero-sized viewBox is not a render. It is a browser bug waiting to
+    // happen. An empty corpus still gets a page that says so.
+    let width = laid.width.max(1);
+    let height = laid.height.max(1);
+    let entries = crate::graph::view::entry_nodes(view, page.entries);
+
+    let mut out = String::with_capacity(assets::CSS.len() + assets::JS.len() + 8 * 1024);
+    out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n");
+    out.push_str("<meta charset=\"utf-8\">\n");
+    out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    let _ = writeln!(out, "<title>dankg: {}</title>", text(&page_title(page)));
+    let _ = writeln!(out, "<style>{}</style>", assets::CSS);
+    out.push_str("</head>\n<body>\n");
+
+    header(&mut out, view, index, page);
+
+    out.push_str("<main>\n");
+    let _ = writeln!(
+        out,
+        "<svg id=\"graph\" class=\"canvas\" xmlns=\"http://www.w3.org/2000/svg\" \
+         viewBox=\"0 0 {width} {height}\" preserveAspectRatio=\"xMidYMid meet\" tabindex=\"0\">"
+    );
+    out.push_str(MARKERS);
+    out.push_str("<g id=\"scene\">\n<g id=\"edges\">\n");
+    for edge in &laid.edges {
+        if laid.is_drawn(edge) {
+            edge_svg(&mut out, edge, view);
+        }
+    }
+    out.push_str("</g>\n<g id=\"nodes\">\n");
+    for node in &laid.nodes {
+        node_svg(&mut out, node, view.node(&node.id), entries.contains(&node.id));
+    }
+    out.push_str("</g>\n</g>\n</svg>\n</main>\n");
+
+    out.push_str(
+        "<footer><span id=\"status\"></span> \u{2014} drag to pan, scroll to zoom, \
+         click a node to expand its neighbours, \u{2197} opens the source.</footer>\n",
+    );
+
+    // Two blobs, both inert until the script reads them. The index is the
+    // canonical dump rather than a bespoke shape. So the page and `--format
+    // json` can never disagree about what the graph is.
+    let _ = writeln!(
+        out,
+        "<script type=\"application/json\" id=\"dankg-meta\">{}</script>",
+        script_json(&meta_json(width, height, page.root))
+    );
+    let _ = writeln!(
+        out,
+        "<script type=\"application/json\" id=\"dankg-index\">{}</script>",
+        script_json(&json::render(index))
+    );
+    let _ = writeln!(out, "<script>{}</script>", assets::JS);
+    out.push_str("</body>\n</html>\n");
+    out
+}
+```
+
+```rust name=markers_and_header path=render/html.rs
+const MARKERS: &str = "<defs>\n\
+     <marker id=\"tip\" viewBox=\"0 0 10 10\" refX=\"10\" refY=\"5\" \
+     markerWidth=\"6\" markerHeight=\"6\" orient=\"auto\">\
+     <path d=\"M0,0 L10,5 L0,10 z\"/></marker>\n\
+     <marker id=\"tip-contains\" viewBox=\"0 0 10 10\" refX=\"10\" refY=\"5\" \
+     markerWidth=\"5\" markerHeight=\"5\" orient=\"auto\">\
+     <path d=\"M0,0 L10,5 L0,10 z\"/></marker>\n\
+     </defs>\n";
+
+fn page_title(page: &Page<'_>) -> String {
+    if page.entries.is_empty() {
+        page.root.to_string()
+    } else {
+        page.entries.join(", ")
+    }
+}
+
+fn header(out: &mut String, view: &Graph, index: &Graph, page: &Page<'_>) {
+    let unresolved = index.nodes.iter().filter(|n| !n.resolved).count();
+
+    out.push_str("<header>\n");
+    let _ = writeln!(out, "<span class=\"root\">{}</span>", text(page.root));
+    let _ = write!(
+        out,
+        "<span class=\"counts\">{} of {} node(s) drawn",
+        view.nodes.len(),
+        index.nodes.len()
+    );
+    if unresolved > 0 {
+        let _ = write!(out, ", {unresolved} unresolved");
+    }
+    out.push_str("</span>\n");
+    out.push_str(
+        "<span class=\"legend\">\
+         <span><i class=\"contains\"></i>contains</span>\
+         <span><i></i>link</span>\
+         <span><i class=\"dangling\"></i>unresolved</span>\
+         </span>\n",
+    );
+    out.push_str(
+        "<span class=\"controls\">\
+         <button id=\"fit\" type=\"button\">fit</button>\
+         <button id=\"reset\" type=\"button\">reset</button>\
+         </span>\n",
+    );
+    out.push_str("</header>\n");
+}
+```
+
+The box itself is the expand toggle. So opening the source needs its own
+separate hit target. One click must never mean two things at once. The hit
+target rides the top-right corner. It sits outside the label's own width
+and inside the gap the layout already leaves between boxes. So it costs
+the title no characters of its own space.
+
+```rust name=node_svg path=render/html.rs
+fn node_svg(out: &mut String, laid: &layout::LaidNode, node: Option<&Node>, entry: bool) {
+    let title = node.map(|n| n.title.as_str()).unwrap_or(&laid.id.slug);
+    let resolved = node.is_none_or(|n| n.resolved);
+
+    let mut classes = String::from("node");
+    if !resolved {
+        classes.push_str(" unresolved");
+    } else if node.is_some_and(|n| n.kind == NodeKind::Block) {
+        // A named code block reads as code, not prose. dot.rs renders the
+        // same distinction with fillcolor. tui/draw.rs renders it with a
+        // different border glyph.
+        classes.push_str(" block");
+    }
+    if entry {
+        classes.push_str(" entry");
+    }
+
+    let (left, top) = (laid.x - laid.width / 2, laid.y - laid.height / 2);
+    let _ = write!(
+        out,
+        "<g class=\"{classes}\" data-id=\"{id}\" data-rank=\"{rank}\" data-x=\"{x}\" \
+         data-y=\"{y}\" data-w=\"{w}\">",
+        id = attr(&laid.id.to_string()),
+        rank = laid.rank,
+        x = laid.x,
+        y = laid.y,
+        w = laid.width
+    );
+    let _ = write!(
+        out,
+        "<title>{}</title>",
+        text(&node.map(location).unwrap_or_else(|| laid.id.to_string()))
+    );
+    let _ = write!(
+        out,
+        "<rect class=\"box\" x=\"{left}\" y=\"{top}\" width=\"{}\" height=\"{}\"/>",
+        laid.width, laid.height
+    );
+    let _ = write!(
+        out,
+        "<text class=\"label\" x=\"{}\" y=\"{}\">{}</text>",
+        laid.x,
+        laid.y,
+        text(&layout::fit_label(title, laid.width))
+    );
+
+    // The box is the expand toggle. So opening the source needs its own
+    // target. One click must never mean two things. It rides the top-right
+    // corner, outside the label's width and inside the gap the layout leaves
+    // between boxes. So it costs the title no characters.
+    if let Some(node) = node.filter(|n| n.resolved) {
+        let _ = write!(
+            out,
+            "<a class=\"src\" href=\"{}\" target=\"_blank\" rel=\"noopener\">\
+             <title>open {}</title>\
+             <circle cx=\"{}\" cy=\"{top}\" r=\"7\"/>\
+             <text x=\"{}\" y=\"{top}\">\u{2197}</text></a>",
+            attr(&url(&node.file)),
+            text(&location(node)),
+            laid.x + laid.width / 2,
+            laid.x + laid.width / 2
+        );
+    }
+    out.push_str("</g>\n");
+}
+```
+
+The first draft of this page wrote the edge-key separator down twice: once
+here, once in `assets::JS`. The two spellings quietly differed. So every
+edge rendered a second time the instant a reader expanded anything.
+`KEY_SEP` is now sent to the script through the meta blob, instead of
+being spelled out independently in both languages. Nothing but that
+agreement prevented the bug the first time.
+
+`edge_key` is the other half of the same fix. A reciprocated pair is one
+rendered line. So both directed halves have to hash to the identical key,
+or the script would render the second copy right over the first.
+
+```rust name=edge_svg_and_key path=render/html.rs
+fn edge_svg(out: &mut String, edge: &layout::LaidEdge, view: &Graph) {
+    let dangling = [&edge.from, &edge.to]
+        .iter()
+        .any(|id| view.node(id).is_some_and(|n| !n.resolved));
+
+    let mut classes = format!("edge {}", edge.kind.as_str());
+    if dangling {
+        classes.push_str(" dangling");
+    }
+
+    let _ = write!(
+        out,
+        "<path class=\"{classes}\" data-key=\"{}\" data-from=\"{}\" data-to=\"{}\" d=\"{}\"",
+        attr(&edge_key(edge)),
+        attr(&edge.from.to_string()),
+        attr(&edge.to.to_string()),
+        path_of(&edge.points)
+    );
+    // A mutual link has no one direction to point in, so it gets no head. The
+    // same rule the dot and mermaid renderers follow.
+    if !(edge.kind == EdgeKind::Link && edge.reciprocated && edge.from != edge.to) {
+        let marker = if edge.kind == EdgeKind::Contains { "tip-contains" } else { "tip" };
+        let _ = write!(out, " marker-end=\"url(#{marker})\"");
+    }
+    out.push_str("/>\n");
+}
+
+/// What separates the parts of a line's key. It is sent to the script in the
+/// meta blob, rather than written down in both languages. The first version
+/// of this file wrote it down twice. The two spellings differed. The result
+/// was every edge rendering a second time the moment a reader expanded
+/// anything. Nothing but agreement here prevents that.
+pub const KEY_SEP: &str = " ";
+
+/// The identity of a rendered line. This is not the identity of an edge. A
+/// reciprocated pair is one line, so both halves have to hash to the same key,
+/// or the script would render the second over the first. `assets::JS` computes
+/// this the same way. That agreement is what keeps expansion idempotent.
+fn edge_key(edge: &layout::LaidEdge) -> String {
+    let (from, to) = (edge.from.to_string(), edge.to.to_string());
+    if edge.kind == EdgeKind::Link && edge.reciprocated && from != to {
+        let (a, b) = if from < to { (&from, &to) } else { (&to, &from) };
+        return format!("{a}{KEY_SEP}{b}{KEY_SEP}link");
+    }
+    format!("{from}{KEY_SEP}{to}{KEY_SEP}{}", edge.kind.as_str())
+}
+
+fn path_of(points: &[Point]) -> String {
+    let mut out = String::new();
+    for (i, p) in points.iter().enumerate() {
+        let _ = write!(out, "{}{},{}", if i == 0 { "M" } else { " L" }, p.x, p.y);
+    }
+    out
+}
+```
+
+`meta_json` sends the layout's own geometry constants to the script,
+rather than letting the JS carry a second, independently-maintained copy
+of them. The font-metric fiction the whole layout runs on
+(`layout::label_width`'s own estimate) has exactly one source of truth.
+The script reads it instead of restating it.
+
+```rust name=location_and_meta path=render/html.rs
+/// Where to find the node, for the box's tooltip. A placeholder was invented
+/// to catch a dangling link. It has no line to point at. So it says that,
+/// instead of reporting a file it was never read from.
+fn location(node: &Node) -> String {
+    if node.resolved {
+        format!("{}:{}", node.file, node.line)
+    } else {
+        format!("{} (unresolved)", node.id)
+    }
+}
+
+/// Geometry the script needs to size and place a box the way Rust did. It is
+/// sent rather than duplicated in the JS. That leaves one source of truth for
+/// the font-metric fiction the layout runs on.
+fn meta_json(width: i32, height: i32, root: &str) -> String {
+    format!(
+        "{{\"width\": {width}, \"height\": {height}, \"root\": {root}, \
+         \"edgeKeySep\": {sep}, \"geometry\": \
+         {{\"nodeHeight\": {}, \"rankSep\": {}, \"nodeSep\": {}, \"margin\": {}, \
+         \"charWidth\": {}, \"labelPad\": {}, \"minWidth\": {}, \"maxWidth\": {}}}}}\n",
+        layout::NODE_HEIGHT,
+        layout::RANK_SEP,
+        layout::NODE_SEP,
+        layout::MARGIN,
+        layout::CHAR_WIDTH,
+        layout::LABEL_PAD,
+        layout::MIN_WIDTH,
+        layout::MAX_WIDTH,
+        root = json_string(root),
+        sep = json_string(KEY_SEP),
+    )
+}
+```
+
+Four small escapers each guard one specific place where untrusted text (a
+heading, most often) lands. JSON inside a `<script>` tag only needs `<`
+neutralized. `</script` is the one sequence that would break out. JSON's
+own syntax never produces a bare `<` outside a string, so nothing else
+needs escaping there. SVG text content needs the ordinary three. An
+attribute value needs a fourth: the quote character wrapping it. A URL
+needs percent-encoding rather than escaping, because the characters that
+matter there are the ones a *browser* reads as URL syntax, not markup.
+`#` matters most: `notes/a#b.md` would otherwise open `notes/a` and look
+for an anchor named `b.md`.
+
+```rust name=escapers path=render/html.rs
+/// JSON is only inert inside `<script>` while it cannot spell `</script`.
+/// Escaping every `<` is enough, and it costs nothing. JSON's own syntax has
+/// no `<` in it, so anything replaced here was inside a string literal.
+fn script_json(value: &str) -> String {
+    value.replace('<', "\\u003c")
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Element content. A heading is arbitrary text and lands in an SVG `<text>`.
+fn text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// An attribute value. Every attribute here is double-quoted, so `"` has to go
+/// too. A heading containing one would otherwise close the attribute. The rest
+/// of the title would land in the tag.
+fn attr(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A root-relative path as a URL. Percent-encoded rather than escaped. The
+/// characters that matter here are the ones a browser would read as URL
+/// syntax. `#` is the dangerous one: `notes/a#b.md` would otherwise open
+/// `notes/a` and look for an anchor.
+fn url(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(byte as char)
+            }
+            other => {
+                let _ = write!(out, "%{other:02X}");
+            }
+        }
+    }
+    out
+}
+```
+
+## Tests
+
+```rust name=tests path=render/html.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{graph_of, NodeId};
+
+    /// The contents of one `<script type="application/json">`. Sliced rather
+    /// than read line by line. The canonical dump is pretty-printed. A blob
+    /// spans many lines, so reading only the first would prove nothing.
+    fn blob<'a>(page: &'a str, id: &str) -> &'a str {
+        let open = format!("id=\"{id}\">");
+        let start = page.find(&open).expect("the blob") + open.len();
+        let end = start + page[start..].find("</script>").expect("the blob closes");
+        &page[start..end]
+    }
+
+    fn page(files: &[(&str, &str)], entries: &[&str]) -> String {
+        let index = graph_of(files);
+        let owned: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
+        let laid = layout::layout(&index);
+        render(&index, &laid, &index, &Page { root: "/tmp/corpus", entries: &owned })
+    }
+
+    #[test]
+    fn the_page_is_one_file_with_nothing_fetched_from_anywhere() {
+        let out = page(&[("a.md", "# One\n\n## Two\n")], &["a.md"]);
+        assert!(out.starts_with("<!doctype html>"));
+        assert!(out.contains(&format!("<style>{}</style>", assets::CSS)));
+        assert!(out.contains(assets::JS));
+
+        // The SVG namespace is the one URL in the page. It is an identifier
+        // rather than an address. No browser ever fetches it. Anything else
+        // spelling a URL would be a second file to ship.
+        let page = out.replace("http://www.w3.org/2000/svg", "");
+        for fetched in ["http://", "https://", "src=\"", "@import", "url(http"] {
+            assert!(!page.contains(fetched), "the page reaches for {fetched}: not self-contained");
+        }
+    }
+
+    #[test]
+    fn nodes_carry_the_coordinates_the_layout_computed() {
+        let index = graph_of(&[("a.md", "# One\n\n## Two\n")]);
+        let laid = layout::layout(&index);
+        let out = render(&index, &laid, &index, &Page { root: "r", entries: &[] });
+
+        let one = laid.nodes.iter().find(|n| n.id.slug == "one").unwrap();
+        assert!(out.contains(&format!("data-id=\"a#one\" data-rank=\"0\" data-x=\"{}\"", one.x)));
+        assert!(out.contains(&format!(
+            "<rect class=\"box\" x=\"{}\" y=\"{}\"",
+            one.x - one.width / 2,
+            one.y - one.height / 2
+        )));
+        assert!(out.contains(">One</text>"), "{out}");
+    }
+
+    #[test]
+    fn the_whole_index_ships_alongside_the_drawing() {
+        // The view is one node. The blob still has to hold both, or expanding
+        // would have nothing to expand into.
+        let index = graph_of(&[("a.md", "# One\n\n[two](b.md#two)\n"), ("b.md", "# Two\n")]);
+        let view = crate::graph::view::select(&index, &[NodeId::new("a", "one")], 0);
+        let laid = layout::layout(&view);
+        let out = render(&view, &laid, &index, &Page { root: "r", entries: &["a.md".into()] });
+
+        assert_eq!(out.matches("class=\"node").count(), 1, "one box is drawn");
+        assert!(blob(&out, "dankg-index").contains("\"id\": \"b#two\""), "the hidden node is in the blob");
+    }
+
+    #[test]
+    fn a_block_node_gets_its_own_class() {
+        let out = page(&[("a.md", "# One\n\n```sh name=setup\n:\n```\n")], &[]);
+        assert!(out.contains("class=\"node block\""), "{out}");
+    }
+
+    #[test]
+    fn an_unresolved_node_is_dashed_and_has_no_source_to_open() {
+        let out = page(&[("a.md", "# One\n\n[gone](nowhere.md#lost)\n")], &[]);
+        assert!(out.contains("class=\"node unresolved\""), "{out}");
+        let dangling = out.lines().find(|l| l.contains("node unresolved")).unwrap();
+        assert!(!dangling.contains("class=\"src\""), "a placeholder has no file to open");
+        assert!(dangling.contains("<title>nowhere#lost (unresolved)</title>"), "{dangling}");
+        assert!(!dangling.contains(":0<"), "a placeholder has no line to report");
+        assert!(out.contains("class=\"edge link dangling\""), "{out}");
+    }
+
+    #[test]
+    fn a_reciprocated_pair_is_one_line_with_no_arrowhead() {
+        let out = page(
+            &[("a.md", "# A\n\n[b](b.md#b)\n"), ("b.md", "# B\n\n[a](a.md#a)\n")],
+            &[],
+        );
+        let links: Vec<&str> = out.lines().filter(|l| l.starts_with("<path class=\"edge link")).collect();
+        assert_eq!(links.len(), 1, "one line, not two: {links:?}");
+        assert!(!links[0].contains("marker-end"), "a mutual link points nowhere in particular");
+        assert!(links[0].contains("data-key=\"a#a b#b link\""), "{}", links[0]);
+    }
+
+    #[test]
+    fn both_halves_of_a_pair_key_the_same_line() {
+        let index = graph_of(&[("a.md", "# A\n\n[b](b.md#b)\n"), ("b.md", "# B\n\n[a](a.md#a)\n")]);
+        let laid = layout::layout(&index);
+        let keys: Vec<String> = laid.edges.iter().map(edge_key).collect();
+        assert_eq!(keys[0], keys[1], "the script dedupes on this; it has to collide");
+    }
+
+    #[test]
+    fn the_entry_is_marked_so_a_reader_can_find_what_they_asked_for() {
+        let out = page(&[("a.md", "# One\n"), ("z.md", "# Zed\n")], &["a.md"]);
+        assert!(out.contains("class=\"node entry\" data-id=\"a#one\""), "{out}");
+        assert!(out.contains("class=\"node\" data-id=\"z#zed\""), "{out}");
+    }
+
+    #[test]
+    fn a_source_link_is_relative_and_percent_encoded() {
+        let out = page(&[("notes/a b.md", "# One\n")], &[]);
+        assert!(out.contains("href=\"notes/a%20b.md\""), "{out}");
+        assert!(!out.contains("href=\"/"), "an absolute path would not survive being committed");
+        assert_eq!(url("notes/a#b.md"), "notes/a%23b.md");
+    }
+
+    #[test]
+    fn a_heading_cannot_break_out_of_the_markup_it_lands_in() {
+        let out = page(&[("a.md", "# Alarm & \"quote\" <script>x</script>\n")], &[]);
+        assert!(!out.contains("<script>x</script>"), "a heading escaped into markup");
+        assert!(out.contains("&amp;"), "{out}");
+        assert_eq!(attr("a\"b<c"), "a&quot;b&lt;c");
+        assert_eq!(text("a & b"), "a &amp; b");
+    }
+
+    #[test]
+    fn the_json_blob_cannot_close_its_own_script_tag() {
+        let out = page(&[("a.md", "# A </script><script>alert(1)</script>\n")], &[]);
+        let blob = blob(&out, "dankg-index");
+        assert!(!blob.contains("</script>"), "the blob closed its own tag: {blob}");
+        assert!(blob.contains("\\u003c/script"), "{blob}");
+        assert_eq!(script_json("{\"a\": \"</b>\"}"), "{\"a\": \"\\u003c/b>\"}");
+    }
+
+    /// This one is not hypothetical. The first draft of `assets.rs` carried
+    /// literal NUL bytes where the key separator should have been. That was
+    /// invisible in every diff and every editor. It was enough to make the
+    /// script re-render every edge Rust had already rendered. A hand-written
+    /// asset has no compiler looking at it. This test is the only thing that
+    /// would notice.
+    #[test]
+    fn the_shipped_assets_carry_no_invisible_characters() {
+        for (name, asset) in [("CSS", assets::CSS), ("JS", assets::JS)] {
+            let found = asset.char_indices().find(|(_, c)| c.is_control() && *c != '\n');
+            assert!(
+                found.is_none(),
+                "{name} carries U+{:04X} at byte {}",
+                found.unwrap().1 as u32,
+                found.unwrap().0
+            );
+        }
+    }
+
+    /// The renderer and the script must agree on a line's identity, or
+    /// expansion duplicates everything. They are written in different
+    /// languages, so nothing type-checks the agreement. Keeping the separator
+    /// in the blob is what makes it structural. This test is what keeps it
+    /// there.
+    #[test]
+    fn the_script_takes_the_key_separator_from_the_page() {
+        assert!(
+            assets::JS.contains("meta.edgeKeySep"),
+            "the script must read the separator, not spell it out a second time"
+        );
+        assert!(
+            !assets::JS.contains("\" \" + e.to"),
+            "a literal separator crept back into the script"
+        );
+        let out = page(&[("a.md", "# A\n\n[b](b.md#b)\n"), ("b.md", "# B\n\n[a](a.md#a)\n")], &[]);
+        assert!(out.contains(&format!("\"edgeKeySep\": {}", json_string(KEY_SEP))), "{out}");
+        let line = out.lines().find(|l| l.contains("class=\"edge link")).unwrap();
+        assert!(
+            line.contains(&format!("data-key=\"a#a{KEY_SEP}b#b{KEY_SEP}link\"")),
+            "the stamped key must be built from the same separator: {line}"
+        );
+    }
+
+    #[test]
+    fn the_script_is_told_the_geometry_rather_than_repeating_it() {
+        let out = page(&[("a.md", "# One\n")], &[]);
+        assert!(out.contains(&format!("\"charWidth\": {}", layout::CHAR_WIDTH)), "{out}");
+        assert!(out.contains(&format!("\"nodeHeight\": {}", layout::NODE_HEIGHT)));
+        assert!(out.contains(&format!("\"rankSep\": {}", layout::RANK_SEP)));
+    }
+
+    #[test]
+    fn an_empty_graph_still_renders_a_usable_page() {
+        let out = render(&Graph::default(), &Layout::default(), &Graph::default(), &Page {
+            root: "r",
+            entries: &[],
+        });
+        assert!(out.contains("viewBox=\"0 0 1 1\""), "a zero viewBox is not a drawing");
+        assert!(out.contains("id=\"nodes\""));
+        assert!(out.trim_end().ends_with("</html>"));
+    }
+
+    #[test]
+    fn a_long_edge_keeps_the_bend_points_the_layout_gave_it() {
+        let out = page(&[("a.md", "# One\n\nsee [three](#three)\n\n## Two\n\n### Three\n")], &[]);
+        let long = out
+            .lines()
+            .find(|l| l.contains("data-from=\"a#one\"") && l.contains("data-to=\"a#three\""))
+            .expect("the spanning link");
+        assert_eq!(long.matches(" L").count(), 2, "two segments, one bend: {long}");
+    }
+
+    #[test]
+    fn a_title_too_wide_for_its_box_is_cut_rather_than_overflowing() {
+        let long = "x".repeat(200);
+        let out = page(&[("a.md", &format!("# {long}\n"))], &[]);
+        assert!(out.contains("\u{2026}</text>"), "a 200-character heading was not cut");
+    }
+}
+```

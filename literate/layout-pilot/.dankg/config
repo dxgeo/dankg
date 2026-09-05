@@ -1,0 +1,14 @@
+# Pilot 2: exercises `[tangle.rust] glue`'s real mod.rs-GENERATING path, not
+# just its skip-an-existing-file backoff -- see layout.md's own notes for why
+# pilot 1 (hash.rs) never actually exercised this. Own root, separate from
+# ../hash.md's, so a whole-corpus walk of one never pulls in the other.
+#
+# `glue` chains both reference scripts, structural generation first: a build
+# that needs `mod.rs` should never depend on the doc-comment linter finishing
+# first, and `sh -c '... && ...'` already keeps that order (cmd.rs' own
+# quote-aware split test covers exactly this shape).
+
+[tangle.rust]
+glue    = sh -c 'python3 glue/rust.py {dir} && python3 glue/rust-doclint.py {dir} literate/layout-pilot'
+ext     = rs
+command = cargo test --manifest-path {dir}/Cargo.toml

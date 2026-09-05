@@ -1,0 +1,335 @@
+# Layout order
+
+Phase 3, over the layers [`layout::rank`](rank.md) already assigned:
+order the nodes within each layer to reduce edge crossings. Minimizing
+crossings exactly is NP-hard. This is the standard median heuristic
+instead: sweep down the layers, putting each node at the median
+position of its neighbours above, then sweep up doing the same with
+the neighbours below. Four passes total. The best ordering seen is
+kept, so a sweep can never leave things worse than where it started.
+Two determinism rules make the whole thing reproducible, not merely
+plausible. The starting order comes from a depth-first walk in index
+order, never from whatever the graph happened to hand back. Every tie
+anywhere in the sweep is broken by a node's own stable key.
+
+```rust name=module_doc path=layout/order.rs
+//! Phase 3: order the nodes within each layer, to reduce edge crossings.
+//!
+//! Minimising crossings exactly is NP-hard. This is the standard median
+//! heuristic instead: sweep down the layers putting each node at the median
+//! position of its neighbours above, then sweep up doing the same with the
+//! neighbours below, four times. The best ordering seen is kept. A sweep
+//! can never make things worse than where it started.
+//!
+//! Two determinism rules. The starting order comes from a depth-first walk
+//! in index order, not from whatever the graph happened to hand us. Every
+//! tie is broken by the node's stable key.
+
+use super::{Dag, Segment};
+
+const SWEEPS: usize = 4;
+
+pub(crate) fn minimize_crossings(dag: &mut Dag) {
+    dag.layers = initial_order(dag);
+    if dag.layers.len() < 2 {
+        renumber(dag);
+        return;
+    }
+
+    let mut best = dag.layers.clone();
+    let mut fewest = crossings(dag, &best);
+
+    for sweep in 0..SWEEPS {
+        renumber(dag);
+        if sweep % 2 == 0 {
+            for rank in 1..dag.layers.len() {
+                reorder(dag, rank, Direction::Down);
+            }
+        } else {
+            for rank in (0..dag.layers.len() - 1).rev() {
+                reorder(dag, rank, Direction::Up);
+            }
+        }
+        let count = crossings(dag, &dag.layers);
+        if count < fewest {
+            fewest = count;
+            best = dag.layers.clone();
+        }
+    }
+
+    dag.layers = best;
+    renumber(dag);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Direction {
+    /// Order this layer by where its predecessors sit.
+    Down,
+    /// Order this layer by where its successors sit.
+    Up,
+}
+```
+
+```rust name=initial_order_and_renumber path=layout/order.rs
+/// Depth-first from every node in index order, appending each node to its
+/// layer the first time it is reached. Nodes connected to each other therefore
+/// start out near each other, which is most of the work.
+fn initial_order(dag: &Dag) -> Vec<Vec<usize>> {
+    let ranks = dag.rank.iter().copied().max().unwrap_or(0) as usize + 1;
+    let mut layers: Vec<Vec<usize>> = vec![Vec::new(); ranks];
+    let mut seen = vec![false; dag.count()];
+
+    let mut out: Vec<Vec<usize>> = vec![Vec::new(); dag.count()];
+    for segment in &dag.segments {
+        out[segment.from].push(segment.to);
+    }
+
+    for root in 0..dag.count() {
+        if seen[root] {
+            continue;
+        }
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if seen[node] {
+                continue;
+            }
+            seen[node] = true;
+            layers[dag.rank[node] as usize].push(node);
+            // Reversed. This way, the lowest-numbered successor comes off the
+            // stack first. The walk then reads left to right.
+            for &next in out[node].iter().rev() {
+                if !seen[next] {
+                    stack.push(next);
+                }
+            }
+        }
+    }
+    layers
+}
+
+fn renumber(dag: &mut Dag) {
+    dag.pos = vec![0; dag.count()];
+    for layer in &dag.layers {
+        for (i, &node) in layer.iter().enumerate() {
+            dag.pos[node] = i as u32;
+        }
+    }
+}
+```
+
+A containment segment counts twice toward a node's median. This is the
+mechanism that pulls a heading into line with its own children, rather
+than with whatever else happens to link to it. It matches the weight
+`layout::rank` already gives containment, when it lays out layers in
+the first place.
+
+```rust name=reorder_and_median path=layout/order.rs
+fn reorder(dag: &mut Dag, rank: usize, direction: Direction) {
+    let layer = dag.layers[rank].clone();
+    let medians: Vec<i64> = layer.iter().map(|&n| median(dag, n, direction)).collect();
+
+    let mut ranked: Vec<(usize, usize)> = (0..layer.len()).map(|i| (i, i)).collect();
+    ranked.sort_by(|a, b| {
+        let (ma, mb) = (medians[a.0], medians[b.0]);
+        // A node with nothing in the reference layer has no opinion, so it
+        // keeps the position it already had.
+        match (ma < 0, mb < 0) {
+            (true, true) => a.1.cmp(&b.1),
+            (false, false) => (ma, &dag.key[layer[a.0]]).cmp(&(mb, &dag.key[layer[b.0]])),
+            (true, false) => (a.1 as i64).cmp(&mb),
+            (false, true) => ma.cmp(&(b.1 as i64)),
+        }
+    });
+
+    dag.layers[rank] = ranked.iter().map(|(i, _)| layer[*i]).collect();
+}
+
+/// The weighted median position of a node's neighbours in the adjacent layer,
+/// or `-1` when it has none.
+///
+/// A containment segment counts twice, which is what pulls a heading into line
+/// with its children rather than with whatever else happens to link to it.
+fn median(dag: &Dag, node: usize, direction: Direction) -> i64 {
+    let mut positions: Vec<u32> = Vec::new();
+    for segment in &dag.segments {
+        let neighbour = match direction {
+            Direction::Down if segment.to == node => segment.from,
+            Direction::Up if segment.from == node => segment.to,
+            _ => continue,
+        };
+        for _ in 0..segment.weight.max(1) {
+            positions.push(dag.pos[neighbour]);
+        }
+    }
+    if positions.is_empty() {
+        return -1;
+    }
+    positions.sort_unstable();
+    // Scaled by two so an even-sized list keeps the half-step between its two
+    // middle values instead of rounding it away.
+    let mid = positions.len() / 2;
+    if positions.len() % 2 == 1 {
+        positions[mid] as i64 * 2
+    } else {
+        positions[mid - 1] as i64 + positions[mid] as i64
+    }
+}
+```
+
+```rust name=crossings path=layout/order.rs
+/// Total crossings over every adjacent pair of layers.
+fn crossings(dag: &Dag, layers: &[Vec<usize>]) -> usize {
+    let mut pos = vec![0u32; dag.count()];
+    for layer in layers {
+        for (i, &node) in layer.iter().enumerate() {
+            pos[node] = i as u32;
+        }
+    }
+
+    // Two segments between the same pair of layers cross when their endpoints
+    // are in the opposite order at the top and at the bottom.
+    let mut total = 0;
+    for rank in 0..layers.len().saturating_sub(1) {
+        let between: Vec<&Segment> = dag
+            .segments
+            .iter()
+            .filter(|s| dag.rank[s.from] as usize == rank)
+            .collect();
+        for (i, a) in between.iter().enumerate() {
+            for b in &between[i + 1..] {
+                let (top, bottom) = (
+                    pos[a.from].cmp(&pos[b.from]),
+                    pos[a.to].cmp(&pos[b.to]),
+                );
+                if top != std::cmp::Ordering::Equal
+                    && bottom != std::cmp::Ordering::Equal
+                    && top != bottom
+                {
+                    total += 1;
+                }
+            }
+        }
+    }
+    total
+}
+```
+
+## Tests
+
+```rust name=tests path=layout/order.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::acyclic;
+    use crate::layout::rank;
+
+    fn build(count: usize, edges: &[(usize, usize, i32)]) -> Dag {
+        let mut dag = Dag {
+            real: count,
+            rank: vec![0; count],
+            width: vec![80; count],
+            key: (0..count).map(|i| format!("n{i:03}")).collect(),
+            ..Dag::default()
+        };
+        let roles = acyclic::break_cycles(count, edges);
+        rank::assign(&mut dag, edges, &roles);
+        rank::split_long_edges(&mut dag, edges, &roles);
+        minimize_crossings(&mut dag);
+        dag
+    }
+
+    fn e(from: usize, to: usize) -> (usize, usize, i32) {
+        (from, to, 1)
+    }
+
+    #[test]
+    fn every_node_lands_in_the_layer_its_rank_says() {
+        let d = build(4, &[e(0, 1), e(0, 2), e(1, 3)]);
+        for (rank, layer) in d.layers.iter().enumerate() {
+            for &node in layer {
+                assert_eq!(d.rank[node] as usize, rank);
+            }
+        }
+    }
+
+    #[test]
+    fn positions_are_dense_and_match_the_layers() {
+        let d = build(5, &[e(0, 1), e(0, 2), e(0, 3), e(0, 4)]);
+        assert_eq!(d.layers[1].len(), 4);
+        let mut seen: Vec<u32> = d.layers[1].iter().map(|&n| d.pos[n]).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn an_obviously_crossed_pairing_is_untangled() {
+        // 0 and 1 on top, 2 and 3 below, wired 0->3 and 1->2. Whichever way
+        // the layers end up ordered, the two edges must not cross.
+        let d = build(4, &[e(0, 3), e(1, 2)]);
+        assert_eq!(crossings(&d, &d.layers), 0);
+    }
+
+    #[test]
+    fn a_worse_sweep_never_replaces_a_better_ordering() {
+        // A deliberately awkward bipartite graph. The result only has to be
+        // no worse than the depth-first starting point.
+        let edges: Vec<(usize, usize, i32)> =
+            vec![e(0, 5), e(1, 4), e(2, 6), e(3, 5), e(0, 6), e(1, 7)];
+        let d = build(8, &edges);
+        let start = {
+            let mut fresh = d.clone();
+            fresh.layers = initial_order(&fresh);
+            crossings(&fresh, &fresh.layers)
+        };
+        assert!(crossings(&d, &d.layers) <= start);
+    }
+
+    #[test]
+    fn a_node_with_no_neighbours_above_keeps_its_place() {
+        // Node 3 has nothing pointing at it. The down sweep has no opinion
+        // about it. It must not be shuffled to an end.
+        let d = build(4, &[e(0, 1), e(0, 2)]);
+        assert!(d.layers.iter().flatten().any(|&n| n == 3));
+        assert_eq!(d.layers.iter().flatten().count(), 4, "no node is lost");
+    }
+
+    #[test]
+    fn bend_points_are_ordered_alongside_real_nodes() {
+        let d = build(3, &[e(0, 1), e(1, 2), e(0, 2)]);
+        assert_eq!(d.layers[1].len(), 2, "the real node and the bend point share a layer");
+        assert!(d.layers[1].iter().any(|&n| d.is_virtual(n)));
+    }
+
+    #[test]
+    fn a_single_layer_graph_is_ordered_without_sweeping() {
+        let d = build(3, &[]);
+        assert_eq!(d.layers.len(), 1);
+        assert_eq!(d.layers[0], vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn ordering_is_the_same_on_every_run() {
+        let edges = vec![e(0, 2), e(0, 3), e(1, 2), e(1, 4), e(2, 5), e(3, 5), e(4, 5)];
+        let first = build(6, &edges).layers;
+        for _ in 0..5 {
+            assert_eq!(build(6, &edges).layers, first);
+        }
+    }
+
+    #[test]
+    fn crossings_counts_a_known_tangle() {
+        // 0 -> 3 and 1 -> 2. With the lower layer as [2, 3] the two edges
+        // cross. Swapping it to [3, 2] untangles them.
+        let mut d = build(4, &[e(0, 3), e(1, 2)]);
+        d.layers[0] = vec![0, 1];
+
+        d.layers[1] = vec![2, 3];
+        renumber(&mut d);
+        assert_eq!(crossings(&d, &d.layers), 1);
+
+        d.layers[1] = vec![3, 2];
+        renumber(&mut d);
+        assert_eq!(crossings(&d, &d.layers), 0);
+    }
+}
+```

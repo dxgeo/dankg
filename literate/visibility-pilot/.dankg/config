@@ -1,0 +1,13 @@
+# Pilot 3: exercises `dankg.tangle.public` (decision 28) end to end. Neither
+# earlier pilot ever set the frontmatter flag -- hash.md is one flat file
+# with nothing to be private *from*, and layout-pilot's five modules only
+# ever reach each other through `super::`, which private (`mod x;`)
+# declarations already allow between siblings. This pilot's whole point is
+# a reference that only compiles because a submodule was declared public,
+# reaching it from *outside* the directory `[tangle.rust] glue` generated
+# `mod.rs` for.
+
+[tangle.rust]
+glue    = python3 glue/rust.py {dir}
+ext     = rs
+command = cargo test --manifest-path {dir}/Cargo.toml

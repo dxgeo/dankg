@@ -1,6 +1,6 @@
 //! CommonMark conformance.
 //!
-//! DanKG implements a subset of CommonMark on purpose (architecture.org,
+//! DanKG implements a subset of CommonMark on purpose (architecture.md,
 //! decision 3). This harness measures exactly how much, so the scope claim in
 //! the README is a number rather than a guess.
 //!

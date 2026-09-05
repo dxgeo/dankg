@@ -1,0 +1,22 @@
+# Pilot 4: decision 29 (cross-file eval `deps=`) and decision 24 (tangle
+# placement, which never reads `deps=`) have each shipped and been unit
+# tested, but never exercised together over one corpus, by a real `dankg`
+# binary, to answer a question neither decision's own text settles: can the
+# very same block source serve eval's flat, module-free concatenation
+# (decision 11) *and* tangle's real multi-file module structure at once?
+# `same-file.md` and the `producer.md`/`consumer.md` pair answer it
+# oppositely -- see `consumer.md`'s own "Pilot notes" for why, and why that
+# split is the actual finding.
+#
+# `rustc --test` (not a plain build) is what lets a block eval'd here look
+# exactly like a tangled one: both `hash.md` and `layout-pilot` already put
+# their proof of correctness in a `#[cfg(test)] mod tests { use super::*;
+# ... }` block, and `--test` is what makes that convention runnable
+# standalone, with nothing else, against eval's own flat-concatenated file.
+
+[lang.rust]
+command = sh -c 'rustc --test -o {file}.bin {file} 2>&1 && {file}.bin; rc=$?; rm -f {file}.bin; exit $rc'
+ext     = rs
+
+[tangle.rust]
+ext     = rs

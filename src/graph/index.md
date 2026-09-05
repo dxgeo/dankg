@@ -1,0 +1,478 @@
+# Graph index
+
+The root is the single most load-bearing value in DanKG. Every node's
+identity is taken relative to it, so output is the same wherever the
+binary happens to be run from. The link resolver refuses anything that
+climbs above it. With no root at all, the boundary would silently become
+the working directory. Whether `../../etc/passwd.md` gets refused would
+then depend on how deep the path a reader happened to type was --
+exactly the class of ambient, invocation-dependent behavior a knowledge
+base's own root is supposed to rule out.
+
+Discovery walks up from the named path looking for a `.dankg/` directory.
+Failing that, the root is the common ancestor of every path given, which
+for a single file is just its own directory. The index then always covers
+the *whole* root ([decision 6](../../architecture.md#decision-6-index-scope)).
+Backlinks are only honest once every file has been seen, so the entry a
+reader names sets the *view*, never the index itself.
+
+```rust name=module_doc path=graph/index.rs
+//! Root discovery and the corpus walk.
+//!
+//! The root is the single most load-bearing value in DanKG. Node identity is
+//! taken relative to it, so output is the same wherever the binary was run
+//! from. The link resolver refuses anything that climbs above it. With no
+//! root the boundary silently becomes the working directory. Whether
+//! `../../etc/passwd.md` is refused then depends on how deep the path you
+//! happened to type was.
+//!
+//! Discovery walks up from the named path looking for a `.dankg/` directory.
+//! Failing that the root is the common ancestor of the paths given, which for
+//! a single file is its own directory.
+//!
+//! The index covers the whole root, always (decision 6). Backlinks are only
+//! honest when every file has been seen. The entry sets the view, never the
+//! index.
+
+use super::build::{self, ParsedFile};
+use super::cache::{self, Cache};
+use super::ignore::Ignore;
+use crate::config::{self, Config};
+use crate::diag::Diags;
+use crate::md::Document;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+/// Deep enough for any real knowledge base, shallow enough that a pathological
+/// tree reports rather than exhausts the stack.
+const MAX_DEPTH: usize = 64;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// Markdown files that made it into the index.
+    pub indexed: usize,
+    /// Paths excluded by `.dankgignore`. A pruned directory counts once.
+    pub ignored: usize,
+    /// Symlinks and unreadable entries, which are reported and passed over.
+    pub skipped: usize,
+    pub cache: cache::Stats,
+}
+
+#[derive(Debug, Clone)]
+pub struct Corpus {
+    pub root: PathBuf,
+    /// The root as a human reads it: relative to the working directory when it
+    /// sits underneath, absolute otherwise.
+    pub display: String,
+    /// True when a `.dankg/` marked the root, false when it was derived.
+    pub declared: bool,
+    pub config: Config,
+    pub ignore: Ignore,
+    /// Root-relative paths named on the command line. These set the view.
+    pub entries: Vec<String>,
+    /// Root-relative paths of every indexed file, sorted.
+    pub paths: Vec<String>,
+    pub files: Vec<ParsedFile>,
+    pub stats: Stats,
+    /// Where the cache lives, when there is one.
+    pub cache_dir: Option<PathBuf>,
+    pub cache_orphans: usize,
+}
+
+/// Walk up from `start` looking for the directory that contains a `.dankg/`.
+pub fn discover_root(start: &Path) -> Option<PathBuf> {
+    let mut here = Some(start);
+    while let Some(dir) = here {
+        if dir.join(config::DIR).is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        here = dir.parent();
+    }
+    None
+}
+```
+
+`load` is where root discovery, the boundary check, and the whole-root
+walk all meet. A path that does not exist is a usage error (the reader
+asked about something that is not there). A path that resolves but sits
+*outside* the discovered root is refused outright. Cross-root graphs stay
+impossible by construction, not by convention.
+
+```rust name=load path=graph/index.rs
+/// Discover the root, walk it, and parse every file in it.
+pub fn load(paths: &[String], use_cache: bool, diags: &mut Diags) -> Result<Corpus, String> {
+    if paths.is_empty() {
+        return Err("no path given".to_string());
+    }
+
+    // A path that is not there is a usage error, not a diagnostic: the user
+    // asked about something that does not exist.
+    let mut named: Vec<PathBuf> = Vec::new();
+    for given in paths {
+        let abs = absolute(Path::new(given));
+        if !abs.exists() {
+            return Err(format!("{given}: no such file or directory"));
+        }
+        named.push(abs);
+    }
+
+    let containers: Vec<PathBuf> = named.iter().map(|p| container(p)).collect();
+    let declared_root = discover_root(&containers[0]);
+    let declared = declared_root.is_some();
+    let root = declared_root.unwrap_or_else(|| common_ancestor(&containers));
+    let display = display_root(&root);
+
+    for (given, abs) in paths.iter().zip(&named) {
+        if abs.strip_prefix(&root).is_err() {
+            return Err(format!(
+                "`{given}` is outside the root `{display}`; cross-root graphs are refused"
+            ));
+        }
+    }
+
+    let config = Config::load(&root, diags);
+    let ignore = Ignore::load(&root, diags);
+    let mut cache = Cache::open(&root, config.hash(), use_cache);
+    let mut stats = Stats::default();
+
+    let mut corpus_paths = walk(&root, &ignore, diags, &mut stats);
+    let entries = entry_paths(&named, &root, &mut corpus_paths, diags);
+    let files = parse_all(&root, &corpus_paths, &mut cache, diags, &mut stats);
+
+    stats.indexed = files.len();
+    stats.cache = cache.stats;
+
+    Ok(Corpus {
+        root,
+        display,
+        declared,
+        config,
+        ignore,
+        entries,
+        cache_dir: cache.dir().map(Path::to_path_buf),
+        cache_orphans: cache.orphans(&corpus_paths),
+        paths: corpus_paths,
+        files,
+        stats,
+    })
+}
+```
+
+Naming a file directly is an explicit request for it, which outranks both
+`.dankgignore` and the `*.md` rule. `entry_paths` adds it to the corpus
+even when the walk itself would have excluded it, with a warning so the
+override is never silent. `parse_all`'s cache hit path replays the exact
+diagnostics the original parse produced, so a cached run and a cold one
+say precisely the same things. A reader cannot tell which kind they got.
+
+```rust name=entry_paths_and_parse_all path=graph/index.rs
+/// The root-relative paths named on the command line, added to the corpus if
+/// the walk did not already find them.
+fn entry_paths(
+    named: &[PathBuf],
+    root: &Path,
+    corpus: &mut Vec<String>,
+    diags: &mut Diags,
+) -> Vec<String> {
+    let mut entries = Vec::new();
+
+    for abs in named {
+        // Naming a directory selects a corpus, not a node.
+        if abs.is_dir() {
+            continue;
+        }
+        let Ok(rel) = abs.strip_prefix(root) else { continue };
+        let rel = to_slash(rel);
+
+        if !corpus.contains(&rel) {
+            // Naming a file is an explicit request for it, which outranks both
+            // `.dankgignore` and the `*.md` rule.
+            diags.warn_in(&rel, 0, "not part of the corpus walk; indexed because it was named");
+            corpus.push(rel.clone());
+            corpus.sort();
+        }
+        if !entries.contains(&rel) {
+            entries.push(rel);
+        }
+    }
+    entries
+}
+
+fn parse_all(
+    root: &Path,
+    paths: &[String],
+    cache: &mut Cache,
+    diags: &mut Diags,
+    stats: &mut Stats,
+) -> Vec<ParsedFile> {
+    let mut files = Vec::with_capacity(paths.len());
+
+    for rel in paths {
+        let path = root.join(rel);
+        let (len, mtime) = source_meta(&path);
+
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) => {
+                diags.warn_in(rel, 0, format!("could not be read ({e}); skipped"));
+                stats.skipped += 1;
+                continue;
+            }
+        };
+
+        // A hit replays the diagnostics the parse produced, so a cached run and
+        // a cold one say exactly the same things.
+        if let Some((file, cached)) = cache.lookup(rel, len, mtime, &content) {
+            for item in cached {
+                diags.add(item);
+            }
+            files.push(file);
+            continue;
+        }
+
+        let mut file_diags = Diags::new(rel);
+        let doc = Document::parse(&content, &mut file_diags);
+        let built = build::build(rel, &doc, content.lines().count() as u32);
+        cache.store(rel, len, mtime, &content, &built, file_diags.items());
+        diags.absorb(file_diags);
+        files.push(built);
+    }
+    files
+}
+```
+
+Dot-entries are skipped outright by the walk itself, which is what keeps
+`.dankg/` and `.git/` out of every corpus without a single pattern ever
+needing to name either. Symlinks are never followed. They are the one
+way a walk could leave the root by accident. The root is meant to be
+a hard boundary, not a soft one a stray link could quietly punch through.
+
+```rust name=walk path=graph/index.rs
+/// Every `*.md` under the root, root-relative and sorted.
+///
+/// Dot-entries are skipped outright. That is what keeps `.dankg/` and `.git/`
+/// out of the corpus without anyone having to write a pattern for them.
+/// Symlinks are never followed. They are the one way a walk could leave the
+/// root. The root is a hard boundary.
+fn walk(root: &Path, ignore: &Ignore, diags: &mut Diags, stats: &mut Stats) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_dir(root, "", 0, ignore, diags, stats, &mut out);
+    out.sort();
+    out
+}
+
+fn walk_dir(
+    dir: &Path,
+    prefix: &str,
+    depth: usize,
+    ignore: &Ignore,
+    diags: &mut Diags,
+    stats: &mut Stats,
+    out: &mut Vec<String>,
+) {
+    if depth >= MAX_DEPTH {
+        diags.warn_in(prefix, 0, format!("deeper than {MAX_DEPTH} directories; not descended"));
+        return;
+    }
+
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) => {
+            let name = if prefix.is_empty() { "." } else { prefix };
+            diags.warn_in(name, 0, format!("could not be listed ({e}); skipped"));
+            stats.skipped += 1;
+            return;
+        }
+    };
+
+    // Sorted, because the walk order must not depend on the filesystem.
+    let mut children: Vec<(String, fs::FileType)> = Vec::new();
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match entry.file_type() {
+            Ok(kind) => children.push((name, kind)),
+            Err(e) => {
+                diags.warn_in(join(prefix, &name), 0, format!("could not be inspected ({e})"));
+                stats.skipped += 1;
+            }
+        }
+    }
+    children.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, kind) in children {
+        if name.starts_with('.') {
+            continue;
+        }
+        let rel = join(prefix, &name);
+
+        if kind.is_symlink() {
+            diags.warn_in(&rel, 0, "is a symlink; not followed, the root is a hard boundary");
+            stats.skipped += 1;
+        } else if kind.is_dir() {
+            if ignore.matches(&rel, true) {
+                stats.ignored += 1;
+                continue;
+            }
+            walk_dir(&dir.join(&name), &rel, depth + 1, ignore, diags, stats, out);
+        } else if is_markdown(&name) {
+            if ignore.matches(&rel, false) {
+                stats.ignored += 1;
+                continue;
+            }
+            out.push(rel);
+        }
+    }
+}
+
+fn is_markdown(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("md"))
+}
+
+fn join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") }
+}
+```
+
+`lexical` deliberately never touches the filesystem. `canonicalize` would
+resolve a symlink straight out of the root and make the boundary check
+above meaningless. `.`/`..` are collapsed textually instead. This keeps a
+link's target from ever entering into where a path is judged to be.
+
+```rust name=path_helpers path=graph/index.rs
+/// Length and modification time, the cheap half of a cache key. Both fall back
+/// to zero on a platform or filesystem that will not say. That costs a cache
+/// hit and nothing else. The content hash still has to agree.
+fn source_meta(path: &Path) -> (u64, u128) {
+    let Ok(meta) = fs::metadata(path) else { return (0, 0) };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    (meta.len(), mtime)
+}
+
+/// The directory a path sits in. A directory is its own container.
+fn container(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/"))
+    }
+}
+
+/// The deepest directory containing all of `dirs`.
+pub fn common_ancestor(dirs: &[PathBuf]) -> PathBuf {
+    let Some(first) = dirs.first() else { return PathBuf::from(".") };
+    let mut shared: Vec<Component> = first.components().collect();
+
+    for other in &dirs[1..] {
+        let keep = shared.iter().zip(other.components()).take_while(|(a, b)| *a == b).count();
+        shared.truncate(keep);
+    }
+    if shared.is_empty() {
+        PathBuf::from(".")
+    } else {
+        shared.iter().collect()
+    }
+}
+
+/// Resolve `.` and `..` textually, without touching the filesystem. Symlinks
+/// are deliberately not followed. `canonicalize` would resolve a link out of
+/// the root and make the boundary check meaningless.
+pub fn lexical(path: &Path) -> PathBuf {
+    let mut out: Vec<Component> = Vec::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(out.last(), Some(Component::Normal(_))) => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    if out.is_empty() { PathBuf::from(".") } else { out.iter().collect() }
+}
+
+pub fn absolute(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return lexical(path);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    lexical(&cwd.join(path))
+}
+
+/// `/`-separated, for a relative path. Node identity is a string. It must
+/// read the same on every platform.
+pub fn to_slash(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn display_root(root: &Path) -> String {
+    let cwd = std::env::current_dir().map(|c| lexical(&c)).unwrap_or_default();
+    if root == cwd {
+        return ".".to_string();
+    }
+    match root.strip_prefix(&cwd) {
+        Ok(rel) => to_slash(rel),
+        Err(_) => root.display().to_string(),
+    }
+}
+```
+
+## Tests
+
+```rust name=tests path=graph/index.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn common_ancestor_keeps_the_leading_separator() {
+        let dirs = [p("/a/b/c"), p("/a/b/d/e")];
+        assert_eq!(common_ancestor(&dirs), p("/a/b"));
+    }
+
+    #[test]
+    fn common_ancestor_of_one_directory_is_itself() {
+        assert_eq!(common_ancestor(&[p("/a/b")]), p("/a/b"));
+    }
+
+    #[test]
+    fn common_ancestor_of_divergent_trees_is_the_filesystem_root() {
+        assert_eq!(common_ancestor(&[p("/x/a"), p("/y/b")]), p("/"));
+    }
+
+    #[test]
+    fn lexical_resolves_dots_without_the_filesystem() {
+        assert_eq!(lexical(&p("/a/./b/../c")), p("/a/c"));
+        assert_eq!(lexical(&p("a/b/../..")), p("."));
+        // A `..` that cannot be cancelled is kept, so the caller can still see
+        // that the path climbs.
+        assert_eq!(lexical(&p("../a")), p("../a"));
+    }
+
+    #[test]
+    fn markdown_is_recognised_by_extension_only() {
+        assert!(is_markdown("a.md"));
+        assert!(is_markdown("A.MD"));
+        assert!(!is_markdown("a.markdown"));
+        assert!(!is_markdown("md"));
+        assert!(!is_markdown(".md"), "a dotfile is not a note");
+    }
+
+    #[test]
+    fn to_slash_is_platform_independent() {
+        assert_eq!(to_slash(&p("notes/deep/a.md")), "notes/deep/a.md");
+        assert_eq!(to_slash(&p("a.md")), "a.md");
+    }
+}
+```

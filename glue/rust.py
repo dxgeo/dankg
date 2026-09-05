@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reference `dankg tangle` glue script for Rust (architecture.org, Tangle,
+"""Reference `dankg tangle` glue script for Rust (architecture.md, Tangle,
 decision 27).
 
 This is a plain, standalone program -- not part of dankg's own source, and

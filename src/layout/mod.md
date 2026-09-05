@@ -1,0 +1,567 @@
+# Layout
+
+Sugiyama layered layout runs in four phases, always in this order:
+[break cycles](acyclic.md), [assign ranks](rank.md), [order within
+each rank](order.md), assign coordinates ([`layout::coord`](coord.md)).
+Every output format gets its coordinates from here: HTML, dot, Mermaid,
+and the TUI's own grid. That leaves exactly one layout engine in this
+codebase, not one per renderer that could quietly disagree with the
+others about where a node belongs.
+
+Determinism is a hard requirement, not a nicety. It lets a rendered
+graph be committed and diffed like any other generated artifact.
+Nothing here ever iterates a hash map. Every tie anywhere in the
+pipeline is broken by a stable key. The arithmetic stays integer
+throughout. A layout expressed in whole pixels has no float formatting
+left to disagree about, between two runs or between two platforms.
+
+```rust name=module_doc path=layout/mod.rs
+//! Sugiyama layered layout.
+//!
+//! Four phases, always in this order: break cycles, assign ranks, order
+//! within each rank, assign coordinates. Every format gets its coordinates
+//! from here. That leaves exactly one layout engine. It is ours.
+//!
+//! Determinism is a hard requirement, not a nicety. It lets a rendered
+//! graph be committed and diffed. Nothing here iterates a hash map. Every
+//! tie is broken by a stable key. The arithmetic stays integer throughout.
+//! A layout in whole pixels has no float formatting to disagree about.
+
+pub mod acyclic;
+pub mod coord;
+pub mod order;
+pub mod rank;
+
+use crate::graph::{EdgeKind, Graph, NodeId};
+use acyclic::Role;
+
+/// Fixed layer height, per architecture.md. Everything else is derived.
+pub const NODE_HEIGHT: i32 = 36;
+pub const RANK_SEP: i32 = 64;
+pub const NODE_SEP: i32 = 28;
+pub const MARGIN: i32 = 24;
+
+/// Label width is estimated, not measured. DanKG has no font metrics and
+/// isn't going to grow any. The estimate only has to be stable and roughly
+/// proportional, because every renderer renders the same label into the
+/// same box.
+///
+/// Public because the HTML renderer's script is a renderer too. It places
+/// the nodes a reader expands. It also has to size them the way this did.
+/// Otherwise the expanded boxes would not line up with the ones Rust
+/// rendered.
+pub const CHAR_WIDTH: i32 = 8;
+pub const LABEL_PAD: i32 = 28;
+pub const MIN_WIDTH: i32 = 72;
+pub const MAX_WIDTH: i32 = 264;
+
+/// Containment pulls twice as hard as a link. A heading ends up sitting
+/// directly above its children. The weight is used by the ordering and
+/// coordinate phases. Ranking is plain longest-path and does not need it.
+const CONTAINS_WEIGHT: i32 = 2;
+const LINK_WEIGHT: i32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaidNode {
+    pub id: NodeId,
+    pub rank: u32,
+    /// Position within its rank, left to right.
+    pub order: u32,
+    /// Centre of the box.
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaidEdge {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub kind: EdgeKind,
+    pub reciprocated: bool,
+    /// True when the edge had to be reversed to break a cycle. It then runs
+    /// up the page. The arrowhead still points the way the author wrote it.
+    pub reversed: bool,
+    /// Source to target, through any virtual bend points. Always ordered from
+    /// `from` to `to`, whichever way the layout ran it.
+    pub points: Vec<Point>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Layout {
+    /// In (rank, order), which is the order a renderer should emit them in.
+    pub nodes: Vec<LaidNode>,
+    /// In the input graph's order, so a renderer can pair them with edges.
+    pub edges: Vec<LaidEdge>,
+    pub width: i32,
+    pub height: i32,
+    pub ranks: u32,
+}
+```
+
+`is_drawn` is how a reciprocated pair becomes one undirected line instead
+of two arrows pointing at each other. Exactly one of the two directed
+edges is chosen. It is always the one the layout actually ran *down* the
+page. A renderer with its own layering, such as graphviz or Mermaid,
+would independently land on the same choice, because both lay out the
+same graph by the same rule.
+
+```rust name=layout_impl path=layout/mod.rs
+impl Layout {
+    /// Whether this edge should be rendered.
+    ///
+    /// A reciprocated pair is one undirected line rather than two arrows.
+    /// Exactly one of the two is rendered. It is the one the layout ran down
+    /// the page. A renderer that does its own layering, as both graphviz and
+    /// mermaid do, then agrees with DanKG about which node sits above which.
+    pub fn is_drawn(&self, edge: &LaidEdge) -> bool {
+        if !edge.reciprocated || edge.from == edge.to {
+            return true;
+        }
+        let partner = self.edges.iter().find(|other| {
+            other.reciprocated
+                && other.kind == edge.kind
+                && other.from == edge.to
+                && other.to == edge.from
+        });
+        // Falling back to the node ids keeps the choice deterministic even if
+        // a wider cycle somehow leaves both halves running the same way.
+        let key = |e: &LaidEdge| (e.reversed, e.from.to_string(), e.to.to_string());
+        partner.is_none_or(|other| key(edge) <= key(other))
+    }
+
+    /// Nodes grouped by rank, each already in left-to-right order.
+    pub fn layers(&self) -> Vec<Vec<&LaidNode>> {
+        let mut out: Vec<Vec<&LaidNode>> = vec![Vec::new(); self.ranks as usize];
+        for node in &self.nodes {
+            out[node.rank as usize].push(node);
+        }
+        out
+    }
+}
+```
+
+`Dag` is the working graph every phase mutates in place. It is
+deliberately a plain struct of parallel vectors, not anything
+pointer-based. It is index-addressed. Nothing here can ever depend on a
+hash map's iteration order, the way the module doc's determinism
+guarantee forbids. Real nodes occupy indices `0..real`. The ranking and
+rank-splitting phases append virtual bend points after them, as they
+discover long edges that need one.
+
+```rust name=dag_and_segment path=layout/mod.rs
+/// The working graph: real nodes `0..real`, virtual bend points after them.
+///
+/// Phases mutate this in place. It is deliberately a plain struct of parallel
+/// vectors: index-addressed. Nothing depends on a hash map's order.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Dag {
+    pub real: usize,
+    pub rank: Vec<u32>,
+    pub width: Vec<i32>,
+    /// A stable tie-break key per node. Real nodes use their `NodeId`.
+    /// Virtual ones use the edge they belong to. Both are unique and
+    /// reproducible.
+    pub key: Vec<String>,
+    /// Edges between adjacent ranks only, after splitting.
+    pub segments: Vec<Segment>,
+    /// Node indices per rank, left to right.
+    pub layers: Vec<Vec<usize>>,
+    /// Each node's index within its layer.
+    pub pos: Vec<u32>,
+    pub x: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Segment {
+    pub from: usize,
+    pub to: usize,
+    pub weight: i32,
+}
+
+impl Dag {
+    pub fn count(&self) -> usize {
+        self.rank.len()
+    }
+
+    pub fn is_virtual(&self, node: usize) -> bool {
+        node >= self.real
+    }
+}
+
+/// How one input edge was routed: which nodes it passes through, and whether
+/// it had to be turned around to get there.
+#[derive(Debug, Clone)]
+pub(crate) struct Route {
+    pub role: Role,
+    /// Node indices from the layout's source to its target, inclusive. A
+    /// self-loop holds its single node. Nothing else is ever shorter than two.
+    pub path: Vec<usize>,
+}
+```
+
+`layout` itself is short, precisely because each phase already lives in
+its own module. This function's whole job is threading one `Dag`
+through all four, in the order the module doc promises, nothing more.
+The caller always hands it an *induced* subgraph (`graph::view::select`).
+Every edge endpoint is guaranteed present. `position` below is a plain
+lookup, not something that has to handle a miss.
+
+```rust name=layout_fn path=layout/mod.rs
+pub fn layout(graph: &Graph) -> Layout {
+    if graph.nodes.is_empty() {
+        return Layout::default();
+    }
+
+    let mut dag = Dag {
+        real: graph.nodes.len(),
+        rank: vec![0; graph.nodes.len()],
+        width: graph.nodes.iter().map(|n| label_width(&n.title)).collect(),
+        key: graph.nodes.iter().map(|n| n.id.to_string()).collect(),
+        ..Dag::default()
+    };
+
+    // Edges as node indices. The caller hands us an induced subgraph.
+    // Every endpoint is present. This is a lookup, not a filter.
+    let pairs: Vec<(usize, usize, i32)> = graph
+        .edges
+        .iter()
+        .map(|e| {
+            (
+                position(graph, &e.from),
+                position(graph, &e.to),
+                match e.kind {
+                    EdgeKind::Contains => CONTAINS_WEIGHT,
+                    // Decision 38's own open question: whether Produces/
+                    // Reads deserve their own weight is left undecided
+                    // there. Inheriting Link's is the conservative
+                    // default until a real corpus asks for better.
+                    EdgeKind::Link | EdgeKind::Produces | EdgeKind::Reads => LINK_WEIGHT,
+                },
+            )
+        })
+        .collect();
+
+    let roles = acyclic::break_cycles(dag.real, &pairs);
+    rank::assign(&mut dag, &pairs, &roles);
+    let routes = rank::split_long_edges(&mut dag, &pairs, &roles);
+    order::minimize_crossings(&mut dag);
+    coord::assign(&mut dag);
+
+    assemble(graph, &dag, &routes)
+}
+```
+
+A self-loop has no rank to travel between at all. `points_of` renders
+it as a small bulge out to the right and back, instead of forcing it
+through the normal bend-point machinery. This is rare in practice, but
+`[x](#this-very-heading)` is legal markdown. A graph that silently
+dropped it would be rendering something other than what it was given.
+
+```rust name=assemble_and_points_of path=layout/mod.rs
+fn assemble(graph: &Graph, dag: &Dag, routes: &[Route]) -> Layout {
+    let ranks = dag.layers.len() as u32;
+    let y_of = |rank: u32| MARGIN + rank as i32 * (NODE_HEIGHT + RANK_SEP) + NODE_HEIGHT / 2;
+
+    let mut nodes: Vec<LaidNode> = Vec::with_capacity(graph.nodes.len());
+    for (rank, layer) in dag.layers.iter().enumerate() {
+        for (order, &n) in layer.iter().enumerate() {
+            if dag.is_virtual(n) {
+                continue;
+            }
+            nodes.push(LaidNode {
+                id: graph.nodes[n].id.clone(),
+                rank: rank as u32,
+                order: order as u32,
+                x: dag.x[n],
+                y: y_of(rank as u32),
+                width: dag.width[n],
+                height: NODE_HEIGHT,
+            });
+        }
+    }
+
+    let edges = graph
+        .edges
+        .iter()
+        .zip(routes)
+        .map(|(edge, route)| LaidEdge {
+            from: edge.from.clone(),
+            to: edge.to.clone(),
+            kind: edge.kind,
+            reciprocated: edge.reciprocated,
+            reversed: route.role == Role::Reversed,
+            points: points_of(dag, route, &y_of),
+        })
+        .collect();
+
+    let width = nodes.iter().map(|n| n.x + n.width / 2).max().unwrap_or(0) + MARGIN;
+    let height = y_of(ranks.saturating_sub(1)) + NODE_HEIGHT / 2 + MARGIN;
+
+    Layout { nodes, edges, width, height, ranks }
+}
+
+/// The polyline for one edge: out of the bottom of the source, through each
+/// bend point, into the top of the target.
+fn points_of(dag: &Dag, route: &Route, y_of: &impl Fn(u32) -> i32) -> Vec<Point> {
+    let half = NODE_HEIGHT / 2;
+
+    // A self-loop has no rank to travel between. It bulges out to the right
+    // and comes back. Rare, but `[x](#this-very-heading)` is legal markdown.
+    if route.path.len() == 1 {
+        let n = route.path[0];
+        let (x, y) = (dag.x[n], y_of(dag.rank[n]));
+        let out = x + dag.width[n] / 2 + NODE_SEP;
+        return vec![
+            Point { x, y: y + half },
+            Point { x: out, y: y + half },
+            Point { x: out, y: y - half },
+            Point { x, y: y - half },
+        ];
+    }
+
+    let last = route.path.len().saturating_sub(1);
+    let mut points: Vec<Point> = route
+        .path
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| {
+            let y = y_of(dag.rank[n]);
+            Point {
+                x: dag.x[n],
+                y: match i {
+                    0 => y + half,
+                    i if i == last => y - half,
+                    _ => y,
+                },
+            }
+        })
+        .collect();
+
+    // The path runs the way the layout ran it. `from` is what the author
+    // wrote. A reversed edge's points have to be turned back around.
+    if route.role == Role::Reversed {
+        points.reverse();
+    }
+    points
+}
+
+fn position(graph: &Graph, id: &NodeId) -> usize {
+    graph.nodes.iter().position(|n| &n.id == id).expect("edges of an induced subgraph resolve")
+}
+```
+
+`fit_label` is deliberately the exact inverse of `label_width`'s own
+estimate, not a real text measurement. A renderer that measured the
+label properly would disagree with the box the layout already
+committed to. The box, not the text, is the thing every renderer has
+to agree on.
+
+```rust name=label_width_and_fit_label path=layout/mod.rs
+pub fn label_width(title: &str) -> i32 {
+    let estimate = title.chars().count() as i32 * CHAR_WIDTH + LABEL_PAD;
+    estimate.clamp(MIN_WIDTH, MAX_WIDTH)
+}
+
+/// What of `title` fits in a box of `width`, ellipsised if it does not.
+///
+/// The inverse of `label_width`, and deliberately built on the same estimate.
+/// A renderer that measured the text properly would disagree with the box it
+/// was given. The box is the thing the layout already committed to.
+pub fn fit_label(title: &str, width: i32) -> String {
+    let capacity = ((width - LABEL_PAD) / CHAR_WIDTH).max(1) as usize;
+    if title.chars().count() <= capacity {
+        return title.to_string();
+    }
+    if capacity <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut out: String = title.chars().take(capacity - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+```
+
+## Tests
+
+```rust name=tests path=layout/mod.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::graph_of;
+
+    fn node<'a>(layout: &'a Layout, id: &str) -> &'a LaidNode {
+        layout.nodes.iter().find(|n| n.id.to_string() == id).expect("node is laid out")
+    }
+
+    #[test]
+    fn an_empty_graph_lays_out_to_nothing() {
+        assert_eq!(layout(&Graph::default()), Layout::default());
+    }
+
+    #[test]
+    fn containment_puts_a_child_one_rank_below_its_parent() {
+        let l = layout(&graph_of(&[("a.md", "# One\n\n## Two\n\n### Three\n")]));
+        assert_eq!(node(&l, "a#one").rank, 0);
+        assert_eq!(node(&l, "a#two").rank, 1);
+        assert_eq!(node(&l, "a#three").rank, 2);
+        assert_eq!(l.ranks, 3);
+    }
+
+    #[test]
+    fn ranks_are_evenly_spaced_and_boxes_stay_inside_the_canvas() {
+        let l = layout(&graph_of(&[("a.md", "# One\n\n## Two\n")]));
+        let (one, two) = (node(&l, "a#one"), node(&l, "a#two"));
+        assert_eq!(two.y - one.y, NODE_HEIGHT + RANK_SEP);
+        assert_eq!(one.y - one.height / 2, MARGIN);
+
+        for n in &l.nodes {
+            assert!(n.x - n.width / 2 >= 0, "{} starts off-canvas", n.id);
+            assert!(n.x + n.width / 2 <= l.width, "{} overflows", n.id);
+            assert!(n.y + n.height / 2 <= l.height, "{} overflows", n.id);
+        }
+    }
+
+    #[test]
+    fn siblings_share_a_rank_and_do_not_overlap() {
+        let l = layout(&graph_of(&[("a.md", "# One\n\n## Two\n\n## Three\n\n## Four\n")]));
+        let mut row: Vec<&LaidNode> = l.nodes.iter().filter(|n| n.rank == 1).collect();
+        assert_eq!(row.len(), 3);
+        row.sort_by_key(|n| n.order);
+        for pair in row.windows(2) {
+            let gap = (pair[1].x - pair[1].width / 2) - (pair[0].x + pair[0].width / 2);
+            assert!(gap >= NODE_SEP, "siblings overlap: gap {gap}");
+        }
+    }
+
+    #[test]
+    fn a_parent_sits_over_the_middle_of_its_children() {
+        let l = layout(&graph_of(&[("a.md", "# One\n\n## Two\n\n## Three\n")]));
+        let parent = node(&l, "a#one");
+        let kids: Vec<i32> = l.nodes.iter().filter(|n| n.rank == 1).map(|n| n.x).collect();
+        let middle = (kids.iter().min().unwrap() + kids.iter().max().unwrap()) / 2;
+        assert!(
+            (parent.x - middle).abs() <= NODE_SEP,
+            "parent at {} is not over its children's midpoint {middle}",
+            parent.x
+        );
+    }
+
+    #[test]
+    fn a_long_edge_bends_through_a_point_on_every_rank_it_crosses() {
+        // One contains Two. Two contains Three. One also links straight to
+        // Three. That link spans two ranks and needs a bend point.
+        let l = layout(&graph_of(&[(
+            "a.md",
+            "# One\n\nsee [three](#three)\n\n## Two\n\n### Three\n",
+        )]));
+        let long = l
+            .edges
+            .iter()
+            .find(|e| e.from.slug == "one" && e.to.slug == "three" && e.kind == EdgeKind::Link)
+            .expect("the spanning link exists");
+        assert_eq!(long.points.len(), 3, "two endpoints and one bend");
+        assert!(long.points[1].y > long.points[0].y && long.points[1].y < long.points[2].y);
+    }
+
+    #[test]
+    fn an_edge_leaves_the_bottom_of_its_source_and_enters_the_top_of_its_target() {
+        let l = layout(&graph_of(&[("a.md", "# One\n\n## Two\n")]));
+        let edge = &l.edges[0];
+        let (one, two) = (node(&l, "a#one"), node(&l, "a#two"));
+        assert_eq!(edge.points.first().copied(), Some(Point { x: one.x, y: one.y + one.height / 2 }));
+        assert_eq!(edge.points.last().copied(), Some(Point { x: two.x, y: two.y - two.height / 2 }));
+    }
+
+    #[test]
+    fn a_cycle_is_broken_and_the_edge_reports_that_it_runs_backwards() {
+        let l = layout(&graph_of(&[
+            ("a.md", "# A\n\n[b](b.md#b)\n"),
+            ("b.md", "# B\n\n[c](c.md#c)\n"),
+            ("c.md", "# C\n\n[a](a.md#a)\n"),
+        ]));
+        let reversed: Vec<&LaidEdge> = l.edges.iter().filter(|e| e.reversed).collect();
+        assert_eq!(reversed.len(), 1, "one back edge breaks a three-cycle");
+
+        // Whichever edge it was, its polyline still starts at the node the
+        // author wrote first, leaving the top, because it runs up the page.
+        let edge = reversed[0];
+        let from = node(&l, &edge.from.to_string());
+        assert_eq!(edge.points[0], Point { x: from.x, y: from.y - from.height / 2 });
+    }
+
+    #[test]
+    fn a_self_link_becomes_a_loop_rather_than_a_rank() {
+        let l = layout(&graph_of(&[("a.md", "# One\n\nsee [here](#one)\n")]));
+        assert_eq!(l.ranks, 1, "a self-loop spans no ranks");
+        let self_edge = l.edges.iter().find(|e| e.from == e.to).expect("the self link");
+        assert_eq!(self_edge.points.len(), 4);
+        assert!(self_edge.points[1].x > node(&l, "a#one").x, "it bulges to the right");
+    }
+
+    #[test]
+    fn the_same_graph_lays_out_identically_every_time() {
+        let graph = graph_of(&[
+            ("a.md", "# A\n\n[b](b.md#b) [c](c.md#c)\n\n## A1\n\n[d](d.md#d)\n"),
+            ("b.md", "# B\n\n[d](d.md#d)\n"),
+            ("c.md", "# C\n\n[a](a.md#a)\n"),
+            ("d.md", "# D\n\n## D1\n"),
+        ]);
+        let first = layout(&graph);
+        for _ in 0..8 {
+            assert_eq!(layout(&graph), first, "layout is not deterministic");
+        }
+    }
+
+    #[test]
+    fn one_half_of_a_reciprocated_pair_is_drawn_and_it_runs_downwards() {
+        let l = layout(&graph_of(&[
+            ("a.md", "# A\n\n[b](b.md#b)\n"),
+            ("b.md", "# B\n\n[a](a.md#a)\n"),
+        ]));
+        let pair: Vec<&LaidEdge> = l.edges.iter().filter(|e| e.reciprocated).collect();
+        assert_eq!(pair.len(), 2, "both directions are in the graph");
+
+        let drawn: Vec<&&LaidEdge> = pair.iter().filter(|e| l.is_drawn(e)).collect();
+        assert_eq!(drawn.len(), 1, "but only one is drawn");
+        assert!(!drawn[0].reversed, "the drawn half is the one running down the page");
+    }
+
+    #[test]
+    fn a_self_link_is_always_drawn_even_though_it_counts_as_mutual() {
+        let l = layout(&graph_of(&[("a.md", "# One\n\nsee [here](#one)\n")]));
+        let self_edge = l.edges.iter().find(|e| e.from == e.to).expect("the self link");
+        assert!(l.is_drawn(self_edge));
+    }
+
+    #[test]
+    fn a_label_is_cut_to_the_box_the_same_estimate_sized() {
+        // Whatever `label_width` asked for, that many characters fit back in.
+        for title in ["short", "a rather longer heading than that", &"x".repeat(400)] {
+            let width = label_width(title);
+            let fitted = fit_label(title, width);
+            assert!(
+                fitted.chars().count() as i32 * CHAR_WIDTH + LABEL_PAD <= width,
+                "{fitted:?} overflows the box the estimate sized for it"
+            );
+        }
+        assert_eq!(fit_label("short", label_width("short")), "short");
+        assert_eq!(fit_label("anything", MIN_WIDTH), "anyt\u{2026}");
+        assert_eq!(fit_label("anything", 0), "\u{2026}");
+    }
+
+    #[test]
+    fn label_width_is_clamped_at_both_ends() {
+        assert_eq!(label_width(""), MIN_WIDTH);
+        assert_eq!(label_width(&"x".repeat(500)), MAX_WIDTH);
+        assert!(label_width("a longer heading") > label_width("short"));
+    }
+}
+```
