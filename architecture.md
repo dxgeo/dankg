@@ -2968,10 +2968,11 @@ in the act again.
    view in place and `p` detaching the scroll into a pan mode. Later
    rewritten to a nerdtree-style collapsible tree plus a persistent
    cross-reference panel, since the corpus's own graph is
-   overwhelmingly a containment hierarchy (496 `Contains` edges
-   against 56 `Link` edges on this repo's own self-hosted corpus) and
-   a general-DAG layout was spending its visual budget on structure
-   the data barely has. `layout/` is no longer consulted by the TUI at
+   overwhelmingly a containment hierarchy: far more `Contains` edges
+   than `Link` edges on this repo's own self-hosted corpus (see
+   [Self-hosted corpus stats](#self-hosted-corpus-stats), below, for
+   the live count). A general-DAG layout was spending its visual
+   budget on structure the data barely has. `layout/` is no longer consulted by the TUI at
    all; the tree is built straight from `Node.parent` over the whole
    resolved corpus (`App::index`), unconditionally -- `--depth`/`[tui] depth`/`--all` now decide only how many levels start pre-expanded
    under the named entry file(s), not what is loaded. `tab` now
@@ -3025,11 +3026,11 @@ in the act again.
    one file `--block`/`--all` are scoped to. A named top-level block
    is also a graph node in its own right now (decision 20), drawn
    distinctly in every format. See *Block nodes* under *Data model*.
-9. Literate database management, over DuckDB. Depends on 8: it is the same
-   plan-run-write-back machinery pointed at a database instead of a process.
-   Decision 33's `produces=`/`reads=file:PATH` ships first, as the
-   database-free half of the same gap: see *File dependencies*. Partly
-   built. `db=` blocks resolve and spawn through `[db.*]` (decision 16,
+9. \[DONE\] Literate database management, over DuckDB. Depends on 8: it is
+   the same plan-run-write-back machinery pointed at a database instead of
+   a process. Decision 33's `produces=`/`reads=file:PATH` ships first, as
+   the database-free half of the same gap: see *File dependencies*. `db=`
+   blocks resolve and spawn through `[db.*]` (decision 16,
    `eval::run::db_command_for`/`run_db`). *Provenance without a driver*'s
    own snapshot-diff-plus-SQL-scan inference ships, writing `produces=`/
    `reads=` back onto the result marker (decisions 35-36), which
@@ -3077,6 +3078,26 @@ in the act again.
     reaches a `glue` command through an optional sidecar manifest
     (decision 28) rather than DanKG's own code ever branching on it.
     See *Tangle*.
+
+# Self-hosted corpus stats
+
+Milestone 7 (above) rewrote the TUI because this repo's own corpus is
+overwhelmingly a containment hierarchy, not a general DAG. This block
+checks that claim instead of restating a hand count. `dankg eval architecture.md --block corpus-edge-counts --yes` re-runs it and
+writes the current count back below.
+
+```sh name=corpus-edge-counts
+json=$(cargo run --release --quiet -- graph . --format json 2>/dev/null)
+contains=$(printf '%s\n' "$json" | grep -c '"kind": "contains"')
+link=$(printf '%s\n' "$json" | grep -c '"kind": "link"')
+echo "$contains Contains edges against $link Link edges"
+```
+
+<!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
+
+```
+497 Contains edges against 55 Link edges
+```
 
 # Open questions
 
