@@ -22,10 +22,18 @@ pub const DIR: &str = ".dankg";
 pub const FILE: &str = "config";
 /// Entry plus this many hops, when a view is selected. See decision 7.
 pub const DEFAULT_DEPTH: u32 = 2;
+/// `dankg tui`'s own default, deliberately smaller than `DEFAULT_DEPTH`.
+/// A terminal draws one fixed-size character grid with no zoom the way
+/// HTML's output gets (*Terminal UI*), so the same width a scrollable,
+/// zoomable page affords already reads as sprawling on a character grid,
+/// especially over a large corpus. `tab`-to-expand and `/`-to-jump are
+/// the reader's own way to widen it back out, one node at a time.
+pub const DEFAULT_TUI_DEPTH: u32 = 1;
 
 /// Sections DanKG reads today, with the keys each one accepts.
 const KNOWN: &[(&str, &[&str])] = &[
     ("graph", &["depth"]),
+    ("tui", &["depth"]),
     ("editor", &["command"]),
     ("keys", &["up", "down", "left", "right", "quit", "reset", "pan", "eval"]),
 ];
@@ -263,6 +271,29 @@ impl Config {
             }
         }
     }
+
+    /// `[tui] depth`, or `DEFAULT_TUI_DEPTH` -- a deliberately smaller,
+    /// separate default from `[graph] depth`'s own. A reader who wants
+    /// the TUI to match `dankg graph`'s default sets this key; `--depth`/
+    /// `--all` on the command line still override either default the
+    /// same way.
+    pub fn tui_depth(&self, diags: &mut Diags) -> u32 {
+        let Some(raw) = self.get("tui", "depth") else {
+            return DEFAULT_TUI_DEPTH;
+        };
+        match raw.parse::<u32>() {
+            Ok(depth) => depth,
+            Err(_) => {
+                let where_ = self.source.clone().unwrap_or_else(|| DIR.to_string());
+                diags.warn_in(
+                    where_,
+                    0,
+                    format!("`depth = {raw}` is not a number; using {DEFAULT_TUI_DEPTH}"),
+                );
+                DEFAULT_TUI_DEPTH
+            }
+        }
+    }
 }
 
 impl Config {
@@ -476,6 +507,29 @@ mod tests {
         let (c, mut d) = parse("");
         assert_eq!(c.depth(&mut d), DEFAULT_DEPTH);
         assert!(d.is_empty());
+    }
+
+    #[test]
+    fn tui_depth_is_its_own_smaller_default_independent_of_graph_depth() {
+        let (c, mut d) = parse("");
+        assert_eq!(c.tui_depth(&mut d), DEFAULT_TUI_DEPTH);
+        assert!(DEFAULT_TUI_DEPTH < DEFAULT_DEPTH, "tui's default should read narrower, not equal or wider");
+
+        // Configuring [graph] depth alone must not move [tui]'s.
+        let (c, mut d) = parse("[graph]\ndepth = 5\n");
+        assert_eq!(c.tui_depth(&mut d), DEFAULT_TUI_DEPTH);
+        assert_eq!(c.depth(&mut d), 5);
+    }
+
+    #[test]
+    fn tui_depth_reads_its_own_section_and_falls_back_and_warns_on_nonsense() {
+        let (c, mut d) = parse("[tui]\ndepth = 3\n");
+        assert_eq!(c.tui_depth(&mut d), 3);
+        assert!(d.is_empty(), "{:?}", d.items());
+
+        let (c, mut d) = parse("[tui]\ndepth = lots\n");
+        assert_eq!(c.tui_depth(&mut d), DEFAULT_TUI_DEPTH);
+        assert!(d.items().iter().any(|i| i.message.contains("is not a number")));
     }
 
     #[test]

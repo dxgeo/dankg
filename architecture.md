@@ -692,11 +692,18 @@ reaches it, no scheme required.
 ## What is reused unchanged
 
 `graph/` and `layout/` do not change. The TUI consumes the same `Layout` the
-HTML renderer does, over the same selected view (decision 7). One piece of the
-existing box-metrics work already speaks the TUI's language: `CHAR_WIDTH` and
-friends are computed in character units so an HTML-expanded box matches the
-layout's sizing. A terminal cell *is* that unit. So rendering the same
-Sugiyama output as text needs no rescaling.
+HTML renderer does, selected by the identical `graph::view::select_view`
+(decision 7) -- but from its own, narrower default depth
+(`config::DEFAULT_TUI_DEPTH`), not decision 7's shared one. A character
+grid has no zoom to fall back on the way HTML's pan-and-zoom page does, so
+the width a scrollable, zoomable page affords already reads as sprawling
+here, especially over a large corpus (see *Jump and default depth*,
+below). `--depth`/`--all` on the command line resolve through the same
+mechanism either way. One piece of the existing box-metrics work already
+speaks the TUI's language: `CHAR_WIDTH` and friends are computed in
+character units so an HTML-expanded box matches the layout's sizing. A
+terminal cell *is* that unit. So rendering the same Sugiyama output as
+text needs no rescaling.
 
 <!-- dankg:depends target=#decision-7-view-scope quote="Entry + 2 hops, expandable in the browser." -->
 
@@ -723,9 +730,9 @@ src/tui/
 - `arrows/hjkl`: move selection. Up/down cross ranks. Left/right stay in one.
 - `enter`: suspend, spawn the configured editor at the node's line, resume. Or, while cycling a node's blocks, run the cycled one.
 - `tab`: expand the selected node's hidden neighbours. A placement on the existing grid, not a second layout, same rule as HTML.
-- `/`: jump to a node by title
+- `/`: jump to a node by title (see *Jump and default depth*, above). `enter` confirms, `esc` cancels.
 - `e`: cycle the selected node's named blocks. `enter` runs the cycled one, in place, without leaving the graph (see *Eval* below)
-- `esc`: cancel an in-progress block cycle. Otherwise unbound.
+- `esc`: cancel an in-progress block cycle or an in-progress search.
 - `p`: toggle panning. Direction keys move the viewport, not selection.
 - `r`: collapse back to the entry view
 - `q`: quit, restoring the terminal
@@ -735,10 +742,11 @@ Movement follows the rank/order structure `layout/order.rs` already computed,
 so "down" is well-defined without inventing a second notion of adjacency.
 
 Every letter here but the mode-independent bindings above is remappable in
-`[keys]` (decision 18). Arrows, enter, tab, esc and `?` are not, since they
-are not graph-navigation letters to begin with. `?` specifically is fixed
-because it is close to universal for "help" across terminal tools (vim, htop,
-git) and is not itself a graph action.
+`[keys]` (decision 18). Arrows, enter, tab, esc, `/` and `?` are not, since
+they are not graph-navigation letters to begin with. `/` and `?` specifically
+are fixed because both are close to universal across terminal tools (`/` to
+search in vim/less/htop, `?` for help in the same set) and neither is itself
+a graph action.
 
 ## Panning
 
@@ -930,6 +938,32 @@ triggered the reload may have changed the shape of the graph the anchors
 were computed against, and a stale expansion risks a confusing placement
 more than starting clean costs a keypress.
 
+## Jump and default depth
+
+`dankg tui` selects its initial view from its own default depth
+(`config::DEFAULT_TUI_DEPTH`, `[tui] depth`), not `[graph] depth`'s
+(decision 7's own "Entry + 2 hops"). The two commands share every other
+part of view selection -- the same `graph::view::select_view`, the same
+`--depth`/`--all` override -- but a terminal has no zoom the way HTML's
+pan-and-zoom page does. The same width that reads as comfortable on a
+scrollable, zoomable page already looks sprawling stamped into a
+character grid, and a large, sprawling corpus (this one, self-hosting,
+is the case that motivated it) makes that worse, not better. Starting
+narrower trades that for more `tab`-to-expand along the way, one node
+at a time.
+
+`/` is the reader's way back out across a corpus a narrower default
+otherwise makes harder to explore blind. It opens a typed-query buffer
+(`App::start_search`/`search_push`/`search_backspace`) and, on `enter`
+(`App::confirm_search`), jumps to the first node whose title contains
+the text, case-insensitively. The currently drawn view is searched
+first, so a title already on screen just moves the selection there. A
+match found only in the whole corpus (`App::index`) instead becomes a
+fresh entry: the view is rebuilt around it via `view::select` at the
+same default depth the initial load used, exactly as if that node's
+file had been named on the command line. `esc` cancels with no jump; no
+match leaves the selection alone and reports so on the status line.
+
 ## Scope decisions this would actually need
 
 - *Platform*: raw mode is POSIX termios (`ioctl`, no crate) on Linux/macOS.
@@ -965,11 +999,6 @@ region with nothing selected nearby. `p` (see *Panning* above) changes
 that. `scroll_row`/`scroll_col` move directly instead of following the
 selection, reusing the same fields and the same terminal-clipped
 `draw::window`, just under different control.
-
-## Open questions (Terminal UI)
-
-- `/`, "jump to a node by title": in the interaction table, but not
-  yet wired up. `input.rs` decodes the key. `app.rs` does not bind it.
 
 # Code evaluation
 
@@ -2346,6 +2375,9 @@ No serde, so the format is a minimal INI: sections, `key = value`,
 [graph]
 depth = 2
 
+[tui]
+depth = 1
+
 [lang.python]
 command = uv run python {file}
 ext     = py
@@ -2366,6 +2398,13 @@ quit  = q
 reset = r
 pan   = p
 ```
+
+`[tui] depth` is `dankg tui`'s own default, separate from `[graph] depth` (*Jump and default depth*, under *Terminal UI*): a character
+grid has no zoom, so the same width that reads fine on a scrollable,
+zoomable page already looks sprawling here. Unset, it falls back to
+`config::DEFAULT_TUI_DEPTH`, narrower than `[graph] depth`'s own
+default. `--depth`/`--all` on the command line still override either
+one the same way.
 
 `[keys]` remaps the TUI's letter mnemonics (decision 18). Arrows are
 always up/down/left/right regardless of what is written here, since
