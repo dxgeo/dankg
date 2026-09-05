@@ -289,17 +289,15 @@ fn file_node(
     id
 }
 
-/// Adds a relation node for `id`, unless one is already present -- a
-/// relation both produced and read within the same file would otherwise
-/// duplicate here even before corpus-wide dedup (`Graph::sort`) ever
-/// runs. `level` reuses `BLOCK_LEVEL`: the same "stay above every real
-/// heading level" reasoning applies, and `set_extents` already skips
-/// every non-`Heading` node regardless.
-fn push_relation_node(nodes: &mut Vec<Node>, id: &NodeId, title: &str) {
-    if nodes.iter().any(|n| &n.id == id) {
-        return;
-    }
-    nodes.push(Node {
+/// Builds the `Relation` node for `id`, titled `title`. `level` reuses
+/// `BLOCK_LEVEL`: the same "stay above every real heading level" reasoning
+/// applies, and `set_extents` already skips every non-`Heading` node
+/// regardless. Shared by `push_relation_node` below (corpus-build time,
+/// from a block's own recorded `produces=`/`reads=`) and by `--live`'s
+/// `graph::query::live_orphans` (decision 37): a relation node is built
+/// the same way whichever of the two ever first names it.
+pub fn relation_node(id: &NodeId, title: &str) -> Node {
+    Node {
         id: id.clone(),
         title: title.to_string(),
         file: id.file.clone(),
@@ -311,7 +309,18 @@ fn push_relation_node(nodes: &mut Vec<Node>, id: &NodeId, title: &str) {
         external: Vec::new(),
         resolved: true,
         kind: NodeKind::Relation,
-    });
+    }
+}
+
+/// Adds a relation node for `id`, unless one is already present -- a
+/// relation both produced and read within the same file would otherwise
+/// duplicate here even before corpus-wide dedup (`Graph::sort`) ever
+/// runs.
+fn push_relation_node(nodes: &mut Vec<Node>, id: &NodeId, title: &str) {
+    if nodes.iter().any(|n| &n.id == id) {
+        return;
+    }
+    nodes.push(relation_node(id, title));
 }
 ```
 

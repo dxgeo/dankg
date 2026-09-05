@@ -11,13 +11,15 @@ crate (`session::run`, `tangle::run`, `tui::run`), never here.
 
 ```rust name=module_doc path=main.rs
 use dankg::cli::{self, Command, Format};
+use dankg::config::Config;
 use dankg::depends;
 use dankg::diag::{Diags, Level};
 use dankg::eval::files as eval_files;
+use dankg::eval::run as eval_run;
 use dankg::eval::{plan, result, session};
 use dankg::graph::build;
 use dankg::graph::index::{self, Corpus};
-use dankg::graph::{resolve, view, EdgeKind, Graph, NodeId};
+use dankg::graph::{query, resolve, view, EdgeKind, Graph, NodeId};
 use dankg::layout;
 use dankg::md::{fmt, Document};
 use dankg::render::{dot, html, json, mermaid};
@@ -27,6 +29,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 use std::process::ExitCode;
+use std::time::Duration;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -49,8 +52,8 @@ fn main() -> ExitCode {
             println!("dankg {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Command::Graph { paths, format, output, cache, depth, all } => {
-            report(graph(&paths, format, output.as_deref(), cache, depth, all))
+        Command::Graph { paths, format, output, cache, depth, all, live } => {
+            report(graph(&paths, format, output.as_deref(), cache, depth, all, live))
         }
         Command::Index { paths, cache } => report(index_report(&paths, cache)),
         Command::Tui { paths, cache, depth, all } => report(tui::run(&paths, cache, depth, all)),
@@ -447,10 +450,15 @@ fn graph(
     cache: bool,
     depth: Option<u32>,
     all: bool,
+    live: bool,
 ) -> Result<(), String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
-    let index = resolve::resolve(&corpus.files, &mut diags);
+    let mut index = resolve::resolve(&corpus.files, &mut diags);
+
+    if live {
+        add_live_orphans(&mut index, &corpus.config, &mut diags);
+    }
 
     // JSON is the index, not a view of it. It is the scriptable surface.
     // A consumer that asked for the graph should not get a fragment of
@@ -502,6 +510,33 @@ fn graph(
     diags.emit();
     summarize(&corpus, &index, view.as_ref(), &diags);
     Ok(())
+}
+
+/// `--live` (decision 37): spawns every `[db.*]`'s own `list`, read-only,
+/// and adds a node to `index` for whatever it reports that the corpus
+/// does not already explain. A `[db.*]` with no `list` configured is
+/// reported and skipped, the same allowlist rule an unconfigured
+/// `[lang.*]` already gets. A `list` that fails to run is reported the
+/// same way rather than aborting the whole command: one broken database
+/// should not hide what every other one found. `query::live_orphans`
+/// itself never mutates `index` (it is a read-only lookup); this is the
+/// one caller that does, and the one place a run of `dankg graph` ever
+/// reaches into `eval::run` at all.
+fn add_live_orphans(index: &mut Graph, config: &Config, diags: &mut Diags) {
+    let timeout = Duration::from_secs(eval_run::DEFAULT_TIMEOUT_SECS);
+    for db in config.dbs() {
+        match eval_run::list_relations(&db, timeout) {
+            Ok(Some(relations)) => {
+                let orphans = query::live_orphans(index, &db.name, &relations);
+                index.nodes.extend(orphans);
+            }
+            Ok(None) => {
+                diags.warn_in("dankg", 0, format!("[db.{}] has no `list` configured; --live cannot check it", db.name));
+            }
+            Err(message) => diags.warn_in("dankg", 0, format!("[db.{}] list: {message}", db.name)),
+        }
+    }
+    index.sort();
 }
 
 /// One line each to stderr. This way, stdout stays a clean pipe.

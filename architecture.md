@@ -2140,7 +2140,7 @@ block's SQL say":
 # .dankg/config
 [db.warehouse]
 command = duckdb -csv {db} -f {file}
-list    = duckdb -csv {db} -c "select table_name from duckdb_tables() union select view_name from duckdb_views()"
+list    = duckdb -csv -noheader {db} -c "select table_name from duckdb_tables() union select view_name from duckdb_views()"
 path    = data/warehouse.duckdb
 ```
 
@@ -2148,7 +2148,11 @@ A Postgres warehouse configures the identical shape against
 `information_schema`, a REST-fronted catalog against whatever endpoint
 it exposes: `list`'s contract is stdout, one identifier per line,
 nothing else. DanKG parses that and nothing about how it was produced,
-the same indifference decision 1 already holds `command` to. *Provenance
+the same indifference decision 1 already holds `command` to. DuckDB's own
+`-csv` mode defaults to a header row; `-noheader` above is what keeps
+that row from reading as a relation named `table_name`. Getting a
+header-free listing out of whichever engine a reader configures is their
+own job, the same way writing a correct `command` already is. *Provenance
 without a driver*'s own before/after diff (decisions 35, 36) runs
 through this exact command too, not DuckDB's own catalog functions:
 decision 16 already promised DuckDB would be the first engine tested
@@ -2971,8 +2975,12 @@ one enforced only by construction.
    `verified_hash` itself, computed a db-targeted chain's hash against
    the wrong template twice over -- both now call one shared
    `eval::result::hash_template_for` so they cannot drift apart again.
-   `--live` (decision 37) and relation depth cost (decision 38) are not
-   implemented yet.
+   `--live` (decision 37) ships too: `dankg graph --live` spawns every
+   `[db.*]`'s own `list` and adds a node (`graph::query::live_orphans`)
+   for whatever it reports that the corpus does not already explain. A
+   `[db.*]` with no `list`, or whose `list` fails to run, is reported and
+   skipped rather than aborting the rest of the corpus's own databases.
+   Relation depth cost (decision 38) is not implemented yet.
 10. `dankg serve`, deferred, opt-in, only if the static path proves insufficient.
 11. \[DONE\] `dankg tangle` (`src/tangle.rs`). Block scope reuses
     `eval::plan::top_level_blocks` exactly (decision 23), independent

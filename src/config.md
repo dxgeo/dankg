@@ -42,9 +42,10 @@ const KNOWN: &[(&str, &[&str])] = &[
 ];
 
 /// Section families, named `<prefix><name>`. `db.`'s `list` (decision 37)
-/// is parsed now even though `--live` and *Provenance without a driver*'s
-/// own before/after diff (decisions 35-38) are not implemented yet, so a
-/// config written ahead of them does not warn.
+/// is the one command both `dankg graph --live` and *Provenance without a
+/// driver*'s own before/after diff spawn -- one protocol-agnostic
+/// primitive, two callers, neither assuming anything about the engine
+/// beyond "one relation identifier per line."
 /// `tangle.`'s `command` is optional (decision 25): a language with no
 /// separate build step just materializes its tree and stops. `glue` is
 /// independent of `command` and just as optional (decision 26): an external
@@ -580,9 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn db_list_key_parses_ahead_of_live_and_provenance() {
-        // decisions 35-38 (`--live`, `Produces`/`Reads` inference) are not
-        // implemented yet; `list` must still parse clean rather than warn.
+    fn db_list_key_parses_clean() {
         let (c, d) = parse(
             "[db.warehouse]\ncommand = duckdb -csv {db} -f {file}\nlist = duckdb -csv {db} -c \"select 1\"\n",
         );
