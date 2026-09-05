@@ -2980,7 +2980,11 @@ one enforced only by construction.
    for whatever it reports that the corpus does not already explain. A
    `[db.*]` with no `list`, or whose `list` fails to run, is reported and
    skipped rather than aborting the rest of the corpus's own databases.
-   Relation depth cost (decision 38) is not implemented yet.
+   Relation depth cost (decision 38) ships too: `graph::view::select`
+   folds every relation an already-chosen block touches into the view
+   before spending any of the `depth` budget, so a relation renders next
+   to its own block at `--depth 0`; leaving one, onto a further block,
+   still costs the ordinary hop, unchanged from any other edge.
 10. `dankg serve`, deferred, opt-in, only if the static path proves insufficient.
 11. \[DONE\] `dankg tangle` (`src/tangle.rs`). Block scope reuses
     `eval::plan::top_level_blocks` exactly (decision 23), independent

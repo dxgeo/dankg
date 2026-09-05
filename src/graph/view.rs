@@ -13,9 +13,16 @@
 //! counts too. This is the open question in architecture.md. It can make
 //! depth 2 feel shallow in a deeply nested file. `--all` is the answer
 //! until something better is decided.
+//!
+//! One exception (decision 38): entering a `Relation` node over a
+//! `Produces`/`Reads` edge, from either direction, costs nothing against
+//! `depth`. Leaving one, onto a block, costs the ordinary hop. A relation
+//! renders alongside every block already in view that touches it, at any
+//! depth including 0, without shortening the distance between two
+//! otherwise-unrelated blocks that happen to share it.
 
 use super::build::strip_extension;
-use super::model::{Graph, NodeId};
+use super::model::{EdgeKind, Graph, NodeId, NodeKind};
 
 /// Every node belonging to one of the named files. A file names all of its
 /// headings, not just the first. "graph this file and what it touches" is the
@@ -45,6 +52,10 @@ pub fn select(graph: &Graph, entries: &[NodeId], depth: u32) -> Graph {
             frontier.push(id.clone());
         }
     }
+    // Decision 38: a relation any already-chosen block touches renders for
+    // free, at depth 0 same as any other. Run once for the entries
+    // themselves, before the first real hop ever spends anything.
+    zero_cost_relations(graph, &mut chosen, &mut frontier);
 
     for _ in 0..depth {
         let mut next: Vec<NodeId> = Vec::new();
@@ -60,6 +71,9 @@ pub fn select(graph: &Graph, entries: &[NodeId], depth: u32) -> Graph {
         }
         chosen.extend(next.iter().cloned());
         frontier = next;
+        // A block this real hop just reached may touch a relation of its
+        // own -- free the same way the entries' did, not a second hop.
+        zero_cost_relations(graph, &mut chosen, &mut frontier);
     }
 
     Graph {
@@ -71,6 +85,27 @@ pub fn select(graph: &Graph, entries: &[NodeId], depth: u32) -> Graph {
             .cloned()
             .collect(),
     }
+}
+
+fn zero_cost_relations(graph: &Graph, chosen: &mut Vec<NodeId>, frontier: &mut Vec<NodeId>) {
+    let mut free: Vec<NodeId> = Vec::new();
+    for edge in &graph.edges {
+        if !matches!(edge.kind, EdgeKind::Produces | EdgeKind::Reads) {
+            continue;
+        }
+        for (near, far) in [(&edge.from, &edge.to), (&edge.to, &edge.from)] {
+            let Some(far_node) = graph.node(far) else { continue };
+            if far_node.kind == NodeKind::Relation
+                && frontier.contains(near)
+                && !chosen.contains(far)
+                && !free.contains(far)
+            {
+                free.push(far.clone());
+            }
+        }
+    }
+    chosen.extend(free.iter().cloned());
+    frontier.extend(free);
 }
 
 /// The subgraph to render: the named entry files' nodes plus `depth` hops, or
@@ -163,6 +198,89 @@ mod tests {
         let selected = select(&g, &[NodeId::new("a", "one")], 1);
         assert_eq!(ids(&selected), vec!["a#one", "a#two"]);
         assert_eq!(selected.edges[0].kind, EdgeKind::Contains);
+    }
+
+    // Decision 38: a relation costs nothing to enter over a Produces/Reads
+    // edge, from either direction; leaving one, onto a block, costs the
+    // ordinary hop. `graph_of` has no way to author a `db=` block's own
+    // provenance without a real eval run, so these build the graph by
+    // hand, the same way `graph::model` and `graph::query`'s own tests do.
+    use super::super::model::{Edge, Node};
+
+    fn relation(db: &str, name: &str) -> Node {
+        crate::graph::build::relation_node(&NodeId::new(format!("db:{db}"), name), name)
+    }
+
+    fn edge(kind: EdgeKind, from: (&str, &str), to: (&str, &str)) -> Edge {
+        Edge { from: NodeId::new(from.0, from.1), to: NodeId::new(to.0, to.1), kind, line: 0, reciprocated: false }
+    }
+
+    fn block(file: &str, slug: &str) -> Node {
+        Node {
+            id: NodeId::new(file, slug),
+            title: slug.to_string(),
+            file: format!("{file}.md"),
+            line: 1,
+            end_line: 1,
+            level: 7,
+            parent: None,
+            tags: Vec::new(),
+            external: Vec::new(),
+            resolved: true,
+            kind: NodeKind::Block,
+        }
+    }
+
+    #[test]
+    fn a_produced_relation_is_free_at_depth_zero() {
+        // a --Produces--> db:t#r
+        let g = Graph {
+            nodes: vec![block("a", "setup"), relation("t", "r")],
+            edges: vec![edge(EdgeKind::Produces, ("a", "setup"), ("db:t", "r"))],
+        };
+        assert_eq!(ids(&select(&g, &[NodeId::new("a", "setup")], 0)), vec!["a#setup", "db:t#r"]);
+    }
+
+    #[test]
+    fn a_read_relation_is_free_from_either_direction() {
+        // db:t#r --Reads--> a; entering `r` from `a` means walking this
+        // edge backward, the "either direction" decision 38 names.
+        let g = Graph {
+            nodes: vec![block("a", "setup"), relation("t", "r")],
+            edges: vec![edge(EdgeKind::Reads, ("db:t", "r"), ("a", "setup"))],
+        };
+        assert_eq!(ids(&select(&g, &[NodeId::new("a", "setup")], 0)), vec!["a#setup", "db:t#r"]);
+    }
+
+    #[test]
+    fn leaving_a_relation_onto_a_block_costs_the_ordinary_hop() {
+        // a --Produces--> db:t#r --Reads--> b
+        let g = Graph {
+            nodes: vec![block("a", "setup"), relation("t", "r"), block("b", "load")],
+            edges: vec![
+                edge(EdgeKind::Produces, ("a", "setup"), ("db:t", "r")),
+                edge(EdgeKind::Reads, ("db:t", "r"), ("b", "load")),
+            ],
+        };
+        // The relation is free at depth 0; `b` is not reachable yet.
+        assert_eq!(ids(&select(&g, &[NodeId::new("a", "setup")], 0)), vec!["a#setup", "db:t#r"]);
+        // One real hop off the relation reaches `b`, the ordinary cost.
+        assert_eq!(ids(&select(&g, &[NodeId::new("a", "setup")], 1)), vec!["a#setup", "b#load", "db:t#r"]);
+    }
+
+    #[test]
+    fn a_relation_reveals_every_other_block_touching_it_one_hop_away() {
+        // Two producers into the same relation: a sibling reveal, exactly
+        // as much a real hop buys as a downstream reader would be.
+        let g = Graph {
+            nodes: vec![block("a", "setup"), block("c", "rebuild"), relation("t", "r")],
+            edges: vec![
+                edge(EdgeKind::Produces, ("a", "setup"), ("db:t", "r")),
+                edge(EdgeKind::Produces, ("c", "rebuild"), ("db:t", "r")),
+            ],
+        };
+        assert_eq!(ids(&select(&g, &[NodeId::new("a", "setup")], 0)), vec!["a#setup", "db:t#r"]);
+        assert_eq!(ids(&select(&g, &[NodeId::new("a", "setup")], 1)), vec!["a#setup", "c#rebuild", "db:t#r"]);
     }
 
     #[test]
