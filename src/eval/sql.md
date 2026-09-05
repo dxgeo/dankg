@@ -1,0 +1,241 @@
+# Eval sql
+
+A minimal, hand-rolled scanner for what a SQL block's own text writes to
+and reads from (decision: *Provenance without a driver*). Not a SQL
+parser -- decision 1 refuses a crate for that, and full SQL semantics
+(CTEs, subquery aliases, dialect-specific syntax) is not what this needs
+to be right. It only has to name a plausible target; the snapshot diff in
+`eval::session` is what confirms a name is a real relation, not a
+query-local alias or a typo.
+
+```rust name=module_doc path=eval/sql.rs
+//! A minimal, hand-rolled scanner for what a SQL block's own text writes
+//! to and reads from. Not a SQL parser (decision 1: no crate for one) --
+//! good enough to name a plausible target, not to understand a query.
+//! The caller (`eval::session`) cross-validates every name this reports
+//! against a real database snapshot before trusting it.
+
+/// Splits `text` into identifier/keyword tokens plus the four punctuation
+/// marks a `write`/`read` scan needs to tell an identifier from a
+/// function call: `(`, `)`, `,`, `;`. Byte-indexed rather than char-
+/// indexed, but every slice boundary this produces sits on an ASCII
+/// delimiter or the string's own start/end, so it is always a valid
+/// UTF-8 boundary -- a continuation byte is never itself ASCII
+/// whitespace or one of those four marks, so the scan can never split a
+/// multi-byte character in two.
+fn tokenize(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+        } else if matches!(c, b'(' | b')' | b',' | b';') {
+            tokens.push(&text[i..i + 1]);
+            i += 1;
+        } else {
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !matches!(bytes[i], b'(' | b')' | b',' | b';') {
+                i += 1;
+            }
+            tokens.push(&text[start..i]);
+        }
+    }
+    tokens
+}
+
+fn kw(token: &str, word: &str) -> bool {
+    token.eq_ignore_ascii_case(word)
+}
+
+/// `true` for a token that looks like a real identifier -- not a
+/// punctuation mark, not empty. Enough to reject stopping mid-scan on
+/// `;` or a stray `,`.
+fn is_ident(token: &str) -> bool {
+    token.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+}
+```
+
+`writes` looks for the handful of statement shapes that name a table or
+view they write to: `CREATE [OR REPLACE] [TEMP[ORARY]] TABLE|VIEW [IF NOT EXISTS] <name>`, `INSERT INTO <name>`, `UPDATE <name>`, `DELETE FROM <name>`, `DROP TABLE|VIEW [IF EXISTS] <name>`. Each is a fixed keyword
+sequence with one or two optional words spliced in, so the scan just
+walks forward past whichever optional words are actually present rather
+than building a grammar for them.
+
+```rust name=writes path=eval/sql.rs
+/// Identifiers `text` names as a write target: `CREATE`, `INSERT INTO`,
+/// `UPDATE`, `DELETE FROM`, `DROP` targets, in source order, duplicates
+/// kept (the caller needs counts no more than it needs a set here; it
+/// builds its own set).
+pub fn writes(text: &str) -> Vec<&str> {
+    let t = tokenize(text);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        let mut j = i;
+        if kw(t[j], "CREATE") {
+            j += 1;
+            if j + 1 < t.len() && kw(t[j], "OR") && kw(t[j + 1], "REPLACE") {
+                j += 2;
+            }
+            if j < t.len() && (kw(t[j], "TEMP") || kw(t[j], "TEMPORARY")) {
+                j += 1;
+            }
+            if j < t.len() && (kw(t[j], "TABLE") || kw(t[j], "VIEW")) {
+                j += 1;
+                if j + 2 < t.len() && kw(t[j], "IF") && kw(t[j + 1], "NOT") && kw(t[j + 2], "EXISTS") {
+                    j += 3;
+                }
+                if j < t.len() && is_ident(t[j]) {
+                    out.push(t[j]);
+                    i = j + 1;
+                    continue;
+                }
+            }
+        } else if j + 1 < t.len() && kw(t[j], "INSERT") && kw(t[j + 1], "INTO") {
+            j += 2;
+            if j < t.len() && is_ident(t[j]) {
+                out.push(t[j]);
+                i = j + 1;
+                continue;
+            }
+        } else if kw(t[j], "UPDATE") {
+            j += 1;
+            if j < t.len() && is_ident(t[j]) {
+                out.push(t[j]);
+                i = j + 1;
+                continue;
+            }
+        } else if j + 1 < t.len() && kw(t[j], "DELETE") && kw(t[j + 1], "FROM") {
+            j += 2;
+            if j < t.len() && is_ident(t[j]) {
+                out.push(t[j]);
+                i = j + 1;
+                continue;
+            }
+        } else if kw(t[j], "DROP") {
+            j += 1;
+            if j < t.len() && (kw(t[j], "TABLE") || kw(t[j], "VIEW")) {
+                j += 1;
+                if j + 1 < t.len() && kw(t[j], "IF") && kw(t[j + 1], "EXISTS") {
+                    j += 2;
+                }
+                if j < t.len() && is_ident(t[j]) {
+                    out.push(t[j]);
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+```
+
+`reads` is narrower: `FROM`/`JOIN` (any join variant -- `INNER`, `LEFT`,
+`RIGHT`, `FULL`, `CROSS` all still end in the bare word `JOIN`, so
+matching just that is enough) followed by an identifier **not**
+immediately followed by `(`, which is a function call
+(`read_parquet(...)`) reading a file, not a relation.
+
+```rust name=reads path=eval/sql.rs
+/// Identifiers `text` reads from: every `FROM`/`JOIN` target, in source
+/// order, duplicates kept, skipping a function call.
+pub fn reads(text: &str) -> Vec<&str> {
+    let t = tokenize(text);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        if kw(t[i], "FROM") || kw(t[i], "JOIN") {
+            let name_at = i + 1;
+            if name_at < t.len() && is_ident(t[name_at]) && t.get(name_at + 1).is_none_or(|next| *next != "(") {
+                out.push(t[name_at]);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+```
+
+## Tests
+
+```rust name=tests path=eval/sql.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_or_replace_table_is_a_write_and_its_own_from_is_a_read() {
+        let sql = "CREATE OR REPLACE TABLE orders AS SELECT * FROM staging.raw_orders;";
+        assert_eq!(writes(sql), vec!["orders"]);
+        assert_eq!(reads(sql), vec!["staging.raw_orders"]);
+    }
+
+    #[test]
+    fn plain_create_table_is_a_write() {
+        assert_eq!(writes("CREATE TABLE x (n INT);"), vec!["x"]);
+    }
+
+    #[test]
+    fn create_view_is_a_write() {
+        assert_eq!(writes("CREATE VIEW v AS SELECT 1;"), vec!["v"]);
+    }
+
+    #[test]
+    fn insert_into_is_a_write() {
+        assert_eq!(writes("INSERT INTO orders VALUES (1);"), vec!["orders"]);
+    }
+
+    #[test]
+    fn update_is_a_write() {
+        assert_eq!(writes("UPDATE orders SET n = 1;"), vec!["orders"]);
+    }
+
+    #[test]
+    fn delete_from_is_a_write() {
+        assert_eq!(writes("DELETE FROM orders WHERE n = 1;"), vec!["orders"]);
+    }
+
+    #[test]
+    fn drop_table_if_exists_is_a_write() {
+        assert_eq!(writes("DROP TABLE IF EXISTS orders;"), vec!["orders"]);
+    }
+
+    #[test]
+    fn a_function_call_is_not_a_read() {
+        assert_eq!(reads("SELECT * FROM read_parquet('raw/orders/*.parquet');"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_join_target_is_a_read() {
+        assert_eq!(
+            reads("SELECT * FROM orders o JOIN customers c ON o.id = c.id;"),
+            vec!["orders", "customers"]
+        );
+    }
+
+    #[test]
+    fn keyword_matching_is_case_insensitive() {
+        assert_eq!(writes("create table x (n int);"), vec!["x"]);
+        assert_eq!(reads("select * from x;"), vec!["x"]);
+    }
+
+    #[test]
+    fn a_cte_name_reads_like_a_relation_at_the_scan_stage() {
+        // Known limitation, documented rather than silently wrong: a
+        // query-local alias looks identical to a real relation to a
+        // keyword scan. `eval::session`'s own snapshot-membership check
+        // is what keeps this out of the *written-back* Reads set, not
+        // this function.
+        assert_eq!(reads("WITH foo AS (SELECT 1) SELECT * FROM foo;"), vec!["foo"]);
+    }
+
+    #[test]
+    fn no_writes_or_reads_in_plain_select() {
+        assert_eq!(writes("SELECT 1;"), Vec::<&str>::new());
+    }
+}
+```

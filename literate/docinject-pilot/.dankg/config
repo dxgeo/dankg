@@ -1,0 +1,19 @@
+# Pilot 6: `glue/rust-docinject.py`'s cross-reference rewriting half.
+# `hash.md`'s own config (pilot 1) now proves plain doc injection on a
+# single self-contained file; this pilot exists to prove the other half --
+# a DanKG link inside injected prose surviving as a real,
+# `cargo doc`-verified intra-doc link across a tangle-file boundary,
+# rather than a dead reference to a `.md` a binary-only reader cannot
+# open. See `consumer.md`'s own "Pilot notes".
+#
+# `consumer.md`'s own block writes its cross-file `use` by hand -- the
+# composition-pilot's own finding (pilot 4) about what does and does not
+# survive a real cross-tangle-file boundary applies here unchanged; this
+# pilot is about the *documentation* crossing that boundary, which -- as
+# `consumer.md`'s notes explain -- turns out not to be bound by the same
+# constraint at all.
+
+[tangle.rust]
+glue    = sh -c 'python3 glue/rust.py {dir} && python3 glue/rust-docinject.py {dir} literate/docinject-pilot && python3 glue/rust-doclint.py {dir} literate/docinject-pilot'
+ext     = rs
+command = sh -c 'cargo test --manifest-path {dir}/Cargo.toml && cargo doc --no-deps --manifest-path {dir}/Cargo.toml'

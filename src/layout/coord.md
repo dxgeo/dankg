@@ -1,0 +1,325 @@
+# Layout coord
+
+Phase 4, the last of the four: turn layers and left-right orders into
+actual x coordinates. This is Sugiyama's priority method. Each node
+would like to sit at the average x of what it connects to in the layer
+above or below. It gets to, as far as its neighbours allow it to move.
+Priority decides who yields when two nodes want the same space. A bend
+point (`layout::rank`'s virtual node for a long edge) outranks every
+real node, because a long edge that zigzags is far harder to follow
+than one node sitting slightly off-centre. Among real nodes, priority
+is simply how much is attached to them. Passes alternate up and down,
+so both ends of an edge get a turn pulling on it. Ordering itself is
+never touched here. A node may slide within its own layer, but it can
+never pass a neighbour. This way, [`layout::order`](order.md)'s
+crossing count from phase 3 survives untouched into the final
+rendering.
+
+```rust name=module_doc path=layout/coord.rs
+//! Phase 4: turn layers and orders into x coordinates.
+//!
+//! Sugiyama's priority method. Each node would like to sit at the average of
+//! the nodes it connects to in the layer above or below. It gets to, as far
+//! as its neighbours allow. Priority decides who yields. A bend point
+//! outranks everything, because a long edge that zigzags is far harder to
+//! follow than one node sitting slightly off-centre. Among real nodes, the
+//! priority is how much is attached to them.
+//!
+//! Passes alternate up and down, so both ends of an edge get a turn at
+//! pulling. Ordering is never changed here. A node may slide within its
+//! layer, but it can never pass a neighbour. This way, phase 3's crossing
+//! count survives.
+
+use super::{Dag, MARGIN, NODE_SEP};
+
+/// Alternating down/up passes. Four each way: enough to settle, few enough
+/// that the cost stays linear in practice.
+const PASSES: usize = 8;
+
+/// A bend point outranks every real node, however well connected.
+const BEND_PRIORITY: i64 = i64::MAX;
+
+pub(crate) fn assign(dag: &mut Dag) {
+    pack(dag);
+
+    for pass in 0..PASSES {
+        let down = pass % 2 == 0;
+        let ranks: Vec<usize> = if down {
+            (1..dag.layers.len()).collect()
+        } else {
+            (0..dag.layers.len().saturating_sub(1)).rev().collect()
+        };
+        for rank in ranks {
+            sweep(dag, rank, down);
+        }
+    }
+
+    normalize(dag);
+}
+
+/// Left-to-right packing, which is both the starting point and the guarantee
+/// that nothing ever overlaps: every later move is checked against it.
+fn pack(dag: &mut Dag) {
+    dag.x = vec![0; dag.count()];
+    for layer in &dag.layers {
+        let mut left = 0;
+        for &node in layer {
+            dag.x[node] = left + dag.width[node] / 2;
+            left += dag.width[node] + NODE_SEP;
+        }
+    }
+}
+```
+
+Each sweep processes one layer, highest-priority node first. Ties break
+by position. This keeps the pass reproducible, not merely
+deterministic-in-practice.
+
+```rust name=sweep_and_desired path=layout/coord.rs
+fn sweep(dag: &mut Dag, rank: usize, down: bool) {
+    let layer = dag.layers[rank].clone();
+    let wants: Vec<Option<i32>> = layer.iter().map(|&n| desired(dag, n, down)).collect();
+    let priorities: Vec<i64> = layer.iter().map(|&n| priority(dag, n, down)).collect();
+
+    // Highest priority first, ties by position so the pass is reproducible.
+    let mut order: Vec<usize> = (0..layer.len()).collect();
+    order.sort_by_key(|&i| (std::cmp::Reverse(priorities[i]), i));
+
+    for i in order {
+        let Some(want) = wants[i] else { continue };
+        if want > dag.x[layer[i]] {
+            push_right(dag, &layer, &priorities, i, want);
+        } else if want < dag.x[layer[i]] {
+            push_left(dag, &layer, &priorities, i, want);
+        }
+    }
+}
+
+/// Where a node would like to be: the weighted average of what it connects to
+/// in the reference layer. `None` when it connects to nothing there. Then it
+/// stays where the packing put it.
+fn desired(dag: &Dag, node: usize, down: bool) -> Option<i32> {
+    let mut total: i64 = 0;
+    let mut weight: i64 = 0;
+
+    for segment in &dag.segments {
+        let neighbour = match (down, segment.to == node, segment.from == node) {
+            (true, true, _) => segment.from,
+            (false, _, true) => segment.to,
+            _ => continue,
+        };
+        let w = segment.weight.max(1) as i64;
+        total += dag.x[neighbour] as i64 * w;
+        weight += w;
+    }
+    if weight == 0 {
+        return None;
+    }
+    // Round to nearest. Coordinates are non-negative until `normalize`.
+    Some(((total + weight / 2) / weight) as i32)
+}
+
+fn priority(dag: &Dag, node: usize, down: bool) -> i64 {
+    if dag.is_virtual(node) {
+        return BEND_PRIORITY;
+    }
+    dag.segments
+        .iter()
+        .filter(|s| if down { s.to == node } else { s.from == node })
+        .map(|s| s.weight.max(1) as i64)
+        .sum()
+}
+```
+
+`push_right`/`push_left` are mirror images: move one node toward where it
+wants to be, and drag along whatever lower-priority neighbours are in the
+way, stopping short of the first neighbour that outranks it. This is
+the entire mechanism that keeps a bend point from ever being shoved aside
+by a real node it happens to share a layer with.
+
+```rust name=push_right_and_left path=layout/coord.rs
+/// Move node `i` right towards `want`, pushing the lower-priority nodes on its
+/// right along with it, and stopping short of the first one that outranks it.
+fn push_right(dag: &mut Dag, layer: &[usize], priorities: &[i64], i: usize, want: i32) {
+    let node = layer[i];
+    let mut limit = i32::MAX;
+    let mut needed = 0;
+    let mut end = layer.len();
+
+    for j in i + 1..layer.len() {
+        let other = layer[j];
+        if priorities[j] >= priorities[i] {
+            limit = dag.x[other] - dag.width[other] / 2 - needed - NODE_SEP - dag.width[node] / 2;
+            end = j;
+            break;
+        }
+        needed += NODE_SEP + dag.width[other];
+    }
+
+    let target = want.min(limit);
+    if target <= dag.x[node] {
+        return;
+    }
+    dag.x[node] = target;
+
+    let mut right = target + dag.width[node] / 2;
+    for &other in &layer[i + 1..end] {
+        let least = right + NODE_SEP + dag.width[other] / 2;
+        dag.x[other] = dag.x[other].max(least);
+        right = dag.x[other] + dag.width[other] / 2;
+    }
+}
+
+fn push_left(dag: &mut Dag, layer: &[usize], priorities: &[i64], i: usize, want: i32) {
+    let node = layer[i];
+    let mut limit = i32::MIN;
+    let mut needed = 0;
+    let mut end = 0;
+
+    for j in (0..i).rev() {
+        let other = layer[j];
+        if priorities[j] >= priorities[i] {
+            limit = dag.x[other] + dag.width[other] / 2 + needed + NODE_SEP + dag.width[node] / 2;
+            end = j + 1;
+            break;
+        }
+        needed += NODE_SEP + dag.width[other];
+    }
+
+    let target = want.max(limit);
+    if target >= dag.x[node] {
+        return;
+    }
+    dag.x[node] = target;
+
+    let mut left = target - dag.width[node] / 2;
+    for &other in layer[end..i].iter().rev() {
+        let most = left - NODE_SEP - dag.width[other] / 2;
+        dag.x[other] = dag.x[other].min(most);
+        left = dag.x[other] - dag.width[other] / 2;
+    }
+}
+
+/// Slide everything so the leftmost box starts at the margin. Pushing
+/// left is allowed to go negative. A canvas cannot.
+fn normalize(dag: &mut Dag) {
+    let Some(leftmost) = (0..dag.count()).map(|n| dag.x[n] - dag.width[n] / 2).min() else {
+        return;
+    };
+    let shift = MARGIN - leftmost;
+    for x in &mut dag.x {
+        *x += shift;
+    }
+}
+```
+
+## Tests
+
+```rust name=tests path=layout/coord.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{acyclic, order, rank};
+
+    fn build(count: usize, widths: &[i32], edges: &[(usize, usize, i32)]) -> Dag {
+        let mut dag = Dag {
+            real: count,
+            rank: vec![0; count],
+            width: widths.to_vec(),
+            key: (0..count).map(|i| format!("n{i:03}")).collect(),
+            ..Dag::default()
+        };
+        let roles = acyclic::break_cycles(count, edges);
+        rank::assign(&mut dag, edges, &roles);
+        rank::split_long_edges(&mut dag, edges, &roles);
+        // Bend points have no width. The builder above cannot know how many
+        // there will be.
+        dag.width.resize(dag.count(), 0);
+        order::minimize_crossings(&mut dag);
+        assign(&mut dag);
+        dag
+    }
+
+    fn e(from: usize, to: usize) -> (usize, usize, i32) {
+        (from, to, 1)
+    }
+
+    fn overlaps(dag: &Dag) -> bool {
+        dag.layers.iter().any(|layer| {
+            layer.windows(2).any(|pair| {
+                let (a, b) = (pair[0], pair[1]);
+                dag.x[b] - dag.width[b] / 2 < dag.x[a] + dag.width[a] / 2 + NODE_SEP
+            })
+        })
+    }
+
+    #[test]
+    fn nothing_overlaps_and_nothing_starts_before_the_margin() {
+        let d = build(5, &[100, 80, 200, 60, 120], &[e(0, 1), e(0, 2), e(0, 3), e(1, 4)]);
+        assert!(!overlaps(&d));
+        for n in 0..d.count() {
+            assert!(d.x[n] - d.width[n] / 2 >= MARGIN, "node {n} starts at {}", d.x[n]);
+        }
+    }
+
+    #[test]
+    fn the_leftmost_box_sits_exactly_on_the_margin() {
+        let d = build(3, &[100, 100, 100], &[e(0, 1), e(0, 2)]);
+        let leftmost = (0..d.count()).map(|n| d.x[n] - d.width[n] / 2).min().unwrap();
+        assert_eq!(leftmost, MARGIN);
+    }
+
+    #[test]
+    fn a_parent_is_centred_over_two_children() {
+        let d = build(3, &[100, 100, 100], &[e(0, 1), e(0, 2)]);
+        let middle = (d.x[1] + d.x[2]) / 2;
+        assert!((d.x[0] - middle).abs() <= 1, "parent {} vs midpoint {middle}", d.x[0]);
+    }
+
+    #[test]
+    fn a_lone_child_lines_up_under_its_parent() {
+        let d = build(2, &[100, 60], &[e(0, 1)]);
+        assert_eq!(d.x[0], d.x[1]);
+    }
+
+    #[test]
+    fn a_bend_point_never_yields_to_a_real_node() {
+        // 0 -> 1 -> 2 with the spanning edge 0 -> 2 bending beside 1, plus a
+        // wide sibling crowding the middle layer. The last pass runs upwards.
+        // The bend's one wish is to sit under node 2. It outranks everything
+        // in its layer. It gets exactly that.
+        let d = build(4, &[100, 100, 100, 240], &[e(0, 1), e(1, 2), e(0, 2), e(0, 3)]);
+        let bend = d.real;
+        assert!(d.is_virtual(bend), "the spanning edge produced a bend point");
+        assert_eq!(d.x[bend], d.x[2], "the bend lines up with its target");
+        assert!(!overlaps(&d), "and the real nodes moved out of its way");
+    }
+
+    #[test]
+    fn ordering_survives_coordinate_assignment() {
+        let d = build(6, &[80, 80, 240, 80, 80, 80], &[e(0, 2), e(0, 3), e(1, 4), e(1, 5)]);
+        for layer in &d.layers {
+            for pair in layer.windows(2) {
+                assert!(d.x[pair[0]] < d.x[pair[1]], "a node overtook its neighbour");
+            }
+        }
+    }
+
+    #[test]
+    fn wide_labels_get_the_room_they_need() {
+        let d = build(3, &[80, 400, 80], &[e(0, 1), e(0, 2)]);
+        let (a, b) = (d.layers[1][0], d.layers[1][1]);
+        assert!(d.x[b] - d.width[b] / 2 - (d.x[a] + d.width[a] / 2) >= NODE_SEP);
+    }
+
+    #[test]
+    fn coordinates_are_the_same_on_every_run() {
+        let widths = [100, 80, 160, 60, 120, 90];
+        let edges = vec![e(0, 1), e(0, 2), e(1, 3), e(2, 3), e(0, 4), e(4, 5), e(0, 5)];
+        let first = build(6, &widths, &edges).x;
+        for _ in 0..5 {
+            assert_eq!(build(6, &widths, &edges).x, first);
+        }
+    }
+}
+```

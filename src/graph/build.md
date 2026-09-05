@@ -1,0 +1,829 @@
+# Graph build
+
+Turns one parsed document into nodes and containment edges. Link edges
+are deliberately *not* resolved here. A link's target may live in a file
+that has not been parsed yet, because parsing runs file by file while
+resolution needs the whole corpus. This module only records the raw
+target as written. [`graph::resolve`](resolve.md) turns it into a
+real edge once every file has been seen.
+
+```rust name=module_doc path=graph/build.rs
+//! Turning parsed documents into nodes and containment edges.
+//!
+//! Link edges are not resolved here. A link's target may live in a file that
+//! has not been parsed yet, so building records raw targets.
+//! [`super::resolve`] turns them into edges once the whole corpus is known.
+
+use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
+use super::slug::{slugify, Slugger};
+use crate::eval::result::recorded_provenance;
+use crate::md::{Block, Document, Inline};
+
+/// Every real heading level is 1..=6 (0 is reserved for the synthetic
+/// file-level node). A block node's `level` only has to stay above all of
+/// them, so `set_extents` never mistakes a block for a heading's own next
+/// sibling-or-higher heading while it scans past one on its way to the
+/// real answer. It carries no meaning beyond that.
+const BLOCK_LEVEL: u8 = 7;
+
+/// A link as written, before its target is known to exist.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawLink {
+    pub from: NodeId,
+    pub target: Target,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Target {
+    /// `[text](dest)` -- a path, resolved relative to the linking file.
+    Path(String),
+    /// `[[target]]` -- resolved by searching the corpus.
+    Wiki(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedFile {
+    /// Path as it appears on disk.
+    pub path: String,
+    /// Path with its extension removed; the `file` half of every `NodeId`.
+    pub key: String,
+    pub nodes: Vec<Node>,
+    pub containment: Vec<Edge>,
+    pub links: Vec<RawLink>,
+    /// Alternate names this file answers to when resolving wikilinks.
+    pub aliases: Vec<String>,
+}
+
+impl ParsedFile {
+    /// The node `[text](file.md)` with no fragment should land on.
+    pub fn entry_node(&self) -> Option<&Node> {
+        self.nodes.first()
+    }
+}
+```
+
+`build` is one pass over the document's flattened blocks, threading a
+heading stack that tracks the currently-open containment path. A named
+top-level code block never becomes `current` itself -- nothing nests
+inside one, so whatever content follows keeps attaching to whichever
+heading was already open, exactly the same as if the block were not
+there at all.
+
+```rust name=build path=graph/build.rs
+pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
+    let key = strip_extension(path);
+    let tags: Vec<String> = doc.frontmatter.tags().into_iter().map(str::to_string).collect();
+    let aliases = doc.frontmatter.aliases().into_iter().map(str::to_string).collect();
+
+    let mut slugger = Slugger::new();
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut containment: Vec<Edge> = Vec::new();
+    let mut links: Vec<RawLink> = Vec::new();
+    // Heading levels seen so far, as (level, id), innermost last.
+    let mut stack: Vec<(u8, NodeId)> = Vec::new();
+    let mut current: Option<NodeId> = None;
+
+    let mut visit = |block: &Block,
+                     top_level: bool,
+                     nodes: &mut Vec<Node>,
+                     containment: &mut Vec<Edge>,
+                     links: &mut Vec<RawLink>,
+                     stack: &mut Vec<(u8, NodeId)>,
+                     current: &mut Option<NodeId>| {
+        match block {
+            Block::Heading { level, inlines, line } => {
+                let title = Inline::plain(inlines).trim().to_string();
+                let id = NodeId::new(&key, slugger.assign(&title));
+
+                while stack.last().is_some_and(|(l, _)| *l >= *level) {
+                    stack.pop();
+                }
+                let parent = stack.last().map(|(_, id)| id.clone());
+                if let Some(parent) = &parent {
+                    containment.push(Edge {
+                        from: parent.clone(),
+                        to: id.clone(),
+                        kind: EdgeKind::Contains,
+                        line: 0,
+                        reciprocated: false,
+                    });
+                }
+
+                nodes.push(Node {
+                    id: id.clone(),
+                    title,
+                    file: path.to_string(),
+                    line: *line,
+                    end_line: *line,
+                    level: *level,
+                    parent,
+                    tags: tags.clone(),
+                    external: Vec::new(),
+                    resolved: true,
+                    kind: NodeKind::Heading,
+                });
+
+                // A link written in a heading is still a link. A heading is
+                // always one line, so no cursor is needed.
+                let mut cursor = *line;
+                collect_links(inlines, &id, &mut cursor, links, nodes);
+
+                stack.push((*level, id.clone()));
+                *current = Some(id);
+            }
+            Block::Paragraph { inlines, line } => {
+                let owner = match current.clone() {
+                    Some(id) => id,
+                    // Content before the first heading belongs to the file, not
+                    // to a heading that happens to come later.
+                    None => {
+                        let id = file_node(&key, path, doc, nodes, &tags);
+                        *current = Some(id.clone());
+                        stack.push((0, id.clone()));
+                        id
+                    }
+                };
+                // Line breaks advance the cursor, so a link on the third line
+                // of a paragraph reports that line rather than the paragraph's.
+                let mut cursor = *line;
+                collect_links(inlines, &owner, &mut cursor, links, nodes);
+            }
+            // Scoped to top-level, named blocks only. This exactly matches
+            // `eval::plan::top_level_blocks`'s definition (decision 19), so
+            // a node here and a block `dankg eval` can evaluate are always
+            // the same set. A block never becomes `current`. Nothing nests
+            // inside one, so later content keeps attaching to whichever
+            // heading was already open.
+            Block::Code { info, line, end_line, .. } if top_level => {
+                let Some(name) = info.name() else { return };
+                let owner = match current.clone() {
+                    Some(id) => id,
+                    None => {
+                        let id = file_node(&key, path, doc, nodes, &tags);
+                        *current = Some(id.clone());
+                        stack.push((0, id.clone()));
+                        id
+                    }
+                };
+                let block_id = NodeId::new(&key, slugger.assign(name));
+                containment.push(Edge {
+                    from: owner.clone(),
+                    to: block_id.clone(),
+                    kind: EdgeKind::Contains,
+                    line: 0,
+                    reciprocated: false,
+                });
+                nodes.push(Node {
+                    id: block_id.clone(),
+                    title: name.to_string(),
+                    file: path.to_string(),
+                    line: *line,
+                    end_line: *end_line,
+                    level: BLOCK_LEVEL,
+                    parent: Some(owner),
+                    tags: tags.clone(),
+                    external: Vec::new(),
+                    resolved: true,
+                    kind: NodeKind::Block,
+                });
+
+                // Provenance without a driver: a db= block's own
+                // inferred Produces/Reads (decision 36's write-back),
+                // materialized the moment its result marker names any.
+                // A relation belongs to a database, not a file (decision
+                // 35), so its own NodeId's "file" is the synthetic
+                // db:NAME namespace, never a path; two files' blocks
+                // naming the same relation dedupe once the whole corpus
+                // is assembled (`Graph::sort`). `doc.blocks`' own index
+                // is found by line rather than threaded through
+                // `flatten`, since every block starts on a distinct
+                // line within one document.
+                if let Some(db) = info.db() {
+                    if let Some(code_index) =
+                        doc.blocks.iter().position(|b| matches!(b, Block::Code { line: l, .. } if l == line))
+                    {
+                        let (produces, reads) = recorded_provenance(doc, code_index, name);
+                        let db_ns = format!("db:{db}");
+                        for rel in &produces {
+                            let rel_id = NodeId::new(&db_ns, rel.clone());
+                            push_relation_node(nodes, &rel_id, rel);
+                            containment.push(Edge {
+                                from: block_id.clone(),
+                                to: rel_id,
+                                kind: EdgeKind::Produces,
+                                line: 0,
+                                reciprocated: false,
+                            });
+                        }
+                        for rel in &reads {
+                            let rel_id = NodeId::new(&db_ns, rel.clone());
+                            push_relation_node(nodes, &rel_id, rel);
+                            containment.push(Edge {
+                                from: rel_id,
+                                to: block_id.clone(),
+                                kind: EdgeKind::Reads,
+                                line: 0,
+                                reciprocated: false,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    };
+
+    for (block, top_level) in flatten(&doc.blocks) {
+        visit(block, top_level, &mut nodes, &mut containment, &mut links, &mut stack, &mut current);
+    }
+
+    if nodes.is_empty() {
+        // A file with no headings and no links still needs an address.
+        file_node(&key, path, doc, &mut nodes, &tags);
+    }
+
+    set_extents(&mut nodes, line_count);
+
+    ParsedFile { path: path.to_string(), key, nodes, containment, links, aliases }
+}
+```
+
+```rust name=file_node path=graph/build.rs
+/// Create the synthetic file-level node, titled from frontmatter or the file
+/// name. Returns an existing one rather than duplicating it.
+fn file_node(
+    key: &str,
+    path: &str,
+    doc: &Document,
+    nodes: &mut Vec<Node>,
+    tags: &[String],
+) -> NodeId {
+    if let Some(existing) = nodes.first() {
+        if existing.level == 0 {
+            return existing.id.clone();
+        }
+    }
+
+    let title = doc
+        .frontmatter
+        .title()
+        .map(str::to_string)
+        .unwrap_or_else(|| file_stem(key).to_string());
+    let id = NodeId::new(key, super::slug::slugify(&title));
+
+    let node = Node {
+        id: id.clone(),
+        title,
+        file: path.to_string(),
+        line: 1,
+        end_line: 1,
+        level: 0,
+        parent: None,
+        tags: tags.to_vec(),
+        external: Vec::new(),
+        resolved: true,
+        kind: NodeKind::Heading,
+    };
+    nodes.insert(0, node);
+    id
+}
+
+/// Builds the `Relation` node for `id`, titled `title`. `level` reuses
+/// `BLOCK_LEVEL`: the same "stay above every real heading level" reasoning
+/// applies, and `set_extents` already skips every non-`Heading` node
+/// regardless. Shared by `push_relation_node` below (corpus-build time,
+/// from a block's own recorded `produces=`/`reads=`) and by `--live`'s
+/// `graph::query::live_orphans` (decision 37): a relation node is built
+/// the same way whichever of the two ever first names it.
+pub fn relation_node(id: &NodeId, title: &str) -> Node {
+    Node {
+        id: id.clone(),
+        title: title.to_string(),
+        file: id.file.clone(),
+        line: 0,
+        end_line: 0,
+        level: BLOCK_LEVEL,
+        parent: None,
+        tags: Vec::new(),
+        external: Vec::new(),
+        resolved: true,
+        kind: NodeKind::Relation,
+    }
+}
+
+/// Adds a relation node for `id`, unless one is already present -- a
+/// relation both produced and read within the same file would otherwise
+/// duplicate here even before corpus-wide dedup (`Graph::sort`) ever
+/// runs.
+fn push_relation_node(nodes: &mut Vec<Node>, id: &NodeId, title: &str) {
+    if nodes.iter().any(|n| &n.id == id) {
+        return;
+    }
+    nodes.push(relation_node(id, title));
+}
+```
+
+`set_extents` only ever touches heading nodes. A block's own `end_line`
+already came straight from the parser's fence-matching and must never be
+recomputed here, since this function's "next node at or above my level"
+formula assumes siblings-and-ancestors. That question only makes sense
+for a heading. `BLOCK_LEVEL` is what keeps the scan from ever mistaking a
+block for a heading's own next sibling while it searches *past* one on
+its way to the real answer.
+
+```rust name=set_extents path=graph/build.rs
+/// A heading owns every line up to the next heading of the same or higher
+/// level.
+/// Heading nodes only. A block's `end_line` already came straight from the
+/// parser (`Block::Code::end_line`) and must not be recomputed here, since
+/// this function's "next node at or above my level" formula assumes
+/// siblings-and-ancestors, not a leaf. `BLOCK_LEVEL` already keeps a block
+/// from ever being mistaken for a heading's own next-sibling while
+/// searching past it, so it stays in the scan on that side. It is just
+/// never assigned to on the left.
+fn set_extents(nodes: &mut [Node], line_count: u32) {
+    for i in 0..nodes.len() {
+        if nodes[i].kind != NodeKind::Heading {
+            continue;
+        }
+        let level = nodes[i].level;
+        let end = nodes[i + 1..]
+            .iter()
+            .find(|n| n.level <= level)
+            .map(|n| n.line.saturating_sub(1))
+            .unwrap_or(line_count);
+        nodes[i].end_line = end.max(nodes[i].line);
+    }
+}
+```
+
+A heading and a top-level block share one `Slugger` per file (`build`'s
+own `slugger` above). Either kind's title can in principle collide with
+the other's. In practice a block sharing its own heading's title is not
+worth reporting. It is this corpus' own idiom: every module's
+`## Tests` heading wraps a `name=tests` block. That pair can never
+reorder anyway. A block cannot precede the heading that contains it.
+`title_collisions` is scoped to headings only. Two headings *can*
+independently move, get renamed, or get deleted. That is the real risk.
+A node still gets a distinct, resolvable slug either way. But that slug
+is order-dependent. `dankg check` surfaces the risk the same advisory
+way it surfaces a stale `dankg:depends` marker. It never gates on the
+result. The file still resolves correctly exactly as written today.
+
+```rust name=title_collisions path=graph/build.rs
+/// One heading whose title collides with an earlier heading's in the
+/// same file -- the *n*-th heading to slugify to the same base slug,
+/// which is exactly the condition under which `Slugger::assign`
+/// (`graph/slug.rs`) already had to append an ordinal rather than hand
+/// back the title's own. Block nodes are deliberately excluded (see this
+/// function's own doc comment above): a block sharing its containing
+/// heading's title is this corpus' own idiom, not a reorder risk.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TitleCollision<'a> {
+    pub node: &'a Node,
+    pub first: &'a Node,
+    /// `node.parent == first.parent`: the two headings sit directly under
+    /// the same parent (or both have none, both top-level). Two siblings
+    /// sharing a title look identical to a reader scanning the one
+    /// section they are both under. Two headings nested under clearly
+    /// different parents rarely do, even though both trip the same slug
+    /// collision -- whichever surrounding section a reader is in already
+    /// disambiguates them.
+    pub sibling: bool,
+}
+
+/// Every collision among `nodes`' headings (one file's worth, in document
+/// order); block nodes are skipped entirely. Grouping by `slugify(title)`
+/// alone is enough: it is exactly the check `Slugger::assign` itself makes
+/// before deciding whether to suffix, so this never has to re-derive which
+/// ordinal a heading actually landed on.
+pub fn title_collisions(nodes: &[Node]) -> Vec<TitleCollision<'_>> {
+    let mut seen: std::collections::HashMap<String, &Node> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for node in nodes {
+        if node.kind != NodeKind::Heading {
+            continue;
+        }
+        let base = slugify(&node.title);
+        match seen.get(&base) {
+            Some(&first) => out.push(TitleCollision { node, first, sibling: node.parent == first.parent }),
+            None => {
+                seen.insert(base, node);
+            }
+        }
+    }
+    out
+}
+```
+
+`flatten` is what lets `build` see every block in document order while
+still knowing which ones sit at the true top level. Headings and
+paragraphs recurse into list items regardless. They always have. A code
+block only becomes a node when `top_level` is true. This exactly mirrors
+`eval::plan::top_level_blocks`'s own scope, so a graph node and a runnable
+block are always the same set.
+
+```rust name=flatten path=graph/build.rs
+/// Every block in document order, paired with whether it sits at the top
+/// level (`doc.blocks` itself) rather than inside a list item. Code
+/// blocks only become nodes at the top level (decision 19's scope, see
+/// `visit`'s `Block::Code` arm). Headings and paragraphs still recurse
+/// into lists regardless, unchanged from before this distinction existed.
+fn flatten(blocks: &[Block]) -> Vec<(&Block, bool)> {
+    let mut out = Vec::new();
+    push_flat(blocks, true, &mut out);
+    out
+}
+
+fn push_flat<'a>(blocks: &'a [Block], top_level: bool, out: &mut Vec<(&'a Block, bool)>) {
+    for b in blocks {
+        out.push((b, top_level));
+        if let Block::List(list) = b {
+            for item in &list.items {
+                push_flat(&item.blocks, false, out);
+            }
+        }
+    }
+}
+```
+
+```rust name=collect_links path=graph/build.rs
+fn collect_links(
+    inlines: &[Inline],
+    owner: &NodeId,
+    line: &mut u32,
+    links: &mut Vec<RawLink>,
+    nodes: &mut [Node],
+) {
+    for inline in inlines {
+        match inline {
+            Inline::Link { dest, text, .. } => {
+                if is_external(dest) {
+                    if let Some(node) = nodes.iter_mut().find(|n| &n.id == owner) {
+                        if !node.external.contains(dest) {
+                            node.external.push(dest.clone());
+                        }
+                    }
+                } else if !dest.is_empty() {
+                    links.push(RawLink {
+                        from: owner.clone(),
+                        target: Target::Path(dest.clone()),
+                        line: *line,
+                    });
+                }
+                collect_links(text, owner, line, links, nodes);
+            }
+            Inline::WikiLink { target, .. } => links.push(RawLink {
+                from: owner.clone(),
+                target: Target::Wiki(target.clone()),
+                line: *line,
+            }),
+            Inline::Emph { inner: children, .. } | Inline::Strong { inner: children, .. } => {
+                collect_links(children, owner, line, links, nodes)
+            }
+            // The parser joins a paragraph's lines with break markers, so each
+            // one is exactly one source line.
+            Inline::SoftBreak | Inline::HardBreak => *line += 1,
+            _ => {}
+        }
+    }
+}
+
+/// Absolute URLs and mail links are recorded on the node but never graphed.
+fn is_external(dest: &str) -> bool {
+    if dest.starts_with("mailto:") || dest.starts_with("//") {
+        return true;
+    }
+    match dest.find("://") {
+        Some(i) => dest[..i].chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-'),
+        None => false,
+    }
+}
+
+pub fn strip_extension(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    match normalized.rfind('.') {
+        Some(dot) if !normalized[dot..].contains('/') => normalized[..dot].to_string(),
+        _ => normalized,
+    }
+}
+
+pub fn file_stem(key: &str) -> &str {
+    key.rsplit('/').next().unwrap_or(key)
+}
+```
+
+## Tests
+
+```rust name=tests path=graph/build.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diag::Diags;
+
+    fn parse(src: &str) -> Document {
+        let mut d = Diags::new("t.md");
+        Document::parse(src, &mut d)
+    }
+
+    fn build_src(path: &str, src: &str) -> ParsedFile {
+        let doc = parse(src);
+        let lines = src.lines().count() as u32;
+        build(path, &doc, lines)
+    }
+
+    #[test]
+    fn headings_become_nodes_with_slugs() {
+        let f = build_src("notes/project.md", "# Overview\n\n## Key Features\n");
+        assert_eq!(f.key, "notes/project");
+        let ids: Vec<String> = f.nodes.iter().map(|n| n.id.to_string()).collect();
+        assert_eq!(ids, vec!["notes/project#overview", "notes/project#key-features"]);
+    }
+
+    #[test]
+    fn nesting_produces_containment_edges() {
+        let f = build_src("a.md", "# One\n\n## Two\n\n### Three\n\n## Four\n");
+        let pairs: Vec<(String, String)> = f
+            .containment
+            .iter()
+            .map(|e| (e.from.slug.clone(), e.to.slug.clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("one".to_string(), "two".to_string()),
+                ("two".to_string(), "three".to_string()),
+                ("one".to_string(), "four".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extents_run_to_the_next_sibling_or_end() {
+        let f = build_src("a.md", "# One\n\ntext\n\n## Two\n\nmore\n");
+        assert_eq!((f.nodes[0].line, f.nodes[0].end_line), (1, 7));
+        assert_eq!((f.nodes[1].line, f.nodes[1].end_line), (5, 7));
+    }
+
+    #[test]
+    fn link_lines_advance_across_a_multiline_paragraph() {
+        let f = build_src("a.md", "# One\n\nfirst [x](b.md)\nsecond [y](c.md)\nthird [z](d.md)\n");
+        let lines: Vec<u32> = f.links.iter().map(|l| l.line).collect();
+        assert_eq!(lines, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn links_written_in_a_heading_are_collected() {
+        let f = build_src("a.md", "# See [x](b.md)\n");
+        assert_eq!(f.links.len(), 1);
+        assert_eq!(f.links[0].from.slug, "see-x");
+        assert_eq!(f.links[0].line, 1);
+    }
+
+    #[test]
+    fn links_attach_to_the_enclosing_heading() {
+        let f = build_src("a.md", "# One\n\nsee [x](b.md#y)\n\n# Two\n\nsee [[z]]\n");
+        assert_eq!(f.links.len(), 2);
+        assert_eq!(f.links[0].from.slug, "one");
+        assert_eq!(f.links[0].target, Target::Path("b.md#y".into()));
+        assert_eq!(f.links[0].line, 3);
+        assert_eq!(f.links[1].from.slug, "two");
+        assert_eq!(f.links[1].target, Target::Wiki("z".into()));
+    }
+
+    #[test]
+    fn links_inside_emphasis_and_lists_are_found() {
+        let f = build_src("a.md", "# One\n\n- **[x](b.md)**\n");
+        assert_eq!(f.links.len(), 1);
+        assert_eq!(f.links[0].target, Target::Path("b.md".into()));
+    }
+
+    #[test]
+    fn external_urls_are_recorded_not_linked() {
+        let f = build_src("a.md", "# One\n\n[site](https://example.com) [m](mailto:a@b.c)\n");
+        assert!(f.links.is_empty());
+        assert_eq!(
+            f.nodes[0].external,
+            vec!["https://example.com".to_string(), "mailto:a@b.c".to_string()]
+        );
+    }
+
+    #[test]
+    fn file_without_headings_gets_a_file_level_node() {
+        let f = build_src("notes/ideas.md", "just text\n");
+        assert_eq!(f.nodes.len(), 1);
+        assert_eq!(f.nodes[0].level, 0);
+        assert_eq!(f.nodes[0].id.to_string(), "notes/ideas#ideas");
+    }
+
+    #[test]
+    fn frontmatter_title_names_the_file_level_node() {
+        let f = build_src("a.md", "---\ntitle: My Notes\n---\ntext\n");
+        assert_eq!(f.nodes[0].title, "My Notes");
+        assert_eq!(f.nodes[0].id.slug, "my-notes");
+    }
+
+    #[test]
+    fn preheading_links_belong_to_the_file_not_a_later_heading() {
+        let f = build_src("a.md", "see [x](b.md)\n\n# Later\n");
+        assert_eq!(f.links[0].from.slug, "a", "owner is the file node");
+        assert_eq!(f.nodes[0].level, 0);
+        assert_eq!(f.nodes[1].title, "Later");
+    }
+
+    #[test]
+    fn tags_are_carried_onto_every_node() {
+        let f = build_src("a.md", "---\ntags: [rust]\n---\n# One\n\n## Two\n");
+        assert!(f.nodes.iter().all(|n| n.tags == vec!["rust".to_string()]));
+    }
+
+    #[test]
+    fn duplicate_headings_get_distinct_slugs() {
+        let f = build_src("a.md", "# Notes\n\n# Notes\n");
+        assert_eq!(f.nodes[0].id.slug, "notes");
+        assert_eq!(f.nodes[1].id.slug, "notes-1");
+    }
+
+    #[test]
+    fn duplicate_headings_are_reported_as_title_collisions() {
+        let f = build_src("a.md", "# Notes\n\n# Notes\n");
+        let collisions = title_collisions(&f.nodes);
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0].node.id.slug, "notes-1");
+        assert_eq!(collisions[0].first.id.slug, "notes");
+    }
+
+    #[test]
+    fn two_top_level_headings_with_no_parent_are_siblings() {
+        let f = build_src("a.md", "# Notes\n\n# Notes\n");
+        let collisions = title_collisions(&f.nodes);
+        assert!(collisions[0].sibling, "both have no parent, so both are alike");
+    }
+
+    #[test]
+    fn two_headings_under_different_parents_are_not_siblings() {
+        let f = build_src(
+            "a.md",
+            "# Section A\n\n## Notes\n\ntext\n\n# Section B\n\n## Notes\n\ntext\n",
+        );
+        let collisions = title_collisions(&f.nodes);
+        assert_eq!(collisions.len(), 1);
+        assert!(!collisions[0].sibling, "each Notes has a different Section as its parent");
+    }
+
+    #[test]
+    fn two_headings_under_the_same_parent_are_siblings() {
+        let f = build_src("a.md", "# Section\n\n## Notes\n\ntext\n\n## Notes\n\ntext\n");
+        let collisions = title_collisions(&f.nodes);
+        assert_eq!(collisions.len(), 1);
+        assert!(collisions[0].sibling, "both Notes share the same Section parent");
+    }
+
+    #[test]
+    fn distinct_titles_report_no_collisions() {
+        let f = build_src("a.md", "# One\n\n## Two\n");
+        assert!(title_collisions(&f.nodes).is_empty());
+    }
+
+    #[test]
+    fn a_third_repeat_still_reports_against_the_first_not_the_second() {
+        let f = build_src("a.md", "# Notes\n\n# Notes\n\n# Notes\n");
+        let collisions = title_collisions(&f.nodes);
+        assert_eq!(collisions.len(), 2);
+        assert!(collisions.iter().all(|c| c.first.id.slug == "notes"));
+    }
+
+    #[test]
+    fn a_block_sharing_its_own_headings_title_is_not_reported() {
+        // This corpus' own idiom (every module's `## Tests` heading wraps a
+        // `name=tests` block). The pair can never actually reorder -- a
+        // block cannot precede the heading that contains it -- so it is
+        // deliberately excluded, unlike two independent headings.
+        let f = build_src("a.md", "# Setup\n\n```sh name=Setup\n:\n```\n");
+        assert!(title_collisions(&f.nodes).is_empty());
+    }
+
+    #[test]
+    fn a_named_block_becomes_a_node_contained_by_its_heading() {
+        let f = build_src("a.md", "# One\n\n```sh name=setup\necho hi\n```\n");
+        let block = f.nodes.iter().find(|n| n.id.slug == "setup").expect("block node exists");
+        assert_eq!(block.kind, NodeKind::Block);
+        assert_eq!(block.title, "setup");
+        assert_eq!(block.parent.as_ref().map(|p| p.slug.as_str()), Some("one"));
+        assert_eq!((block.line, block.end_line), (3, 5));
+        assert!(
+            f.containment.iter().any(|e| e.to.slug == "setup" && e.from.slug == "one" && e.kind == EdgeKind::Contains),
+            "{:?}",
+            f.containment
+        );
+    }
+
+    #[test]
+    fn an_unnamed_block_is_not_a_node() {
+        let f = build_src("a.md", "# One\n\n```sh\necho hi\n```\n");
+        assert!(f.nodes.iter().all(|n| n.kind == NodeKind::Heading));
+    }
+
+    #[test]
+    fn a_block_nested_in_a_list_is_not_a_node() {
+        // Matches eval::plan's own scope (decision 19). A block only
+        // becomes a node at the top level, and only eval can evaluate it
+        // there.
+        let f = build_src("a.md", "# One\n\n- ```sh name=hidden\n  echo hi\n  ```\n");
+        assert!(f.nodes.iter().all(|n| n.id.slug != "hidden"));
+    }
+
+    #[test]
+    fn a_block_before_any_heading_attaches_to_the_file_level_node() {
+        let f = build_src("notes/a.md", "```sh name=setup\n:\n```\n\n# One\n");
+        let block = f.nodes.iter().find(|n| n.id.slug == "setup").expect("block node exists");
+        let file_node = f.nodes.iter().find(|n| n.level == 0).expect("a file-level node was created");
+        assert_eq!(block.parent.as_ref(), Some(&file_node.id));
+    }
+
+    #[test]
+    fn a_blocks_own_end_line_is_not_recomputed_as_a_heading_extent_would_be() {
+        // "One" would otherwise look like it ends right before "setup" if
+        // set_extents mistook the block for a next-sibling-or-higher node.
+        // It must run to "Two" instead. The block must keep its own
+        // fence-derived end_line untouched.
+        let f = build_src("a.md", "# One\n\n```sh name=setup\nline2\nline3\n```\n\n# Two\n");
+        let one = f.nodes.iter().find(|n| n.id.slug == "one").unwrap();
+        let setup = f.nodes.iter().find(|n| n.id.slug == "setup").unwrap();
+        assert_eq!(one.end_line, 7, "One's extent runs up to Two, past the block");
+        assert_eq!((setup.line, setup.end_line), (3, 6), "the block keeps its own fence extent");
+    }
+
+    #[test]
+    fn a_block_name_colliding_with_a_heading_slug_gets_a_distinct_slug() {
+        let f = build_src("a.md", "# Setup\n\n```sh name=Setup\n:\n```\n");
+        let slugs: Vec<&str> = f.nodes.iter().map(|n| n.id.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["setup", "setup-1"], "{slugs:?}");
+    }
+
+    #[test]
+    fn two_blocks_in_different_sections_attach_to_their_own_heading() {
+        let f = build_src(
+            "a.md",
+            "# One\n\n```sh name=a\n:\n```\n\n# Two\n\n```sh name=b\n:\n```\n",
+        );
+        let a = f.nodes.iter().find(|n| n.id.slug == "a").unwrap();
+        let b = f.nodes.iter().find(|n| n.id.slug == "b").unwrap();
+        assert_eq!(a.parent.as_ref().unwrap().slug, "one");
+        assert_eq!(b.parent.as_ref().unwrap().slug, "two");
+    }
+
+    #[test]
+    fn a_db_blocks_produces_marker_becomes_a_relation_node_and_edge() {
+        let f = build_src(
+            "a.md",
+            "```sql db=warehouse name=setup\n:\n```\n\n<!-- dankg:result name=setup hash=0000000000000001 produces=orders -->\n\n```\nok\n```\n",
+        );
+        let relation = f.nodes.iter().find(|n| n.kind == NodeKind::Relation).expect("relation node exists");
+        assert_eq!(relation.id, NodeId::new("db:warehouse", "orders"));
+        let block = f.nodes.iter().find(|n| n.id.slug == "setup").unwrap();
+        assert!(
+            f.containment.iter().any(|e| e.from == block.id && e.to == relation.id && e.kind == EdgeKind::Produces),
+            "{:?}",
+            f.containment
+        );
+    }
+
+    #[test]
+    fn a_db_blocks_reads_marker_becomes_a_relation_node_and_reverse_edge() {
+        let f = build_src(
+            "a.md",
+            "```sql db=warehouse name=report\n:\n```\n\n<!-- dankg:result name=report hash=0000000000000001 reads=orders -->\n\n```\nok\n```\n",
+        );
+        let relation = f.nodes.iter().find(|n| n.kind == NodeKind::Relation).expect("relation node exists");
+        let block = f.nodes.iter().find(|n| n.id.slug == "report").unwrap();
+        assert!(
+            f.containment.iter().any(|e| e.from == relation.id && e.to == block.id && e.kind == EdgeKind::Reads),
+            "{:?}",
+            f.containment
+        );
+    }
+
+    #[test]
+    fn a_block_with_no_db_never_gets_a_relation_even_with_a_produces_marker() {
+        // Cannot happen through real write-back (only a db= block's own
+        // run infers produces=/reads=), but graph::build should not
+        // crash or invent a namespace for a block that names no database.
+        let f = build_src(
+            "a.md",
+            "```sh name=setup\n:\n```\n\n<!-- dankg:result name=setup hash=0000000000000001 produces=orders -->\n\n```\nok\n```\n",
+        );
+        assert!(f.nodes.iter().all(|n| n.kind != NodeKind::Relation));
+    }
+
+    #[test]
+    fn two_blocks_producing_and_reading_the_same_relation_share_one_node() {
+        let f = build_src(
+            "a.md",
+            "```sql db=warehouse name=setup\n:\n```\n\n<!-- dankg:result name=setup hash=0000000000000001 produces=orders -->\n\n```\nok\n```\n\n```sql db=warehouse name=report\n:\n```\n\n<!-- dankg:result name=report hash=0000000000000001 reads=orders -->\n\n```\nok\n```\n",
+        );
+        assert_eq!(f.nodes.iter().filter(|n| n.kind == NodeKind::Relation).count(), 1);
+    }
+}
+```
