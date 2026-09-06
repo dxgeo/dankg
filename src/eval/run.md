@@ -223,7 +223,7 @@ fn read_to_channel(stream: Option<impl Read + Send + 'static>) -> mpsc::Receiver
 }
 ```
 
-The whole reason `kill_tree` shells out to `kill -KILL` rather than
+The whole reason `kill_tree` signals the negated pgid rather than
 calling `Child::kill`: a timed-out shell script's own child (`sleep`,
 say) is not `run`'s direct child. Killing only the process this crate
 spawned would leave that grandchild orphaned and still holding the
@@ -231,7 +231,34 @@ output pipes open. The reader threads above would then block until it
 exits on its own, silently defeating the timeout this function exists
 to enforce.
 
+This used to shell out to the `kill` binary (`kill -KILL -{pgid}`)
+instead of calling the syscall directly, on the theory that `std`
+exposes no binding for it and decision 1 rules out the `libc` crate.
+That theory missed that `src/tui/term.md` had already crossed this
+bridge for `ioctl`/`tcsetattr`: decision 1 only rules out a *crate*, not
+a hand-declared `extern "C"` binding, since `std` already links the
+platform libc on macOS and Linux. The shelled-out form also turned out
+to be outright broken on Linux: CI's `kill -KILL -{pgid}` reported exit
+status 0 on every run, yet a `ps` snapshot taken 50ms later still showed
+both the shell and its `sleep` grandchild alive and running, so every
+timeout test wall-clock-bounded to the full untimed duration instead of
+the requested one. The name-form signal flag (`-KILL`) immediately
+followed by another dash-prefixed argument (the negated pgid) is
+apparently enough to confuse that binary's argument parser into
+reporting success without a syscall behind it. Calling `kill(2)`
+directly sidesteps that parser altogether: no argv to misread, no `PATH`
+lookup, no child process to spawn only to shell one out a second time
+via the platform's C library.
+
 ```rust name=kill_tree_and_wait path=eval/run.rs
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
 /// Kills `child` and, on Unix, everything it spawned. `Child::kill`
 /// alone only reaches the one process it names. If that process is a
 /// shell running `sleep 5` as an external command, killing the shell
@@ -241,28 +268,16 @@ to enforce.
 /// call. Spawning with `process_group(0)` above made this child the
 /// leader of its own process group (pgid == its own pid), so signalling
 /// the negated pid reaches that whole group in one call. `Child::kill`
-/// has no equivalent, so this shells out to `kill` rather than
-/// inventing a raw syscall wrapper std does not expose. Not available
-/// off Unix. A lone `Child::kill` there is a documented gap rather than
-/// a blocked feature, the same call made for the TUI's termios
-/// (architecture.md, Terminal UI).
+/// has no equivalent, so this calls `kill(2)` directly, the same way
+/// the TUI's termios binding talks to the platform C library
+/// (architecture.md, Terminal UI). Not available off Unix. A lone
+/// `Child::kill` there is a documented gap rather than a blocked
+/// feature.
 fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
-        let pgid = child.id();
-        let before = Command::new("ps").arg("-eo").arg("pid,ppid,pgid,stat,comm").output();
-        eprintln!(
-            "DEBUG before kill: pgid={pgid}\n{}",
-            before.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
-        );
-        let result = Command::new("kill").arg("-KILL").arg(format!("-{pgid}")).status();
-        eprintln!("DEBUG kill_tree: pgid={pgid} result={result:?}");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let after = Command::new("ps").arg("-eo").arg("pid,ppid,pgid,stat,comm").output();
-        eprintln!(
-            "DEBUG after kill:\n{}",
-            after.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
-        );
+        let pgid = child.id() as i32;
+        unsafe { kill(-pgid, SIGKILL) };
     }
     #[cfg(not(unix))]
     {
