@@ -215,8 +215,19 @@ fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
         let pgid = child.id();
+        let before = Command::new("ps").arg("-eo").arg("pid,ppid,pgid,stat,comm").output();
+        eprintln!(
+            "DEBUG before kill: pgid={pgid}\n{}",
+            before.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+        );
         let result = Command::new("kill").arg("-KILL").arg(format!("-{pgid}")).status();
         eprintln!("DEBUG kill_tree: pgid={pgid} result={result:?}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let after = Command::new("ps").arg("-eo").arg("pid,ppid,pgid,stat,comm").output();
+        eprintln!(
+            "DEBUG after kill:\n{}",
+            after.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+        );
     }
     #[cfg(not(unix))]
     {
