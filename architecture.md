@@ -1261,11 +1261,23 @@ binary, not by the unit tests alone, and is now pinned by one that
 asserts wall-clock time rather than only the `timed_out` flag. The fix
 spawns into a fresh process group (pgid equal to its own pid) and
 kills the negated pid on timeout, reaching the whole group in one
-signal. std has no group-kill of its own, so this shells out to the
-system `kill` rather than hand-rolling the syscall. Unix only, the
-same kind of documented gap as the TUI's termios (decision 3's
-precedent). Off Unix, a lone `Child::kill` is used instead, which
-cannot reach a grandchild.
+signal. This calls `kill(2)` directly, via a hand-declared
+`extern "C"` binding -- the same precedent the TUI's termios binding
+already set, since decision 1 rules out the `libc` crate, not a raw
+syscall declared by hand.
+
+It shelled out to the system `kill` binary first instead, on the
+mistaken read that decision 1 ruled out both. That form was also
+broken on Linux: CI's `kill -KILL -{pgid}` reported success on every
+run, yet a `ps` snapshot taken 50ms later still showed the whole group
+alive. `-KILL` immediately followed by another dash-prefixed argument
+appears to confuse that binary's own argument parser. Calling the
+syscall directly removes the parser, and the external process, from
+the picture entirely.
+
+Unix only, the same kind of documented gap as the TUI's termios
+(decision 3's precedent). Off Unix, a lone `Child::kill` is used
+instead, which cannot reach a grandchild.
 
 ## Results
 
