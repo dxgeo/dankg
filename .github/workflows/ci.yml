@@ -37,6 +37,14 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      # DEBUG, throwaway: confirms the SIGWINCH/poll resize redraw
+      # actually works on a real Linux pty, not just the macOS one this
+      # was developed and manually verified against. Deleted once
+      # confirmed.
+      - name: DEBUG resize check (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/ci_pty_resize_check.py
+
       # `fmt`, unlike `graph`/`check`/`tangle`, never walks a directory --
       # it takes an explicit file list (see README's own `dankg fmt
       # notes/*.md` example). The list comes from `dankg graph`'s own
