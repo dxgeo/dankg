@@ -455,6 +455,7 @@ fn help_lines(keys: &Keymap) -> Vec<String> {
         format!("  {}                  cycle the selected node's named blocks; enter runs it", keys.eval),
         format!("  {}                  collapse back to the entry view", keys.reset),
         format!("  {}                  quit", keys.quit),
+        format!("  {}                  toggle the origin breadcrumb (status line, panel focus only)", keys.breadcrumb),
         String::new(),
         "  ?                  toggle this help".to_string(),
         String::new(),
@@ -1958,6 +1959,15 @@ mod tests {
         let keys = Keymap { eval: 'x', ..Keymap::default() };
         let lines = help_lines(&keys);
         assert!(lines.iter().any(|l| l.trim_start().starts_with("x ")), "{lines:?}");
+    }
+
+    #[test]
+    fn help_lines_include_the_breadcrumb_key() {
+        let lines = help_lines(&Keymap::default());
+        assert!(
+            lines.iter().any(|l| l.trim_start().starts_with("b ") && l.contains("breadcrumb")),
+            "{lines:?}"
+        );
     }
 
     #[test]

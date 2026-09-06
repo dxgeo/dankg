@@ -105,6 +105,7 @@ Keys:
 - `/` — jump to a node by title, anywhere in the corpus; `n`/`p` repeat it forward/backward
 - `e` then `enter` — cycle and run a node's named code blocks in place
 - `r` — reset
+- `b` — toggle the origin breadcrumb (status line, while the panel has focus)
 - `q` — quit
 - `?` — full keybinding reference
 

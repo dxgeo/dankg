@@ -731,6 +731,7 @@ src/tui/
 - `esc`: cancel an in-progress block cycle or an in-progress search; return focus from the panel to the tree.
 - `r`: collapse back to the entry view
 - `q`: quit, restoring the terminal
+- `b`: toggle the origin breadcrumb on the status line (see *Origin breadcrumb*, below)
 - `?`: toggle a full-screen keybinding reference
 
 Movement follows the flattened list of currently-visible tree rows, so
@@ -780,17 +781,39 @@ it stale. `esc` cancels it explicitly, without moving anything.
 
 ### The status line
 
-One row, reserved at the bottom of the viewport whenever `app.status` is
-`Some`, so the graph's own content never has to reflow around it. `render`
-computes `content_rows = term_rows - 1` up front and windows the graph into
-that, the same fixed-upper-bound reasoning as everywhere else column/row
-budgets get clamped in this module. It shows the block-cycle list while
-cycling (`eval: [setup] index   enter=run esc=cancel`, the cycled name
-bracketed) and the last run's outcome afterward (`index: ok`, `index: failed`, `index: timed out`, or the error text for something that could not
-even be attempted, such as an unconfigured language). `reload`, which a
-completed run always triggers since the file just changed, leaves
-`status` alone on purpose. The reader just ran the block. Reloading is not
-itself a reason to hide what happened.
+One row, reserved at the bottom of the viewport whenever something
+claims it: `app.status`, the `/query` typed so far while `app.search`
+is active, or the origin breadcrumb (below). `render` computes
+`content_rows = term_rows - status_rows` up front (`status_rows` is 0
+or 1, never more, since only one claim is ever shown at a time) and
+windows the graph into that, the same fixed-upper-bound reasoning as
+everywhere else column/row budgets get clamped in this module. Search
+outranks status, which outranks the breadcrumb -- the two the reader
+is actively acting on always win the one shared line. It shows the
+block-cycle list while cycling
+(`eval: [setup] index   enter=run esc=cancel`, the cycled name
+bracketed) and the last run's outcome afterward (`index: ok`,
+`index: failed`, `index: timed out`, or the error text for something
+that could not even be attempted, such as an unconfigured language).
+`reload`, which a completed run always triggers since the file just
+changed, leaves `status` alone on purpose. The reader just ran the
+block. Reloading is not itself a reason to hide what happened.
+
+### Origin breadcrumb
+
+While the panel has focus, hovering a link moves the tree's own
+underlined row onto that link's target (*Jump and default depth*,
+below), so `self.selected` -- the node the reader tabbed away from to
+start exploring links in the first place -- ends up with no marker
+anywhere on screen. A reader who hovers a second link has already lost
+track of where they started. `keys.breadcrumb` (`b`, default) toggles
+a status-line breadcrumb, `self.selected`'s own title, for the running
+session. `[tui] breadcrumb` (default `true`) sets whether it starts on
+at all; the key still overrides that default for the session either
+way. It only ever shows while the panel has focus and only when
+neither the search prompt nor an eval outcome already claims the
+line -- both are the reader's own immediate action, so neither should
+have to compete with a breadcrumb for the one row they share.
 
 ### Block nodes and the cycle key, side by side
 
