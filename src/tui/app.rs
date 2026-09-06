@@ -173,6 +173,16 @@ struct App {
     /// dismissers (`?`, esc, `keys.quit`) is swallowed rather than
     /// reaching the tree/panel underneath.
     help: bool,
+    /// `[tui] breadcrumb`'s resolved value at load, then `keys.breadcrumb`'s
+    /// own toggle from then on. While the panel has focus and this is
+    /// `true`, `render` shows `self.selected`'s own title on the status
+    /// line, unless a search or an eval outcome already claims that line.
+    /// This exists because the tree's own underlined row moves to whatever
+    /// panel row is being hovered (`App::preview_target`) while the panel
+    /// has focus. Without it, the origin the reader tabbed away from has
+    /// no marker at all once they start exploring links elsewhere in the
+    /// tree.
+    breadcrumb: bool,
     diags: Diags,
 }
 
@@ -195,6 +205,12 @@ pub fn run(paths: &[String], cache: bool, depth: Option<u32>, all: bool) -> Resu
     result.map_err(|e| e.to_string())
 }
 
+/// How often a wait for the next key checks in on a resize when
+/// nothing has been typed. Short enough that a resize feels immediate;
+/// `recv`-style waits like this one sleep rather than spin, so an idle
+/// TUI still costs nothing between ticks.
+const RESIZE_POLL_MS: i32 = 100;
+
 fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Write) -> io::Result<()> {
     render(app, out)?;
     // Carries a byte `input::read_key` read but could not yet use (only
@@ -203,7 +219,14 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
     // vanishing.
     let mut pending = Vec::new();
     loop {
-        let key = input::read_key(io::stdin(), &mut pending)?;
+        let key = loop {
+            if input::decode(&pending).is_some() || term::stdin_ready(RESIZE_POLL_MS) {
+                break input::read_key(io::stdin(), &mut pending)?;
+            }
+            if term::take_resized() {
+                render(app, out)?;
+            }
+        };
 
         // Fully modal: every other key is swallowed here rather than
         // reaching the match below. This way, nothing about the tree,
@@ -232,7 +255,8 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
         }
 
         // Panel-focused: up/down move its own cursor, enter jumps, left
-        // or esc return focus to the tree without acting.
+        // or esc return focus to the tree without acting. keys.breadcrumb
+        // still works here too -- this is exactly the state it exists for.
         if app.focus == Focus::Panel {
             match key {
                 input::Key::Char('?') => app.toggle_help(),
@@ -243,6 +267,7 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
                 input::Key::Char(c) if c == app.keys.down => app.down(),
                 input::Key::Char(c) if c == app.keys.left => app.cancel_panel_focus(),
                 input::Key::Char(c) if c == app.keys.quit => return Ok(()),
+                input::Key::Char(c) if c == app.keys.breadcrumb => app.toggle_breadcrumb(),
                 input::Key::Enter => app.confirm_panel_row(),
                 input::Key::Tab => app.toggle_focus(),
                 _ => {}
@@ -298,6 +323,7 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
             }
             input::Key::Char(c) if c == app.keys.reset => app.reset_selection(),
             input::Key::Char(c) if c == app.keys.eval => app.eval_key(),
+            input::Key::Char(c) if c == app.keys.breadcrumb => app.toggle_breadcrumb(),
             input::Key::Tab => {
                 app.clear_transient();
                 app.toggle_focus();
@@ -417,9 +443,15 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         return write_frame(out, &clipped, term_rows);
     }
 
-    // One row reserved at the bottom for `app.status`, or the `/query`
-    // typed so far while `app.search` is active.
-    let status_rows = usize::from(app.status.is_some() || app.search.is_some());
+    // The breadcrumb only ever claims the status line when nothing more
+    // urgent already does (search, then an eval outcome), and only while
+    // the panel has focus -- see *Origin breadcrumb* above.
+    let breadcrumb_line = (app.focus == Focus::Panel && app.breadcrumb && app.status.is_none() && app.search.is_none())
+        .then(|| app.index.node(&app.selected).map(|n| n.title.clone()).unwrap_or_else(|| app.selected.to_string()));
+
+    // One row reserved at the bottom for `app.status`, the `/query` typed
+    // so far while `app.search` is active, or the origin breadcrumb.
+    let status_rows = usize::from(app.status.is_some() || app.search.is_some() || breadcrumb_line.is_some());
     let content_rows = term_rows.saturating_sub(status_rows).max(1);
     let panel_cols = draw::panel_width(term_cols);
     let tree_cols = term_cols.saturating_sub(panel_cols + 1).max(1);
@@ -485,6 +517,8 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         lines.push(format!("/{query}").chars().take(term_cols).collect());
     } else if let Some(status) = &app.status {
         lines.push(status.chars().take(term_cols).collect());
+    } else if let Some(title) = &breadcrumb_line {
+        lines.push(format!("from: {title}").chars().take(term_cols).collect());
     }
     write_frame(out, &lines, term_rows)
 }
@@ -652,7 +686,8 @@ fn resolve_entry_roots(
 
 impl App {
     fn load(paths: &[String], cache: bool, depth: Option<u32>, all: bool) -> Result<App, String> {
-        let (root, config, keys, index, default_depth, entries, diags) = build(paths, cache)?;
+        let (root, config, keys, index, default_depth, entries, mut diags) = build(paths, cache)?;
+        let breadcrumb = config.tui_breadcrumb(&mut diags);
         let (children, roots) = build_children(&index);
         if roots.is_empty() {
             return Err("nothing to draw: the index is empty".to_string());
@@ -685,6 +720,7 @@ impl App {
             last_search: None,
             status: None,
             help: false,
+            breadcrumb,
             diags,
         })
     }
@@ -1059,6 +1095,13 @@ impl App {
     fn toggle_help(&mut self) {
         self.help = !self.help;
     }
+
+    /// `keys.breadcrumb`: on or off for the running session, regardless of
+    /// `[tui] breadcrumb`'s own default. Not touched by `reload`, the same
+    /// as `help` -- a reader's own runtime preference, not corpus state.
+    fn toggle_breadcrumb(&mut self) {
+        self.breadcrumb = !self.breadcrumb;
+    }
 }
 
 #[cfg(test)]
@@ -1094,6 +1137,7 @@ impl App {
             last_search: None,
             status: None,
             help: false,
+            breadcrumb: true,
             diags: Diags::new("test"),
         }
     }
@@ -1742,6 +1786,72 @@ mod tests {
         render(&mut a, &mut sink).unwrap();
         let out = String::from_utf8(sink).unwrap();
         assert!(out.contains("\x1b[7m"), "the focused panel row should be reverse video: {out:?}");
-        assert!(out.contains("\x1b[2m"), "the tree's own remembered row should be faint: {out:?}");
+        assert!(out.contains("\x1b[4m"), "the tree's own remembered row should be underlined: {out:?}");
+    }
+
+    #[test]
+    fn toggle_breadcrumb_flips_the_flag() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        assert!(a.breadcrumb, "on by default");
+        a.toggle_breadcrumb();
+        assert!(!a.breadcrumb);
+        a.toggle_breadcrumb();
+        assert!(a.breadcrumb);
+    }
+
+    #[test]
+    fn render_shows_the_origin_breadcrumb_while_previewing_a_different_node_in_the_panel() {
+        let mut a = app(&[("a.md", "# One\n\n[to two](b.md#two)\n"), ("b.md", "# Two\n")]);
+        a.toggle_focus(); // panel now has focus, its cursor already on the one link to "Two"
+        let mut sink = Vec::new();
+        render(&mut a, &mut sink).unwrap();
+        let out = String::from_utf8(sink).unwrap();
+        assert!(out.contains("from: One"), "the origin's own title should reach the status line: {out:?}");
+    }
+
+    #[test]
+    fn render_omits_the_breadcrumb_while_the_tree_has_focus() {
+        let mut a = app(&[("a.md", "# One\n\n[to two](b.md#two)\n"), ("b.md", "# Two\n")]);
+        // Focus stays on the tree: self.selected is already the row shown
+        // current, so there is nothing for a breadcrumb to add.
+        let mut sink = Vec::new();
+        render(&mut a, &mut sink).unwrap();
+        let out = String::from_utf8(sink).unwrap();
+        assert!(!out.contains("from: One"), "{out:?}");
+    }
+
+    #[test]
+    fn render_omits_the_breadcrumb_once_toggled_off() {
+        let mut a = app(&[("a.md", "# One\n\n[to two](b.md#two)\n"), ("b.md", "# Two\n")]);
+        a.toggle_focus();
+        a.toggle_breadcrumb();
+        let mut sink = Vec::new();
+        render(&mut a, &mut sink).unwrap();
+        let out = String::from_utf8(sink).unwrap();
+        assert!(!out.contains("from: One"), "{out:?}");
+    }
+
+    #[test]
+    fn render_prefers_an_eval_status_over_the_breadcrumb() {
+        let mut a = app(&[("a.md", "# One\n\n[to two](b.md#two)\n"), ("b.md", "# Two\n")]);
+        a.toggle_focus();
+        a.status = Some("x: ok".to_string());
+        let mut sink = Vec::new();
+        render(&mut a, &mut sink).unwrap();
+        let out = String::from_utf8(sink).unwrap();
+        assert!(out.contains("x: ok"), "{out:?}");
+        assert!(!out.contains("from: One"), "the status message should win the shared line: {out:?}");
+    }
+
+    #[test]
+    fn render_prefers_the_search_prompt_over_the_breadcrumb() {
+        let mut a = app(&[("a.md", "# One\n\n[to two](b.md#two)\n"), ("b.md", "# Two\n")]);
+        a.toggle_focus();
+        a.start_search();
+        let mut sink = Vec::new();
+        render(&mut a, &mut sink).unwrap();
+        let out = String::from_utf8(sink).unwrap();
+        assert!(out.contains("/"), "{out:?}");
+        assert!(!out.contains("from: One"), "the search prompt should win the shared line: {out:?}");
     }
 }

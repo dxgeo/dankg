@@ -26,9 +26,10 @@ pub struct Drawing {
     /// At most one row across a whole frame.
     pub current: Vec<Vec<bool>>,
     /// Same dimensions as `grid`. `true` marks the *other* pane's own
-    /// last-remembered row: faint, so switching focus back and forth
-    /// never loses track of where it was.
-    pub dim: Vec<Vec<bool>>,
+    /// last-remembered row: underlined, so switching focus back and
+    /// forth never loses track of where it was, without inverting or
+    /// otherwise altering the row's own text the way `current` does.
+    pub secondary: Vec<Vec<bool>>,
 }
 
 /// Which attribute [`mark_row`] applies.
@@ -47,7 +48,7 @@ pub fn render_lines(grid: &Grid) -> Vec<String> {
 pub fn mark_row(drawing: &mut Drawing, row: usize, col_start: usize, width: usize, style: RowStyle) {
     let target = match style {
         RowStyle::Current => &mut drawing.current,
-        RowStyle::Secondary => &mut drawing.dim,
+        RowStyle::Secondary => &mut drawing.secondary,
     };
     let Some(row_flags) = target.get_mut(row) else { return };
     let end = (col_start + width).min(row_flags.len());
@@ -60,20 +61,20 @@ pub fn mark_row(drawing: &mut Drawing, row: usize, col_start: usize, width: usiz
 }
 
 /// [`Drawing::current`] wrapped in reverse video (`\x1b[7m`...`\x1b[27m`)
-/// and [`Drawing::dim`] wrapped in "faint" (`\x1b[2m`...`\x1b[22m`), each
-/// tracked as its own run across a row so either attribute can start or
-/// end independently of the other.
+/// and [`Drawing::secondary`] wrapped in underline (`\x1b[4m`...`\x1b[24m`),
+/// each tracked as its own run across a row so either attribute can
+/// start or end independently of the other.
 pub fn render_ansi(drawing: &Drawing) -> Vec<String> {
     drawing
         .grid
         .iter()
         .zip(&drawing.current)
-        .zip(&drawing.dim)
-        .map(|((row, current_row), dim_row)| {
+        .zip(&drawing.secondary)
+        .map(|((row, current_row), secondary_row)| {
             let mut out = String::new();
             let mut current = false;
-            let mut dimming = false;
-            for ((&ch, &cur), &dim) in row.iter().zip(current_row).zip(dim_row) {
+            let mut underlined = false;
+            for ((&ch, &cur), &sec) in row.iter().zip(current_row).zip(secondary_row) {
                 if cur && !current {
                     out.push_str("\x1b[7m");
                     current = true;
@@ -81,20 +82,20 @@ pub fn render_ansi(drawing: &Drawing) -> Vec<String> {
                     out.push_str("\x1b[27m");
                     current = false;
                 }
-                if dim && !dimming {
-                    out.push_str("\x1b[2m");
-                    dimming = true;
-                } else if !dim && dimming {
-                    out.push_str("\x1b[22m");
-                    dimming = false;
+                if sec && !underlined {
+                    out.push_str("\x1b[4m");
+                    underlined = true;
+                } else if !sec && underlined {
+                    out.push_str("\x1b[24m");
+                    underlined = false;
                 }
                 out.push(ch);
             }
             if current {
                 out.push_str("\x1b[27m");
             }
-            if dimming {
-                out.push_str("\x1b[22m");
+            if underlined {
+                out.push_str("\x1b[24m");
             }
             out
         })
@@ -111,7 +112,7 @@ pub fn window(drawing: &Drawing, row: usize, col: usize, rows: usize, cols: usiz
     Drawing {
         grid: drawing.grid.iter().skip(row).take(rows).map(|l| clip_ch(l)).collect(),
         current: drawing.current.iter().skip(row).take(rows).map(|l| clip_flag(l)).collect(),
-        dim: drawing.dim.iter().skip(row).take(rows).map(|l| clip_flag(l)).collect(),
+        secondary: drawing.secondary.iter().skip(row).take(rows).map(|l| clip_flag(l)).collect(),
     }
 }
 
@@ -200,7 +201,7 @@ pub fn pane_grid(lines: &[String], cols: usize) -> Drawing {
         })
         .collect();
     let flags = vec![vec![false; cols]; grid.len()];
-    Drawing { grid, current: flags.clone(), dim: flags }
+    Drawing { grid, current: flags.clone(), secondary: flags }
 }
 
 /// Horizontally joins two already-[`window`]ed panes, both already
@@ -213,17 +214,17 @@ pub fn compose(tree: &Drawing, panel: &Drawing, rows: usize, tree_cols: usize, p
     let blank = |cols: usize| (vec![' '; cols], vec![false; cols], vec![false; cols]);
     let mut grid = Vec::with_capacity(rows);
     let mut current = Vec::with_capacity(rows);
-    let mut dim = Vec::with_capacity(rows);
+    let mut secondary = Vec::with_capacity(rows);
     for i in 0..rows {
-        let (t_row, t_cur, t_dim) = tree
+        let (t_row, t_cur, t_sec) = tree
             .grid
             .get(i)
-            .map(|g| (g.clone(), tree.current[i].clone(), tree.dim[i].clone()))
+            .map(|g| (g.clone(), tree.current[i].clone(), tree.secondary[i].clone()))
             .unwrap_or_else(|| blank(tree_cols));
-        let (p_row, p_cur, p_dim) = panel
+        let (p_row, p_cur, p_sec) = panel
             .grid
             .get(i)
-            .map(|g| (g.clone(), panel.current[i].clone(), panel.dim[i].clone()))
+            .map(|g| (g.clone(), panel.current[i].clone(), panel.secondary[i].clone()))
             .unwrap_or_else(|| blank(panel_cols));
 
         let mut row = t_row;
@@ -236,12 +237,12 @@ pub fn compose(tree: &Drawing, panel: &Drawing, rows: usize, tree_cols: usize, p
         cur.extend(p_cur);
         current.push(cur);
 
-        let mut d = t_dim;
-        d.push(false);
-        d.extend(p_dim);
-        dim.push(d);
+        let mut sec = t_sec;
+        sec.push(false);
+        sec.extend(p_sec);
+        secondary.push(sec);
     }
-    Drawing { grid, current, dim }
+    Drawing { grid, current, secondary }
 }
 
 #[cfg(test)]
@@ -253,7 +254,7 @@ mod tests {
         let drawing = Drawing {
             grid: vec![vec!['a', 'b', 'c'], vec!['d', 'e', 'f'], vec!['g', 'h', 'i']],
             current: vec![vec![false; 3]; 3],
-            dim: vec![vec![false; 3]; 3],
+            secondary: vec![vec![false; 3]; 3],
         };
         let w = window(&drawing, 1, 1, 2, 2);
         assert_eq!(render_lines(&w.grid), vec!["ef".to_string(), "hi".to_string()]);
@@ -261,7 +262,7 @@ mod tests {
 
     #[test]
     fn window_past_the_grids_edge_yields_fewer_rows_and_columns_not_padding() {
-        let drawing = Drawing { grid: vec![vec!['a', 'b']], current: vec![vec![false; 2]], dim: vec![vec![false; 2]] };
+        let drawing = Drawing { grid: vec![vec!['a', 'b']], current: vec![vec![false; 2]], secondary: vec![vec![false; 2]] };
         let w = window(&drawing, 0, 0, 5, 5);
         assert_eq!(w.grid, drawing.grid, "asking for more room than exists just returns what exists");
     }
@@ -274,13 +275,13 @@ mod tests {
     }
 
     #[test]
-    fn the_current_row_renders_in_reverse_video_and_the_other_panes_row_renders_faint() {
+    fn the_current_row_renders_in_reverse_video_and_the_other_panes_row_renders_underlined() {
         let mut drawing = pane_grid(&["one".to_string(), "two".to_string()], 3);
         mark_row(&mut drawing, 0, 0, 3, RowStyle::Current);
         mark_row(&mut drawing, 1, 0, 3, RowStyle::Secondary);
         let joined = render_ansi(&drawing).join("\n");
         assert!(joined.contains("\x1b[7mone\x1b[27m"), "{joined:?}");
-        assert!(joined.contains("\x1b[2mtwo\x1b[22m"), "{joined:?}");
+        assert!(joined.contains("\x1b[4mtwo\x1b[24m"), "{joined:?}");
     }
 
     #[test]

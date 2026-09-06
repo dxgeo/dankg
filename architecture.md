@@ -934,7 +934,7 @@ have to press it to find out where a link goes first. While the panel
 has focus, `render` previews whichever row the cursor is currently on:
 the tree shows that link's own target, ancestors opened for that one
 frame only (`App::visible_rows_with`, never touching `self.expanded`),
-in place of the real selection's faint row. Moving the panel cursor
+in place of the real selection's underlined row. Moving the panel cursor
 updates the preview immediately; leaving without pressing `enter`
 (`esc`/left) leaves `self.expanded`/`self.selected` untouched, and the
 tree pane's own `scroll_to_show` snaps back onto the real selection on
@@ -2853,7 +2853,7 @@ in the act again.
   same `reveal_and_select` `/`-search's own `enter` uses, checked to
   reach a match outside whatever the initial expansion left open.
   `render` is checked to mark the focused pane's current row in reverse
-  video and the other pane's own remembered row faint. The panel's own
+  video and the other pane's own remembered row underlined. The panel's own
   live preview: hovering a row surfaces its target without moving the
   real selection, moving the panel cursor moves the preview with it,
   `render` is checked to actually reveal a previewed target's hidden

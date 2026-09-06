@@ -33,9 +33,9 @@ pub const DEFAULT_TUI_DEPTH: u32 = 1;
 /// Sections DanKG reads today, with the keys each one accepts.
 const KNOWN: &[(&str, &[&str])] = &[
     ("graph", &["depth"]),
-    ("tui", &["depth"]),
+    ("tui", &["depth", "breadcrumb"]),
     ("editor", &["command"]),
-    ("keys", &["up", "down", "left", "right", "quit", "reset", "eval"]),
+    ("keys", &["up", "down", "left", "right", "quit", "reset", "eval", "breadcrumb"]),
 ];
 
 /// Section families, named `<prefix><name>`. `db.`'s `list` (decision 37)
@@ -72,8 +72,8 @@ impl Section {
 /// than mnemonics, so nothing about them is meaningful to remap. They
 /// always work alongside whatever a letter is bound to. Enter, Tab, `/`,
 /// and `?` are the same story for their own reasons: `[keys]` only ever
-/// touches the six single-character actions the interaction table names
-/// by letter.
+/// touches the single-character actions the interaction table names by
+/// letter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Keymap {
     pub up: char,
@@ -85,16 +85,19 @@ pub struct Keymap {
     /// Cycles through the selected node's named blocks (entering cycle mode
     /// on the first press), so `enter` can run whichever one is cycled to.
     pub eval: char,
+    /// Toggles the origin breadcrumb (`[tui] breadcrumb`'s own runtime
+    /// counterpart) on the status line while the panel has focus.
+    pub breadcrumb: char,
 }
 
 impl Default for Keymap {
     fn default() -> Keymap {
-        Keymap { up: 'k', down: 'j', left: 'h', right: 'l', quit: 'q', reset: 'r', eval: 'e' }
+        Keymap { up: 'k', down: 'j', left: 'h', right: 'l', quit: 'q', reset: 'r', eval: 'e', breadcrumb: 'b' }
     }
 }
 
 impl Keymap {
-    fn fields(&self) -> [(&'static str, char); 7] {
+    fn fields(&self) -> [(&'static str, char); 8] {
         [
             ("up", self.up),
             ("down", self.down),
@@ -103,6 +106,7 @@ impl Keymap {
             ("quit", self.quit),
             ("reset", self.reset),
             ("eval", self.eval),
+            ("breadcrumb", self.breadcrumb),
         ]
     }
 }
@@ -292,6 +296,26 @@ impl Config {
             }
         }
     }
+
+    /// `[tui] breadcrumb`, or `true`. The origin breadcrumb (*Terminal
+    /// UI*'s own *Origin breadcrumb*) is on by default. A reader who never
+    /// wants it can turn it off for good here, rather than pressing
+    /// `keys.breadcrumb` every session. `keys.breadcrumb` still toggles it
+    /// for the running session either way, regardless of this default.
+    pub fn tui_breadcrumb(&self, diags: &mut Diags) -> bool {
+        let Some(raw) = self.get("tui", "breadcrumb") else {
+            return true;
+        };
+        match raw {
+            "true" => true,
+            "false" => false,
+            _ => {
+                let where_ = self.source.clone().unwrap_or_else(|| DIR.to_string());
+                diags.warn_in(where_, 0, format!("`breadcrumb = {raw}` in `[tui]` is not `true` or `false`; using true"));
+                true
+            }
+        }
+    }
 }
 
 impl Config {
@@ -371,7 +395,7 @@ impl Config {
         let where_ = || self.source.clone().unwrap_or_else(|| DIR.to_string());
 
         let mut map = default;
-        let mut slots: [(&str, &mut char); 7] = [
+        let mut slots: [(&str, &mut char); 8] = [
             ("up", &mut map.up),
             ("down", &mut map.down),
             ("left", &mut map.left),
@@ -379,6 +403,7 @@ impl Config {
             ("quit", &mut map.quit),
             ("reset", &mut map.reset),
             ("eval", &mut map.eval),
+            ("breadcrumb", &mut map.breadcrumb),
         ];
         for (name, slot) in &mut slots {
             let Some(raw) = section.get(name) else { continue };
@@ -530,6 +555,23 @@ mod tests {
     }
 
     #[test]
+    fn tui_breadcrumb_defaults_to_true_and_reads_its_own_section() {
+        let (c, mut d) = parse("");
+        assert!(c.tui_breadcrumb(&mut d));
+
+        let (c, mut d) = parse("[tui]\nbreadcrumb = false\n");
+        assert!(!c.tui_breadcrumb(&mut d));
+        assert!(d.is_empty(), "{:?}", d.items());
+    }
+
+    #[test]
+    fn tui_breadcrumb_falls_back_and_warns_on_nonsense() {
+        let (c, mut d) = parse("[tui]\nbreadcrumb = sometimes\n");
+        assert!(c.tui_breadcrumb(&mut d));
+        assert!(d.items().iter().any(|i| i.message.contains("is not `true` or `false`")));
+    }
+
+    #[test]
     fn a_hash_inside_a_value_is_not_a_comment() {
         let (c, d) = parse("[lang.sh]\ncommand = sh -c 'echo #1'\n");
         assert_eq!(c.get("lang.sh", "command"), Some("sh -c 'echo #1'"));
@@ -673,6 +715,13 @@ mod tests {
         let (c, mut d) = parse("[keys]\neval = x\n");
         assert!(d.is_empty(), "{:?}", d.items());
         assert_eq!(c.keymap(&mut d).eval, 'x');
+    }
+
+    #[test]
+    fn keymap_remaps_breadcrumb_too() {
+        let (c, mut d) = parse("[keys]\nbreadcrumb = x\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.keymap(&mut d).breadcrumb, 'x');
     }
 
     #[test]
