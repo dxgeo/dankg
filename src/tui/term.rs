@@ -5,9 +5,10 @@
 //! `std` has no termios binding, and decision 1 rules out the `libc`
 //! crate along with every other one, so this talks to the platform C
 //! library directly: `tcgetattr`/`tcsetattr`/`cfmakeraw` for raw mode,
-//! `ioctl` with `TIOCGWINSZ` for size. Both are declared, not linked
-//! from a crate. `std` already pulls in the system libc on macOS and
-//! Linux, so no `Cargo.toml` change is needed to call into it.
+//! `ioctl` with `TIOCGWINSZ` for size, `poll` and `signal` for the
+//! resize notice below. All are declared, not linked from a crate.
+//! `std` already pulls in the system libc on macOS and Linux, so no
+//! `Cargo.toml` change is needed to call into it.
 //!
 //! `Termios`'s field layout is not portable: macOS/BSD and Linux glibc
 //! disagree on field width and count, so the struct is `cfg`-gated per
@@ -15,17 +16,29 @@
 //! platform-specific. Only macOS has been run against a real terminal
 //! so far. The Linux path is written from the documented struct layout
 //! and constant, but is unverified.
+//!
+//! A window resize -- or a terminal emulator's own zoom, which changes
+//! the cell grid the same way a resize does and is indistinguishable
+//! from one at this layer -- delivers `SIGWINCH`. The handler here only
+//! flags an `AtomicBool`; nothing else is safe to do from inside a
+//! signal handler. `event_loop` (`app.rs`) notices the flag between
+//! keystrokes by waiting on stdin through `poll` with a short timeout
+//! instead of blocking on `read` directly, since a flag set by a signal
+//! is otherwise invisible to a thread blocked in a blocking read.
 
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const STDIN_FILENO: i32 = 0;
 const TCSANOW: i32 = 0;
+const SIGWINCH: i32 = 28;
 
 #[cfg(target_os = "macos")]
 mod platform {
     pub const NCCS: usize = 20;
     pub const TIOCGWINSZ: u64 = 0x4008_7468;
+    pub type Nfds = u32;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -44,6 +57,7 @@ mod platform {
 mod platform {
     pub const NCCS: usize = 32;
     pub const TIOCGWINSZ: u64 = 0x5413;
+    pub type Nfds = u64;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -59,7 +73,7 @@ mod platform {
     }
 }
 
-use platform::{Termios, TIOCGWINSZ};
+use platform::{Nfds, Termios, TIOCGWINSZ};
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -69,6 +83,18 @@ struct Winsize {
     ws_xpixel: u16,
     ws_ypixel: u16,
 }
+
+/// `struct pollfd` from `<poll.h>`. `fd`/`events`/`revents` all agree
+/// in width between macOS and Linux, unlike `nfds_t` itself (`Nfds`,
+/// above).
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+const POLLIN: i16 = 0x0001;
 
 unsafe extern "C" {
     fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32;
@@ -92,6 +118,17 @@ unsafe extern "C" {
     // C compiler would for a genuinely variadic call.
     fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn isatty(fd: i32) -> i32;
+    fn poll(fds: *mut PollFd, nfds: Nfds, timeout_ms: i32) -> i32;
+    // `sighandler_t` (the parameter and return type `signal` actually
+    // has in `<signal.h>`) is a function pointer in name only: its two
+    // sentinel values, `SIG_DFL` (0) and `SIG_IGN` (1), are not valid
+    // Rust function pointers (never null), and this never calls through
+    // whatever `signal` hands back -- only stores it to restore the
+    // prior disposition later. `usize` carries that bit pattern with no
+    // validity requirement to violate, exactly like C's own callers,
+    // which never dereference it as a function either when it might be
+    // one of the two sentinels.
+    fn signal(signum: i32, handler: usize) -> usize;
 }
 
 /// Terminal rows and columns, via `TIOCGWINSZ`. Fails with the OS
@@ -115,13 +152,47 @@ pub fn is_tty() -> bool {
     unsafe { isatty(STDIN_FILENO) == 1 }
 }
 
+static RESIZED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn note_resize(_signum: i32) {
+    // A signal handler may only do what is async-signal-safe: no
+    // allocation, no locking, no I/O. Setting a flag is the whole job;
+    // `event_loop` (`app.rs`) does the actual redraw once it notices.
+    RESIZED.store(true, Ordering::SeqCst);
+}
+
+/// True the first time this is called after a resize (or a terminal
+/// emulator's own zoom -- see the module doc), and clears the flag so
+/// a caller polling on an interval redraws once per resize rather than
+/// once per poll tick after it.
+pub fn take_resized() -> bool {
+    RESIZED.swap(false, Ordering::SeqCst)
+}
+
+/// True once stdin has a byte ready to read within `timeout_ms`. A
+/// plain timeout and a `poll` failure both come back `false`: either
+/// way nothing is ready yet, and the caller's next call starts fresh
+/// rather than threading a spurious error through the render loop.
+/// This is what lets `event_loop` notice a resize with no keypress
+/// after it -- blocking on `read` directly never would, since a flag a
+/// signal handler set is invisible to a thread already asleep in a
+/// blocking read.
+pub fn stdin_ready(timeout_ms: i32) -> bool {
+    let mut fd = PollFd { fd: STDIN_FILENO, events: POLLIN, revents: 0 };
+    let rc = unsafe { poll(&mut fd as *mut PollFd, 1, timeout_ms) };
+    rc > 0 && fd.revents & POLLIN != 0
+}
+
 /// Raw mode plus the alternate screen, restored on drop. This
 /// includes on panic, since `Drop::drop` still runs during unwinding.
 /// This is the guard everything else in the milestone is built inside
 /// of: nothing should touch stdin/stdout in raw mode without one of
-/// these alive.
+/// these alive. Also the `SIGWINCH` handler's own scope, restored to
+/// the prior disposition on drop rather than left installed over
+/// whatever runs next with the terminal (an external editor, say).
 pub struct RawMode {
     original: Termios,
+    prior_winch: usize,
 }
 
 impl RawMode {
@@ -143,7 +214,9 @@ impl RawMode {
         print!("\x1b[?1049h");
         io::stdout().flush()?;
 
-        Ok(RawMode { original })
+        let prior_winch = unsafe { signal(SIGWINCH, note_resize as *const () as usize) };
+
+        Ok(RawMode { original, prior_winch })
     }
 }
 
@@ -155,5 +228,6 @@ impl Drop for RawMode {
         print!("\x1b[?1049l");
         let _ = io::stdout().flush();
         unsafe { tcsetattr(STDIN_FILENO, TCSANOW, &self.original) };
+        unsafe { signal(SIGWINCH, self.prior_winch) };
     }
 }

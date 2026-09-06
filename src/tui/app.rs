@@ -195,6 +195,12 @@ pub fn run(paths: &[String], cache: bool, depth: Option<u32>, all: bool) -> Resu
     result.map_err(|e| e.to_string())
 }
 
+/// How often a wait for the next key checks in on a resize when
+/// nothing has been typed. Short enough that a resize feels immediate;
+/// `recv`-style waits like this one sleep rather than spin, so an idle
+/// TUI still costs nothing between ticks.
+const RESIZE_POLL_MS: i32 = 100;
+
 fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Write) -> io::Result<()> {
     render(app, out)?;
     // Carries a byte `input::read_key` read but could not yet use (only
@@ -203,7 +209,14 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
     // vanishing.
     let mut pending = Vec::new();
     loop {
-        let key = input::read_key(io::stdin(), &mut pending)?;
+        let key = loop {
+            if input::decode(&pending).is_some() || term::stdin_ready(RESIZE_POLL_MS) {
+                break input::read_key(io::stdin(), &mut pending)?;
+            }
+            if term::take_resized() {
+                render(app, out)?;
+            }
+        };
 
         // Fully modal: every other key is swallowed here rather than
         // reaching the match below. This way, nothing about the tree,
