@@ -215,7 +215,8 @@ fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
         let pgid = child.id();
-        let _ = Command::new("kill").arg("-KILL").arg(format!("-{pgid}")).status();
+        let result = Command::new("kill").arg("-KILL").arg(format!("-{pgid}")).status();
+        eprintln!("DEBUG kill_tree: pgid={pgid} result={result:?}");
     }
     #[cfg(not(unix))]
     {
