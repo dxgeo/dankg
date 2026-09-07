@@ -158,7 +158,7 @@ struct App {
     search: Option<String>,
     /// The last *confirmed* search query, lowercased, kept after
     /// `search` itself is cleared -- vim's own `n`/`N` convention: the
-    /// pattern survives the search prompt closing, so `n`/`p` can keep
+    /// pattern survives the search prompt closing, so `n`/`N` can keep
     /// cycling through its matches long after `/`'s own buffer is gone.
     last_search: Option<String>,
     /// The one line `render` reserves at the bottom of the viewport: the
@@ -283,7 +283,7 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
                 app.clear_transient();
                 app.search_next();
             }
-            input::Key::Char('p') => {
+            input::Key::Char('N') => {
                 app.clear_transient();
                 app.search_prev();
             }
@@ -391,7 +391,7 @@ fn help_lines(keys: &Keymap) -> Vec<String> {
         "                     (or jump to the focused link, while the panel has focus)".to_string(),
         "  tab                toggle focus between the tree and the link panel".to_string(),
         "  /                  jump to a node by title; enter confirms, esc cancels".to_string(),
-        "  n / p              jump to the next / previous match of the last search".to_string(),
+        "  n / N              jump to the next / previous match of the last search".to_string(),
         "  esc                cancel an eval cycle or a search; leave the panel".to_string(),
         String::new(),
         format!("  {}                  cycle the selected node's named blocks; enter runs it", keys.eval),
@@ -968,7 +968,7 @@ impl App {
     /// `esc`, while searching: cancels with no jump. The typed text is
     /// discarded, not kept for a later re-open. `last_search` is left
     /// alone: cancelling the prompt says nothing about the pattern `n`/
-    /// `p` are still cycling through from an earlier confirmed search.
+    /// `N` are still cycling through from an earlier confirmed search.
     fn cancel_search(&mut self) {
         self.search = None;
     }
@@ -976,7 +976,7 @@ impl App {
     /// `enter`, while searching: confirms the typed text as the new
     /// search pattern and jumps to the first match at or after the
     /// current selection, wrapping -- vim's own `/pattern<enter>`
-    /// behaviour, reusing the identical search-from-here logic `n`/`p`
+    /// behaviour, reusing the identical search-from-here logic `n`/`N`
     /// use afterward (`jump_to_search_match`).
     fn confirm_search(&mut self) {
         let query = self.search.take().unwrap_or_default();
@@ -993,10 +993,12 @@ impl App {
         self.jump_to_search_match(1);
     }
 
-    /// `p`: jumps to the previous match of `last_search`, searching
+    /// `N`: jumps to the previous match of `last_search`, searching
     /// backward from the current selection and wrapping past the start.
-    /// A separate fixed key rather than vim's own shift-`N`, since `p`
-    /// was already free once panning was retired.
+    /// Vim's own shift-`N`, not a DanKG-specific letter -- see
+    /// architecture.md's *Interaction* section for why an earlier pass
+    /// used `p` here instead, and why that turned out to be the wrong
+    /// call.
     fn search_prev(&mut self) {
         self.jump_to_search_match(-1);
     }
@@ -1007,14 +1009,20 @@ impl App {
     /// in `index.nodes` is past the current selection's own position in
     /// the direction `delta` names, wrapping to the far end if none is.
     /// Searching from the selection's own position, not from wherever
-    /// the previous match happened to land, is what makes `n`/`p` keep
+    /// the previous match happened to land, is what makes `n`/`N` keep
     /// working sensibly even after the reader has navigated away from
     /// the last match by hand -- the same thing vim's own `n`/`N` do
     /// relative to the cursor, not relative to the last search hit. No
     /// match (on any of the three callers) leaves the selection alone
     /// and reports so on the status line -- the same "nowhere else to
     /// report to" reasoning `enter`'s editor spawn already follows for
-    /// its own best-effort failures.
+    /// its own best-effort failures. A successful jump reports too: its
+    /// own rank in `matches`, one-based, out of the total -- there is no
+    /// other way for the reader to know how many other hits `n`/`N` still
+    /// have left to cycle through. The rank is always the match's plain
+    /// position in corpus order, even right after a wrap; it says
+    /// nothing about which direction the jump came from, the same way
+    /// vim's own `n`/`N` never mark a wrap either.
     fn jump_to_search_match(&mut self, delta: i32) {
         let Some(needle) = self.last_search.clone() else { return };
         let matches: Vec<(usize, NodeId)> = self
@@ -1036,7 +1044,10 @@ impl App {
             current.and_then(|p| matches.iter().rev().find(|(i, _)| *i < p)).or_else(|| matches.last())
         };
         if let Some((_, id)) = next {
-            self.reveal_and_select(id.clone());
+            let id = id.clone();
+            let rank = matches.iter().position(|(_, m)| *m == id).unwrap() + 1;
+            self.status = Some(format!("/{needle}: {rank} of {}", matches.len()));
+            self.reveal_and_select(id);
         }
     }
 }
@@ -1498,6 +1509,7 @@ mod tests {
         let mut a = app(&[("a.md", "# One\n\n## Alphabet\n\n## Alphonso\n\n## Beta\n")]);
         searched(&mut a, "al");
         assert_eq!(a.selected.slug, "alphabet");
+        assert_eq!(a.status.as_deref(), Some("/al: 1 of 2"));
     }
 
     #[test]
@@ -1507,23 +1519,27 @@ mod tests {
         assert_eq!(a.selected.slug, "alphabet");
         a.search_next();
         assert_eq!(a.selected.slug, "alphonso");
+        assert_eq!(a.status.as_deref(), Some("/al: 2 of 2"));
         a.search_next(); // past the last match: wraps to the first
         assert_eq!(a.selected.slug, "alphabet");
+        assert_eq!(a.status.as_deref(), Some("/al: 1 of 2"), "a wrap reports the plain rank, not that it wrapped");
     }
 
     #[test]
-    fn p_cycles_to_the_previous_match_and_wraps_past_the_start() {
+    fn shift_n_cycles_to_the_previous_match_and_wraps_past_the_start() {
         let mut a = app(&[("a.md", "# One\n\n## Alphabet\n\n## Alphonso\n\n## Beta\n")]);
         searched(&mut a, "al");
         assert_eq!(a.selected.slug, "alphabet");
         a.search_prev(); // before the first match: wraps to the last
         assert_eq!(a.selected.slug, "alphonso");
+        assert_eq!(a.status.as_deref(), Some("/al: 2 of 2"));
         a.search_prev();
         assert_eq!(a.selected.slug, "alphabet");
+        assert_eq!(a.status.as_deref(), Some("/al: 1 of 2"));
     }
 
     #[test]
-    fn n_and_p_search_from_the_current_selection_not_from_the_last_match() {
+    fn n_and_shift_n_search_from_the_current_selection_not_from_the_last_match() {
         // vim's own n/N search from the cursor, not from wherever the
         // last hit landed -- moving away by hand and pressing n still
         // finds the next match relative to wherever the reader actually
@@ -1538,7 +1554,7 @@ mod tests {
     }
 
     #[test]
-    fn n_and_p_are_a_no_op_with_no_prior_search() {
+    fn n_and_shift_n_are_a_no_op_with_no_prior_search() {
         let mut a = app(&[("a.md", "# One\n\n## Two\n")]);
         let before = a.selected.clone();
         a.search_next();
@@ -1547,7 +1563,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_the_search_prompt_keeps_the_last_confirmed_pattern_for_n_and_p() {
+    fn cancelling_the_search_prompt_keeps_the_last_confirmed_pattern_for_n_and_shift_n() {
         let mut a = app(&[("a.md", "# One\n\n## Alphabet\n\n## Alphonso\n\n## Beta\n")]);
         searched(&mut a, "al");
         assert_eq!(a.selected.slug, "alphabet");
@@ -1556,6 +1572,17 @@ mod tests {
         a.cancel_search(); // discards "x", must not touch last_search
         a.search_next();
         assert_eq!(a.selected.slug, "alphonso", "n should still cycle the earlier confirmed pattern");
+    }
+
+    #[test]
+    fn jump_to_search_match_reports_its_rank_and_the_total_match_count() {
+        let mut a = app(&[("a.md", "# One\n\n## Alphabet\n\n## Alphonso\n\n## Almanac\n\n## Beta\n")]);
+        searched(&mut a, "al");
+        assert_eq!(a.status.as_deref(), Some("/al: 1 of 3"));
+        a.search_next();
+        assert_eq!(a.status.as_deref(), Some("/al: 2 of 3"));
+        a.search_next();
+        assert_eq!(a.status.as_deref(), Some("/al: 3 of 3"));
     }
 
     #[test]

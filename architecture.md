@@ -726,7 +726,7 @@ src/tui/
 - `enter`: suspend, spawn the configured editor at the node's line, resume. Or, while cycling a node's blocks, run the cycled one. Or, while the panel has focus, jump to the focused link.
 - `tab`: toggle focus between the tree and the cross-reference panel. Its old job -- revealing hidden neighbours onto a 2D graph grid -- has no equivalent once there is no grid.
 - `/`: jump to a node by title, anywhere in the corpus (see *Jump and default depth*, below). `enter` confirms, `esc` cancels.
-- `n`/`p`: jump to the next/previous match of the last confirmed search, wrapping past either end -- vim's own `n`/`N`, under DanKG's own letters since `p` was already free once panning retired.
+- `n`/`N`: jump to the next/previous match of the last confirmed search, wrapping past either end, reporting the match's own rank and the total match count on the status line -- vim's own binding exactly. An earlier pass bound `p` instead of shift-`N`, since `p` was free once panning retired; that saved nothing an experienced vim user would notice and cost them a keybinding they already knew, so it went back to `N`.
 - `e`: cycle the selected node's named blocks. `enter` runs the cycled one, in place, without leaving the tree (see *Eval* below)
 - `esc`: cancel an in-progress block cycle or an in-progress search; return focus from the panel to the tree.
 - `r`: collapse back to the entry view
@@ -740,11 +740,11 @@ the tree-view successor to what `layout/order.rs`'s rank/order structure
 once gave the Sugiyama renderer.
 
 Every letter here but the mode-independent bindings above is remappable in
-`[keys]` (decision 18). Arrows, enter, tab, esc, `/`, `n`, `p`, and `?` are
+`[keys]` (decision 18). Arrows, enter, tab, esc, `/`, `n`, `N`, and `?` are
 not, since they are not tree-navigation letters to begin with. `/` and `?`
 specifically are fixed because both are close to universal across terminal
 tools (`/` to search in vim/less/htop, `?` for help in the same set); `n`/
-`p` are fixed alongside `/` for the identical reason -- they are the other
+`N` are fixed alongside `/` for the identical reason -- they are the other
 half of the same search feature, not independent actions a reader would
 want rebound on their own.
 
@@ -992,18 +992,24 @@ to `reveal_and_select` exactly like a panel jump does. `esc` cancels
 with no jump; no match leaves the selection alone and reports so on the
 status line.
 
-Confirming a search is only the first hit, not the only one: `n`/`p`
-(vim's own `n`/`N`, DanKG's own letters, `p` free again once panning
-retired) cycle forward/backward through every remaining match of
-`last_search`, the pattern kept alive after `search` itself closes.
-Both directions, and the initial confirm, reduce to one search-from-here
-primitive (`App::jump_to_search_match`): the next/previous match
-relative to the *current selection's* own position in the corpus, not
-relative to wherever the last match happened to land, wrapping past
-either end. Searching from the cursor rather than from the last hit is
-what keeps `n`/`p` behaving sensibly even after the reader has moved
-around by hand in between -- the identical reason vim's own `n`/`N`
-work the same way.
+Confirming a search is only the first hit, not the only one: `n`/`N`
+(vim's own binding exactly) cycle forward/backward through every
+remaining match of `last_search`, the pattern kept alive after
+`search` itself closes. Both directions, and the initial confirm,
+reduce to one search-from-here primitive
+(`App::jump_to_search_match`): the next/previous match relative to
+the *current selection's* own position in the corpus, not relative to
+wherever the last match happened to land, wrapping past either end.
+Searching from the cursor rather than from the last hit is what keeps
+`n`/`N` behaving sensibly even after the reader has moved around by
+hand in between -- the identical reason vim's own `n`/`N` work the
+same way. Every jump that lands on a match also reports its own rank
+and the total match count on the status line, e.g. `/needle: 2 of 5`
+\-- otherwise the reader has no way to tell how many hits `n`/`N` still
+have left to cycle through. The rank is always the match's plain
+position in corpus order, even right after a wrap; it says nothing
+about which direction the jump came from, the same way vim's own
+`n`/`N` never mark a wrap either.
 
 ## Scope decisions this would actually need
 
@@ -2882,13 +2888,15 @@ in the act again.
   `render` is checked to actually reveal a previewed target's hidden
   ancestors for that one frame, and leaving the panel without `enter`
   is checked to leave both `expanded` and the selection untouched.
-  `/`, `n`, and `p`: confirming lands on the first match at or after the
-  current selection rather than always the corpus's first one, `n`/`p`
+  `/`, `n`, and `N`: confirming lands on the first match at or after the
+  current selection rather than always the corpus's first one, `n`/`N`
   cycle forward/backward and wrap at either end, both search from the
   *current* selection rather than the last match (checked by moving
-  away by hand between two searches), `n`/`p` are checked as a no-op
-  with no prior search, and cancelling the search prompt is checked to
-  leave the last confirmed pattern alone for `n`/`p` to keep cycling.
+  away by hand between two searches), `n`/`N` are checked as a no-op
+  with no prior search, cancelling the search prompt is checked to
+  leave the last confirmed pattern alone for `n`/`N` to keep cycling,
+  and every successful jump is checked to report its own rank and the
+  total match count on the status line, unchanged by a wrap.
 - Eval in the TUI: cycling finds only the blocks inside a node's own
   line range, wraps, and is a silent no-op with none to find. Running
   writes back and reports `ok`/`failed` on the status line and clears
