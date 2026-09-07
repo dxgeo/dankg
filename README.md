@@ -103,12 +103,12 @@ Keys:
 - `tab` — toggle focus between the tree and the cross-reference panel (previews the hovered link before you commit to it)
 - `enter` — open the selected node in your configured `[editor] command` (or jump to a focused panel link)
 - `/` — jump to a node by title, anywhere in the corpus; `n`/`N` repeat it forward/backward
-- `f` — cycle the tree filter: all, blocks, eval-chain, file-artifact
+- `f` — open the filter menu (all, blocks, eval-chain, file-artifact); `enter` applies it, `esc` cancels
 - `e` then `enter` — cycle and run a node's named code blocks in place
 - `r` — reset
 - `b` — toggle the origin breadcrumb (status line, while the panel has focus)
 - `q` — quit
-- `?` — full keybinding reference
+- `?` — full keybinding reference; both this and the filter menu draw as a small box over the tree, not a full-screen replacement
 
 ### `eval` — run and record literate code blocks
 

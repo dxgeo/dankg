@@ -52,12 +52,13 @@ enum Focus {
     Panel,
 }
 
-/// Which rows `push_row` keeps, cycled by `f`
+/// Which rows `push_row` keeps, picked from the `f` menu
 /// (dependency-surfacing.md, §3). `All` prunes nothing. Every other
 /// variant hides a non-matching row while keeping its ancestors
 /// visible, the same "hide, not dim" mental model `/`-search's own
-/// ancestor-reveal already trained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ancestor-reveal already trained. `Hash` is for `App::filter_history`,
+/// keyed by variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Filter {
     All,
     Blocks,
@@ -66,12 +67,26 @@ enum Filter {
 }
 
 impl Filter {
+    /// The four variants, in menu order -- `next`/`prev` (below) both
+    /// wrap through this same list, so the menu's own up/down never
+    /// needs a second copy of the ordering.
+    const ALL: [Filter; 4] = [Filter::All, Filter::Blocks, Filter::EvalChain, Filter::FileArtifact];
+
     fn next(self) -> Filter {
         match self {
             Filter::All => Filter::Blocks,
             Filter::Blocks => Filter::EvalChain,
             Filter::EvalChain => Filter::FileArtifact,
             Filter::FileArtifact => Filter::All,
+        }
+    }
+
+    fn prev(self) -> Filter {
+        match self {
+            Filter::All => Filter::FileArtifact,
+            Filter::Blocks => Filter::All,
+            Filter::EvalChain => Filter::Blocks,
+            Filter::FileArtifact => Filter::EvalChain,
         }
     }
 
@@ -182,11 +197,28 @@ struct App {
     /// mean. `r`/`reload` both replace this wholesale with a fresh
     /// `initial_expansion(...)` rather than editing it in place.
     expanded: HashSet<NodeId>,
-    /// Which rows `push_row` keeps, cycled by `keys` fixed letter `f`.
-    /// `r`/`reload` leave this alone -- unlike `expanded`, a filter is
-    /// the reader's own standing choice, not tree-shape state that a
-    /// reload could invalidate.
+    /// Which rows `push_row` keeps, picked from the fixed-key `f`
+    /// menu. `r`/`reload` leave this alone -- unlike `expanded`, a
+    /// filter is the reader's own standing choice, not tree-shape
+    /// state that a reload could invalidate.
     filter: Filter,
+    /// `Some` while the filter-picker overlay is open: which `Filter`
+    /// the menu's own cursor currently highlights, not yet applied to
+    /// `self.filter` until `enter` confirms it (`apply_filter`). `esc`
+    /// closes without applying.
+    filter_menu: Option<Filter>,
+    /// Where `self.selected` was the last time each `Filter` was
+    /// active, keyed by variant. `apply_filter` both reads this (to
+    /// restore a remembered position) and writes it (recording the
+    /// row being left, every time the filter changes).
+    filter_history: HashMap<Filter, NodeId>,
+    /// Whether the reader has explicitly navigated (arrows, `/`-search,
+    /// a panel jump) since the last filter change. `apply_filter`'s own
+    /// tie-breaker: a reader who has already moved to a new row since
+    /// picking the current filter gets to keep it, even if that row
+    /// disagrees with what `filter_history` remembers; a reader who
+    /// has not moved gets that remembered position back instead.
+    moved_since_filter_change: bool,
     selected: NodeId,
     /// Which pane owns the direction keys/enter/esc right now.
     focus: Focus,
@@ -224,9 +256,9 @@ struct App {
     /// afterward. `None` means rendering the panes at full height, with
     /// no status line at all. There is nothing transient to say.
     status: Option<String>,
-    /// `?` toggles this: a full-screen keybinding reference, replacing
-    /// both panes rather than overlaying them. There is no compositing
-    /// here. It is fully modal while on screen. Every key but the
+    /// `?` toggles this: a keybinding reference, drawn as a small box
+    /// over the tree/panel (`draw::overlay`) rather than replacing
+    /// either. Still fully modal while on screen: every key but the
     /// dismissers (`?`, esc, `keys.quit`) is swallowed rather than
     /// reaching the tree/panel underneath.
     help: bool,
@@ -311,6 +343,23 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
             continue;
         }
 
+        // Fully modal, the same way `app.help` is above: every key but
+        // its own up/down/enter/esc is swallowed rather than reaching
+        // the tree/panel underneath.
+        if app.filter_menu.is_some() {
+            match key {
+                input::Key::Enter => app.confirm_filter_menu(),
+                input::Key::Esc => app.cancel_filter_menu(),
+                input::Key::Up => app.move_filter_menu_cursor(-1),
+                input::Key::Down => app.move_filter_menu_cursor(1),
+                input::Key::Char(c) if c == app.keys.up => app.move_filter_menu_cursor(-1),
+                input::Key::Char(c) if c == app.keys.down => app.move_filter_menu_cursor(1),
+                _ => {}
+            }
+            render(app, out)?;
+            continue;
+        }
+
         // Panel-focused: up/down move its own cursor, enter jumps, left
         // or esc return focus to the tree without acting. keys.breadcrumb
         // still works here too -- this is exactly the state it exists for.
@@ -336,7 +385,7 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
         match key {
             input::Key::Char('?') => app.toggle_help(),
             input::Key::Char('/') => app.start_search(),
-            input::Key::Char('f') => app.cycle_filter(),
+            input::Key::Char('f') => app.open_filter_menu(),
             input::Key::Char('n') => {
                 app.clear_transient();
                 app.search_next();
@@ -450,7 +499,7 @@ fn help_lines(keys: &Keymap) -> Vec<String> {
         "  tab                toggle focus between the tree and the link panel".to_string(),
         "  /                  jump to a node by title; enter confirms, esc cancels".to_string(),
         "  n / N              jump to the next / previous match of the last search".to_string(),
-        "  f                  cycle the tree filter: all, blocks, eval-chain, file-artifact".to_string(),
+        "  f                  open the filter menu; enter applies it, esc cancels".to_string(),
         "  esc                cancel an eval cycle or a search; leave the panel".to_string(),
         String::new(),
         format!("  {}                  cycle the selected node's named blocks; enter runs it", keys.eval),
@@ -462,6 +511,23 @@ fn help_lines(keys: &Keymap) -> Vec<String> {
         String::new(),
         "press ? (or esc, or q) to close".to_string(),
     ]
+}
+
+/// The filter-picker's own overlay content, `cursor`'s row already
+/// marked `RowStyle::Current` so its highlight survives
+/// `draw::overlay`'s own paste onto the real frame (`draw::overlay`'s
+/// own doc comment). Row 0 of the box is its top border, row 1 is the
+/// title, and the four options start at row 2 in `Filter::ALL`'s own
+/// order -- the same order the menu's up/down cursor (`Filter::next`/
+/// `prev`) already walks.
+fn filter_menu_box(cursor: Filter) -> draw::Drawing {
+    let mut lines = vec!["Filter".to_string()];
+    lines.extend(Filter::ALL.iter().map(|f| format!("  {}", f.label())));
+    let mut menu = draw::box_grid(&lines);
+    let cursor_index = Filter::ALL.iter().position(|&f| f == cursor).unwrap_or(0);
+    let width = menu.grid.first().map_or(0, Vec::len);
+    draw::mark_row(&mut menu, 2 + cursor_index, 0, width, draw::RowStyle::Current);
+    menu
 }
 
 /// Writes `lines`, taking at most `term_rows` of them, with no trailing
@@ -497,11 +563,6 @@ fn write_frame(out: &mut impl Write, lines: &[String], term_rows: usize) -> io::
 
 fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     let (term_rows, term_cols) = term_dimensions(term::size());
-
-    if app.help {
-        let clipped: Vec<String> = help_lines(&app.keys).into_iter().map(|l| l.chars().take(term_cols).collect()).collect();
-        return write_frame(out, &clipped, term_rows);
-    }
 
     // A standing filter claims the status line one tier below search and
     // an eval outcome -- it is a mode the reader turned on, not a
@@ -589,6 +650,27 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
             let style = if app.focus == Focus::Panel { draw::RowStyle::Current } else { draw::RowStyle::Secondary };
             draw::mark_row(&mut frame, row - app.scroll_panel, tree_cols + 1, panel_cols, style);
         }
+    }
+
+    // `help`/`filter_menu` each draw as a small box floating over the
+    // tree and panel already composed above, rather than replacing
+    // either -- `frame` still shows real content around the box.
+    let overlay_box = if app.help {
+        // Some help lines are long enough to make an unclipped box
+        // wider than the terminal itself, pushing its own right border
+        // off screen. Clipped to what the frame can actually fit,
+        // minus the box's own four columns of border and padding.
+        let max_line = term_cols.saturating_sub(4).max(1);
+        let lines: Vec<String> = help_lines(&app.keys).iter().map(|l| draw::clip_with_ellipsis(l, max_line)).collect();
+        Some(draw::box_grid(&lines))
+    } else {
+        app.filter_menu.map(filter_menu_box)
+    };
+    if let Some(b) = &overlay_box {
+        let box_rows = b.grid.len();
+        let box_cols = b.grid.first().map_or(0, Vec::len);
+        let (row, col) = draw::centered(box_rows, box_cols, content_rows, term_cols);
+        frame = draw::overlay(&frame, b, row, col);
     }
 
     let mut lines = draw::render_ansi(&frame);
@@ -1060,6 +1142,9 @@ impl App {
             default_depth,
             expanded,
             filter: Filter::All,
+            filter_menu: None,
+            filter_history: HashMap::new(),
+            moved_since_filter_change: false,
             selected,
             focus: Focus::Tree,
             panel_cursor: 0,
@@ -1171,6 +1256,10 @@ impl App {
         self.focus = Focus::Tree;
         self.scroll_row = 0;
         self.scroll_panel = 0;
+        // `r` is itself a kind of fresh start, not a considered "stay
+        // here" choice -- the next filter change should restore
+        // whatever that filter remembers, not preserve this reset.
+        self.moved_since_filter_change = false;
         self.clear_transient();
     }
 
@@ -1183,30 +1272,80 @@ impl App {
         self.status = None;
     }
 
-    /// `f`: cycles `self.filter` (`Filter::next`). A standing choice,
-    /// not tree-shape state -- `self.expanded` is left exactly as it
-    /// is, so cycling the filter never re-collapses the tree the way
-    /// `r` does. `self.selected` is the one exception: a new filter can
-    /// drop the current row out of the tree entirely, and leaving
-    /// `self.selected` pointed at a row `visible_rows` no longer
-    /// produces would strand every arrow key on a `position` lookup
-    /// that never finds it (`move_tree_cursor`) -- found by hand,
-    /// filtering to `Blocks` while a plain heading was selected.
-    fn cycle_filter(&mut self) {
-        self.filter = self.filter.next();
-        self.reselect_after_filter_change();
+    /// `f`: opens the filter-picker overlay, its cursor starting on
+    /// whichever `Filter` is already active.
+    fn open_filter_menu(&mut self) {
+        self.clear_transient();
+        self.filter_menu = Some(self.filter);
+    }
+
+    /// Up/down while the filter menu is open: moves its own cursor,
+    /// never `self.filter` itself -- nothing is applied until `enter`.
+    fn move_filter_menu_cursor(&mut self, delta: i32) {
+        let Some(current) = self.filter_menu else { return };
+        self.filter_menu = Some(if delta < 0 { current.prev() } else { current.next() });
+    }
+
+    /// `esc`, while the filter menu is open: closes it without
+    /// applying anything.
+    fn cancel_filter_menu(&mut self) {
+        self.filter_menu = None;
+    }
+
+    /// `enter`, while the filter menu is open: applies its cursor and
+    /// closes it.
+    fn confirm_filter_menu(&mut self) {
+        if let Some(chosen) = self.filter_menu.take() {
+            self.apply_filter(chosen);
+        }
+    }
+
+    /// Switches to `new_filter`, choosing `self.selected` the same way
+    /// regardless of how `new_filter` was picked. Records where the
+    /// reader is leaving from (`filter_history`, keyed by the *old*
+    /// filter), then decides the new position: stays exactly where it
+    /// is when the reader has explicitly navigated since the last
+    /// filter change (`moved_since_filter_change`) and that row is
+    /// still valid under `new_filter`; otherwise restores whatever
+    /// `new_filter` itself last remembered, force-expanding its
+    /// ancestors (`reveal_and_select`) since a plain "select if
+    /// visible" could silently fail on a collapsed ancestor and strand
+    /// the reader the same way the original bug did; otherwise falls
+    /// back to `reselect_after_filter_change`'s own nearest-ancestor-
+    /// or-first-match search, the same safety net a first-ever visit
+    /// to a filter (nothing remembered yet) already needs.
+    fn apply_filter(&mut self, new_filter: Filter) {
+        self.filter_history.insert(self.filter, self.selected.clone());
+        self.filter = new_filter;
+
+        let stay = self.moved_since_filter_change && self.is_valid_under_current_filter(&self.selected);
+        if !stay {
+            match self.filter_history.get(&new_filter).cloned() {
+                Some(id) if self.is_valid_under_current_filter(&id) => self.reveal_and_select(id),
+                _ => self.reselect_after_filter_change(),
+            }
+        }
+        self.moved_since_filter_change = false;
         self.clear_transient();
     }
 
-    /// After a filter change, walks `self.selected`'s own `Node.parent`
-    /// chain to the nearest ancestor the new filter still keeps --
-    /// mirroring `reload`'s own "still visible" handling, but for a
-    /// filter change rather than a fresh index. Falls back to the
-    /// first matching node anywhere, in `index.nodes`' own
-    /// deterministic order, when nothing in that chain (not even the
-    /// file root) survives either. Leaves `self.selected` untouched,
-    /// same as `reload`'s own best-effort policy, only when the filter
-    /// matches nothing in the whole corpus.
+    /// Whether `id` both still exists and is a member of `self.filter`'s
+    /// own current membership (`filter_membership`) -- `true` for
+    /// every existing node under `Filter::All`, which prunes nothing.
+    fn is_valid_under_current_filter(&self, id: &NodeId) -> bool {
+        self.index.contains(id) && self.filter_membership().is_none_or(|m| m.contains(id))
+    }
+
+    /// After a filter change with nothing usable to restore, walks
+    /// `self.selected`'s own `Node.parent` chain to the nearest
+    /// ancestor the new filter still keeps -- mirroring `reload`'s own
+    /// "still visible" handling, but for a filter change rather than a
+    /// fresh index. Falls back to the first matching node anywhere, in
+    /// `index.nodes`' own deterministic order, when nothing in that
+    /// chain (not even the file root) survives either. Leaves
+    /// `self.selected` untouched, same as `reload`'s own best-effort
+    /// policy, only when the filter matches nothing in the whole
+    /// corpus.
     fn reselect_after_filter_change(&mut self) {
         let Some(membership) = self.filter_membership() else { return }; // Filter::All: nothing to check
         if membership.contains(&self.selected) {
@@ -1248,6 +1387,7 @@ impl App {
         let Some(pos) = rows.iter().position(|r| r.id == self.selected) else { return };
         let new_pos = (pos as i32 + delta).clamp(0, rows.len() as i32 - 1) as usize;
         self.selected = rows[new_pos].id.clone();
+        self.moved_since_filter_change = true;
     }
 
     fn move_panel_cursor(&mut self, delta: i32) {
@@ -1274,6 +1414,7 @@ impl App {
             return; // was collapsed: now open, selection stays put
         }
         self.selected = kids[0].clone();
+        self.moved_since_filter_change = true;
     }
 
     /// Left: collapses an expanded node in place. On one already
@@ -1290,6 +1431,7 @@ impl App {
         }
         if let Some(parent) = self.index.node(&self.selected).and_then(|n| n.parent.clone()) {
             self.selected = parent;
+            self.moved_since_filter_change = true;
         }
     }
 }
@@ -1317,6 +1459,7 @@ impl App {
         let targets: Vec<NodeId> = self.panel_rows().into_iter().filter_map(|r| r.target().cloned()).collect();
         if let Some(id) = targets.get(self.panel_cursor).cloned() {
             self.reveal_and_select(id);
+            self.moved_since_filter_change = true;
         }
     }
 
@@ -1441,6 +1584,7 @@ impl App {
             let rank = matches.iter().position(|(_, m)| *m == id).unwrap() + 1;
             self.status = Some(format!("/{needle}: {rank} of {}", matches.len()));
             self.reveal_and_select(id);
+            self.moved_since_filter_change = true;
         }
     }
 }
@@ -1534,6 +1678,9 @@ impl App {
             default_depth: crate::config::DEFAULT_TUI_DEPTH,
             expanded,
             filter: Filter::All,
+            filter_menu: None,
+            filter_history: HashMap::new(),
+            moved_since_filter_change: false,
             selected,
             focus: Focus::Tree,
             panel_cursor: 0,
@@ -2165,48 +2312,52 @@ mod tests {
     }
 
     #[test]
-    fn f_cycles_through_every_filter_and_wraps() {
-        let mut a = app(&[("a.md", "# One\n")]);
-        assert_eq!(a.filter, Filter::All);
-        a.cycle_filter();
-        assert_eq!(a.filter, Filter::Blocks);
-        a.cycle_filter();
-        assert_eq!(a.filter, Filter::EvalChain);
-        a.cycle_filter();
-        assert_eq!(a.filter, Filter::FileArtifact);
-        a.cycle_filter();
-        assert_eq!(a.filter, Filter::All, "wraps back to All");
+    fn filter_next_and_prev_cycle_through_every_variant_and_wrap() {
+        assert_eq!(Filter::All.next(), Filter::Blocks);
+        assert_eq!(Filter::Blocks.next(), Filter::EvalChain);
+        assert_eq!(Filter::EvalChain.next(), Filter::FileArtifact);
+        assert_eq!(Filter::FileArtifact.next(), Filter::All, "wraps forward");
+        assert_eq!(Filter::All.prev(), Filter::FileArtifact, "wraps backward");
+        assert_eq!(Filter::FileArtifact.prev(), Filter::EvalChain);
     }
 
     #[test]
-    fn cycling_the_filter_never_touches_expanded() {
+    fn apply_filter_sets_the_active_filter() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        assert_eq!(a.filter, Filter::All);
+        a.apply_filter(Filter::EvalChain);
+        assert_eq!(a.filter, Filter::EvalChain);
+    }
+
+    #[test]
+    fn applying_a_filter_never_touches_expanded() {
         let mut a = app_with_hidden_child();
         let expanded_before = a.expanded.clone();
-        a.cycle_filter();
+        a.apply_filter(Filter::Blocks);
         assert_eq!(a.expanded, expanded_before, "a filter is a standing choice, not tree-shape state");
     }
 
     #[test]
-    fn cycling_the_filter_leaves_selected_alone_when_nothing_matches_at_all() {
+    fn applying_a_filter_leaves_selected_alone_when_nothing_matches_at_all() {
         // `app_with_hidden_child` has no blocks anywhere, so `Blocks`
         // membership is empty -- reselect_after_filter_change's own
         // best-effort fallback, mirroring reload's, has nothing to fall
         // back to.
         let mut a = app_with_hidden_child();
         let selected_before = a.selected.clone();
-        a.cycle_filter();
+        a.apply_filter(Filter::Blocks);
         assert_eq!(a.selected, selected_before);
     }
 
     #[test]
-    fn cycling_the_filter_reselects_when_the_current_row_gets_filtered_out() {
+    fn applying_a_filter_reselects_when_the_current_row_gets_filtered_out() {
         // The bug found by hand: select a heading with no block
         // descendant, filter to Blocks, and every arrow key used to be
         // stuck -- move_tree_cursor's own `position` lookup never found
         // a `self.selected` that visible_rows no longer produces.
         let mut a = app(&[("a.md", "# One\n\n## Two\n\n```sh name=x\n:\n```\n\n## Three\n")]);
         a.selected = a.index.nodes.iter().find(|n| n.id.slug == "three").unwrap().id.clone();
-        a.cycle_filter(); // -> Blocks; Three has no block descendant
+        a.apply_filter(Filter::Blocks); // Three has no block descendant
         assert_ne!(a.selected.slug, "three", "no longer pointed at a hidden row");
         assert!(a.visible_rows().iter().any(|r| r.id == a.selected), "reselected onto something visible");
         assert_eq!(a.selected.slug, "one", "One is the nearest surviving ancestor of the old selection");
@@ -2217,18 +2368,135 @@ mod tests {
     }
 
     #[test]
-    fn cycling_the_filter_falls_back_to_the_first_match_when_no_ancestor_survives() {
+    fn applying_a_filter_falls_back_to_the_first_match_when_no_ancestor_survives() {
         // Two unrelated top-level files: selecting a heading in the one
         // with no blocks at all, then filtering to Blocks, has no
         // surviving ancestor in that file's own chain to fall back to.
         let mut a = app(&[("a.md", "# NoBlocks\n"), ("b.md", "# HasBlock\n\n```sh name=x\n:\n```\n")]);
         a.selected = a.index.nodes.iter().find(|n| n.id.slug == "noblocks").unwrap().id.clone();
-        a.cycle_filter(); // -> Blocks
+        a.apply_filter(Filter::Blocks);
         // Falls back to the first matching node anywhere, in `index.nodes`'
         // own order -- b's containing heading (an ancestor of the match)
         // comes before the block itself in that order.
         assert_eq!(a.selected.slug, "hasblock");
         assert!(a.visible_rows().iter().any(|r| r.id == a.selected));
+    }
+
+    #[test]
+    fn returning_to_a_filter_with_no_manual_navigation_restores_its_remembered_position() {
+        // NoBlocks has no path into Blocks' own membership at all (not
+        // even as an ancestor), so leaving All genuinely relocates the
+        // selection rather than trivially keeping it as a valid ancestor.
+        let mut a = app(&[("a.md", "# NoBlocks\n"), ("b.md", "# HasBlock\n\n```sh name=x\n:\n```\n")]);
+        a.selected = a.index.nodes.iter().find(|n| n.id.slug == "noblocks").unwrap().id.clone();
+        let original = a.selected.clone();
+        a.apply_filter(Filter::Blocks);
+        assert_ne!(a.selected, original, "genuinely relocated, not just left in place");
+        a.apply_filter(Filter::EvalChain); // no manual move under Blocks
+        a.apply_filter(Filter::All); // no manual move under EvalChain either
+        assert_eq!(a.selected, original, "nothing moved along the way, so All restores where it started");
+    }
+
+    #[test]
+    fn navigating_under_a_filter_makes_the_next_filter_change_stay_put() {
+        let mut a = app(&[("a.md", "# One\n\n```sh name=setup\n:\n```\n\n```sh name=top deps=setup\n:\n```\n")]);
+        let original = a.selected.clone();
+        a.apply_filter(Filter::Blocks);
+        a.down(); // manual navigation -- moves onto a different block row
+        let moved_to = a.selected.clone();
+        assert_ne!(moved_to, original);
+        a.apply_filter(Filter::All);
+        assert_eq!(a.selected, moved_to, "manual navigation wins over All's own remembered position");
+    }
+
+    #[test]
+    fn each_filter_remembers_its_own_last_position_independently() {
+        let dir = write_corpus(&[(
+            "a.md",
+            "```sh name=setup produces=file:o.csv\necho hi\n```\n\n```sh name=other\necho hi\n```\n",
+        )]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, true).unwrap();
+        let setup = a.index.nodes.iter().find(|n| n.id.slug == "setup").unwrap().id.clone();
+        let other = a.index.nodes.iter().find(|n| n.id.slug == "other").unwrap().id.clone();
+
+        // Force a known starting point rather than assuming what the
+        // corpus's own root happens to be with no heading in this
+        // fixture at all.
+        a.selected = setup.clone();
+        a.apply_filter(Filter::FileArtifact); // records All's position as setup; setup is already valid here, so it stays
+        assert_eq!(a.selected, setup);
+        a.apply_filter(Filter::Blocks); // records FileArtifact's position as setup; setup is valid under Blocks too, so it stays
+        assert_eq!(a.selected, setup);
+
+        a.selected = other.clone(); // manual move, will be recorded under Blocks
+        a.moved_since_filter_change = true;
+        a.apply_filter(Filter::FileArtifact); // other isn't valid under FileArtifact, so history wins over "stay"
+        assert_eq!(a.selected, setup, "FileArtifact still remembers its own last row, unaffected by Blocks");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn f_opens_the_filter_menu_with_its_cursor_on_the_active_filter() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.filter = Filter::EvalChain;
+        a.open_filter_menu();
+        assert_eq!(a.filter_menu, Some(Filter::EvalChain));
+        assert_eq!(a.filter, Filter::EvalChain, "opening the menu never applies anything on its own");
+    }
+
+    #[test]
+    fn opening_the_filter_menu_clears_an_in_progress_eval_cycle() {
+        let (mut a, _path) = app_with_real_file("a.md", "# One\n\n```sh name=x\n:\n```\n");
+        a.eval_key();
+        assert!(a.block_select.is_some());
+        a.open_filter_menu();
+        assert!(a.block_select.is_none(), "the same clear_transient discipline every other mode-entry action follows");
+    }
+
+    #[test]
+    fn the_filter_menus_own_cursor_moves_independently_of_the_active_filter_and_wraps() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.open_filter_menu(); // cursor starts on All
+        a.move_filter_menu_cursor(1);
+        assert_eq!(a.filter_menu, Some(Filter::Blocks));
+        assert_eq!(a.filter, Filter::All, "the cursor moving never touches the active filter");
+        a.move_filter_menu_cursor(-1);
+        a.move_filter_menu_cursor(-1); // past the start: wraps to the last variant
+        assert_eq!(a.filter_menu, Some(Filter::FileArtifact));
+    }
+
+    #[test]
+    fn esc_closes_the_filter_menu_without_applying_its_cursor() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.open_filter_menu();
+        a.move_filter_menu_cursor(1); // cursor now on Blocks
+        a.cancel_filter_menu();
+        assert_eq!(a.filter_menu, None);
+        assert_eq!(a.filter, Filter::All, "cancelling never applies the cursor's own filter");
+    }
+
+    #[test]
+    fn enter_applies_the_filter_menus_cursor_and_closes_it() {
+        let mut a = app(&[("a.md", "# One\n\n```sh name=x\n:\n```\n")]);
+        a.open_filter_menu();
+        a.move_filter_menu_cursor(1); // Blocks
+        a.confirm_filter_menu();
+        assert_eq!(a.filter_menu, None);
+        assert_eq!(a.filter, Filter::Blocks);
+    }
+
+    #[test]
+    fn render_shows_the_filter_menu_box_floating_over_the_still_visible_tree() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.open_filter_menu();
+        let mut sink = Vec::new();
+        render(&mut a, &mut sink).unwrap();
+        let out = String::from_utf8(sink).unwrap();
+        assert!(out.contains("Filter"), "{out:?}");
+        assert!(out.contains("eval-chain"), "{out:?}");
+        assert!(out.contains('┌') && out.contains('┐'), "{out:?}");
+        assert!(out.contains("One"), "the tree stays visible around the box: {out:?}");
     }
 
     #[test]
@@ -2404,14 +2672,14 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_the_help_screen_instead_of_the_tree_while_help_is_on() {
+    fn render_shows_the_help_box_floating_over_the_still_visible_tree_while_help_is_on() {
         let mut a = app(&[("a.md", "# One\n\n## Two\n")]);
         a.toggle_help();
         let mut sink = Vec::new();
         render(&mut a, &mut sink).unwrap();
         let out = String::from_utf8(sink).unwrap();
         assert!(out.contains("keybindings"), "{out:?}");
-        assert!(!out.contains("One") && !out.contains("Two"), "the tree itself should not be drawn: {out:?}");
+        assert!(out.contains('┌') && out.contains('┐'), "the help reference draws as a boxed overlay: {out:?}");
     }
 
     #[test]

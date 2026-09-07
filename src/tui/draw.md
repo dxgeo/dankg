@@ -296,6 +296,72 @@ pub fn compose(tree: &Drawing, panel: &Drawing, rows: usize, tree_cols: usize, p
 }
 ```
 
+`box_grid` and `overlay` are how the filter menu and the help
+reference each draw as a small box floating over the tree/panel,
+rather than replacing the whole frame the way help once did.
+`box_grid` never knows where it will land -- sizing itself from its
+own longest line -- and `overlay` never knows what it is pasting --
+just glyphs and where they go -- the same separation `pane_grid`/
+`compose` already keep between building a pane and placing it.
+
+```rust name=overlay path=tui/draw.rs
+/// `lines` wrapped in a `┌─┐│└┘` box, sized to its own longest line
+/// plus one column of padding on each side. Ready to hand straight to
+/// [`overlay`].
+pub fn box_grid(lines: &[String]) -> Drawing {
+    let inner_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let border = "─".repeat(inner_width + 2);
+    let mut boxed = vec![format!("┌{border}┐")];
+    for line in lines {
+        let pad = inner_width - line.chars().count();
+        boxed.push(format!("│ {line}{} │", " ".repeat(pad)));
+    }
+    boxed.push(format!("└{border}┘"));
+    pane_grid(&boxed, inner_width + 4)
+}
+
+/// Pastes `content` on top of `base` at `(row, col)`, overwriting
+/// whatever was already there, including any `current`/`secondary`
+/// attribute underneath it -- a stale reverse-video tree row must
+/// never bleed through a box drawn on top of it. Out-of-range rows or
+/// columns are silently clipped, the same tolerance [`mark_row`]
+/// already has for a scroll offset that leaves a row off screen.
+pub fn overlay(base: &Drawing, content: &Drawing, row: usize, col: usize) -> Drawing {
+    let mut out = base.clone();
+    for (r, content_row) in content.grid.iter().enumerate() {
+        let Some(target) = out.grid.get_mut(row + r) else { break };
+        let Some(cur) = out.current.get_mut(row + r) else { break };
+        let Some(sec) = out.secondary.get_mut(row + r) else { break };
+        for (c, &ch) in content_row.iter().enumerate() {
+            let Some(cell) = target.get_mut(col + c) else { break };
+            *cell = ch;
+            // Copied from `content`'s own attributes, not just cleared
+            // to `false`: a filter-menu box marks its own highlighted
+            // row (`mark_row`, on `content` itself, before this call)
+            // and that highlight has to survive the paste. A plain
+            // help box never marks anything, so this still clears
+            // whatever the base had underneath it either way.
+            if let Some(f) = cur.get_mut(col + c) {
+                *f = content.current[r][c];
+            }
+            if let Some(f) = sec.get_mut(col + c) {
+                *f = content.secondary[r][c];
+            }
+        }
+    }
+    out
+}
+
+/// A box's own top-left corner, centered over a `rows` x `cols` frame.
+/// Clamped to `0` rather than going negative on a box bigger than the
+/// frame -- the box still draws, just clipped by `overlay`'s own
+/// out-of-range tolerance, instead of panicking on an underflowed
+/// `usize` subtraction.
+pub fn centered(box_rows: usize, box_cols: usize, rows: usize, cols: usize) -> (usize, usize) {
+    (rows.saturating_sub(box_rows) / 2, cols.saturating_sub(box_cols) / 2)
+}
+```
+
 ## Tests
 
 ```rust name=tests path=tui/draw.rs
@@ -433,6 +499,59 @@ mod tests {
         let panel = pane_grid(&["c".to_string()], 1);
         let frame = compose(&tree, &panel, 2, 1, 1);
         assert_eq!(render_lines(&frame.grid), vec!["a│c".to_string(), "b│ ".to_string()]);
+    }
+
+    #[test]
+    fn box_grid_sizes_itself_to_its_own_longest_line() {
+        let b = box_grid(&["hi".to_string(), "longer".to_string()]);
+        assert_eq!(
+            render_lines(&b.grid),
+            vec!["┌────────┐".to_string(), "│ hi     │".to_string(), "│ longer │".to_string(), "└────────┘".to_string()]
+        );
+    }
+
+    #[test]
+    fn overlay_pastes_content_at_the_given_offset_leaving_the_rest_of_base_untouched() {
+        let base = pane_grid(&["aaaa".to_string(), "aaaa".to_string(), "aaaa".to_string()], 4);
+        let content = pane_grid(&["bb".to_string()], 2);
+        let out = overlay(&base, &content, 1, 1);
+        assert_eq!(render_lines(&out.grid), vec!["aaaa".to_string(), "abba".to_string(), "aaaa".to_string()]);
+    }
+
+    #[test]
+    fn overlay_clears_attributes_underneath_it() {
+        let mut base = pane_grid(&["aaaa".to_string()], 4);
+        mark_row(&mut base, 0, 0, 4, RowStyle::Current);
+        let content = pane_grid(&["bb".to_string()], 2);
+        let out = overlay(&base, &content, 0, 1);
+        assert_eq!(out.current[0], vec![true, false, false, true], "only the pasted-over cells lose the attribute");
+    }
+
+    #[test]
+    fn overlay_carries_over_the_contents_own_highlight() {
+        let base = pane_grid(&["aaaa".to_string()], 4);
+        let mut content = pane_grid(&["bb".to_string()], 2);
+        mark_row(&mut content, 0, 0, 2, RowStyle::Current);
+        let out = overlay(&base, &content, 0, 1);
+        assert_eq!(out.current[0], vec![false, true, true, false], "a menu box's own selected row survives the paste");
+    }
+
+    #[test]
+    fn overlay_clips_rather_than_panics_when_content_runs_past_bases_edge() {
+        let base = pane_grid(&["aa".to_string()], 2);
+        let content = pane_grid(&["bbbb".to_string(), "cccc".to_string()], 4);
+        let out = overlay(&base, &content, 0, 0); // wider and taller than base
+        assert_eq!(render_lines(&out.grid), vec!["bb".to_string()]);
+    }
+
+    #[test]
+    fn centered_places_a_box_in_the_middle_of_the_frame() {
+        assert_eq!(centered(2, 4, 10, 20), (4, 8));
+    }
+
+    #[test]
+    fn centered_clamps_to_zero_rather_than_underflowing_on_an_oversized_box() {
+        assert_eq!(centered(20, 20, 10, 10), (0, 0));
     }
 }
 ```

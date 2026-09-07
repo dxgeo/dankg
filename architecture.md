@@ -1002,18 +1002,40 @@ private to
 `eval::plan::resolve_dep`/`dep_error`/`xdep_error`/`DepLookup`, and
 `eval::result::verified_hash`/`block_index_for`.
 
-`f` cycles a `Filter` state (`App::cycle_filter`) through `All`/
-`Blocks`/`Eval-chain`/`File-artifact`, hiding a non-matching row while
-keeping its ancestors visible -- the same "hide, not dim" model
-`/`-search's own ancestor-reveal already trained, as a standing
-choice instead of a one-shot jump. `Eval-chain` settles
-dependency-surfacing.md §3's own open question in favor of "declares
-*or* is targeted": a block only ever named by another's `deps=`/
-`xdeps=`, with nothing of its own to declare, still matches --
-otherwise the filter would hide the very leaves a reader turns it on
-to find. The full rationale for all of this, including the glyph
-choices still open for debate, is dependency-surfacing.md's own
-design record.
+`f` opens a small filter-picker overlay rather than cycling in place:
+up/down move the menu's own cursor among `All`/`Blocks`/`Eval-chain`/
+`File-artifact` (`App::move_filter_menu_cursor`, never touching
+`self.filter` itself), `enter` applies whichever it lands on
+(`App::confirm_filter_menu` -> `apply_filter`), `esc` closes it
+unapplied. Applying a `Filter` hides a non-matching row while keeping
+its ancestors visible -- the same "hide, not dim" model `/`-search's
+own ancestor-reveal already trained, as a standing choice instead of
+a one-shot jump. `Eval-chain` settles dependency-surfacing.md §3's
+own open question in favor of "declares *or* is targeted": a block
+only ever named by another's `deps=`/`xdeps=`, with nothing of its
+own to declare, still matches -- otherwise the filter would hide the
+very leaves a reader turns it on to find.
+
+Each `Filter` remembers its own last selected row independently
+(`App::filter_history`, keyed by variant), restored on returning to
+it -- force-expanding its ancestors (`reveal_and_select`) rather than
+a plain "select if already visible," since a collapsed ancestor since
+the memory was recorded would otherwise reintroduce the exact stuck-
+cursor bug the very first version of this filter had. A reader who
+has explicitly navigated since the last filter change
+(`App::moved_since_filter_change`) keeps that new position instead,
+even against a filter with a real memory of its own: manual
+navigation always outranks a remembered position, on every filter
+including `All`, so an intentional move is never silently overridden
+by what the reader was doing three filters ago.
+
+`?` and the filter menu both draw as a small box floating over the
+still-visible tree and panel (`draw::box_grid` + `draw::overlay`,
+centered by `draw::centered`), replacing `help`'s own earlier full-
+screen takeover. `box_grid` sizes itself to its own longest line with
+no awareness of the terminal, so `render` clips each help line to
+what actually fits first -- some are long enough on their own to have
+pushed an unclipped box's right border off screen entirely.
 
 ## Jump and default depth
 
