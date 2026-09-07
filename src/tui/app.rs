@@ -22,10 +22,11 @@
 use super::{draw, editor, eval, input, term};
 use crate::config::{Config, Keymap};
 use crate::diag::Diags;
+use crate::eval::{files::Files, plan, result};
 use crate::graph::{index, query, resolve, view, Graph, NodeId, NodeKind};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Cycle state for `keys.eval`: the selected node's named blocks, and
 /// which one the reader has cycled to. `file` is captured, rather than
@@ -51,6 +52,39 @@ enum Focus {
     Panel,
 }
 
+/// Which rows `push_row` keeps, cycled by `f`
+/// (dependency-surfacing.md, §3). `All` prunes nothing. Every other
+/// variant hides a non-matching row while keeping its ancestors
+/// visible, the same "hide, not dim" mental model `/`-search's own
+/// ancestor-reveal already trained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    All,
+    Blocks,
+    EvalChain,
+    FileArtifact,
+}
+
+impl Filter {
+    fn next(self) -> Filter {
+        match self {
+            Filter::All => Filter::Blocks,
+            Filter::Blocks => Filter::EvalChain,
+            Filter::EvalChain => Filter::FileArtifact,
+            Filter::FileArtifact => Filter::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Filter::All => "all",
+            Filter::Blocks => "blocks",
+            Filter::EvalChain => "eval-chain",
+            Filter::FileArtifact => "file-artifact",
+        }
+    }
+}
+
 /// One visible left-pane row, rebuilt fresh from `index`/`children`/
 /// `expanded` every frame -- cheap at this corpus's size, the same
 /// "just rebuild it" reasoning `draw.rs`'s own header comment already
@@ -61,27 +95,41 @@ struct TreeRow {
     depth: u32,
     /// `None`: no children, never a `▸`/`▾` marker. `Some(expanded)`.
     marker: Option<bool>,
-    /// `→1 ←2 ⚭`-style summary of this node's own non-containment edges
-    /// (`query::links_for`); empty when it touches none.
+    /// `⇒1 ⇐1 ✗1 ↻1 ▤ →1 ←2 ⚭`-style summary of this node's own
+    /// non-containment edges (`query::links_for`) and dependency facts
+    /// (`self.deps`, `badge_for`); empty when it touches none.
     badge: String,
 }
 
-/// One right-pane row. `Outgoing`/`Backlink` are navigable -- `enter`,
-/// while the panel has focus, jumps through them. `Relation` is plain
-/// display text: a relation node has no file/line (`Node.line == 0`, a
-/// synthetic `db:NAME` namespace for `Node.file`), so there is nowhere
-/// meaningful to jump, and the panel's own cursor skips these rows.
+/// One right-pane row. `Outgoing`/`Backlink`/`DepOut`/`DepIn` are
+/// navigable -- `enter`, while the panel has focus, jumps through
+/// them. Everything else is plain display text, with nowhere
+/// meaningful to jump: `Relation` (a relation node has no file/line,
+/// `Node.line == 0`, a synthetic `db:NAME` namespace for `Node.file`),
+/// `FileDep` (decision 33's `produces=file:PATH`/`reads=file:PATH`,
+/// never resolved on its own -- dependency-surfacing.md, §C), and
+/// `DepBroken`/`DepPending` (a `deps=`/`xdeps=` entry that failed to
+/// resolve, or resolved but has not run yet -- §D, §E). The panel's
+/// own cursor skips every non-navigable row.
 enum PanelRow {
     Outgoing { target: NodeId, title: String },
     Backlink { target: NodeId, title: String },
     Relation { text: String },
+    DepOut { target: NodeId, title: String },
+    DepIn { target: NodeId, title: String },
+    FileDep { text: String },
+    DepBroken { text: String },
+    DepPending { text: String },
 }
 
 impl PanelRow {
     fn target(&self) -> Option<&NodeId> {
         match self {
-            PanelRow::Outgoing { target, .. } | PanelRow::Backlink { target, .. } => Some(target),
-            PanelRow::Relation { .. } => None,
+            PanelRow::Outgoing { target, .. }
+            | PanelRow::Backlink { target, .. }
+            | PanelRow::DepOut { target, .. }
+            | PanelRow::DepIn { target, .. } => Some(target),
+            PanelRow::Relation { .. } | PanelRow::FileDep { .. } | PanelRow::DepBroken { .. } | PanelRow::DepPending { .. } => None,
         }
     }
 }
@@ -109,6 +157,10 @@ struct App {
     /// they carry no `parent` and are never a tree row, only ever panel
     /// text (`build_children`).
     children: HashMap<NodeId, Vec<NodeId>>,
+    /// `deps=`/`xdeps=`/file-artifact facts about the corpus, computed
+    /// once alongside `children`/`roots` (`compute_dep_data`,
+    /// dependency-surfacing.md).
+    deps: DepData,
     /// Every top-level tree row: each node with `parent: None` that is
     /// not a `Relation` -- one per file's own top-level heading, or its
     /// synthetic wrapper (`graph/build.rs`'s `file_node`) -- in
@@ -130,6 +182,11 @@ struct App {
     /// mean. `r`/`reload` both replace this wholesale with a fresh
     /// `initial_expansion(...)` rather than editing it in place.
     expanded: HashSet<NodeId>,
+    /// Which rows `push_row` keeps, cycled by `keys` fixed letter `f`.
+    /// `r`/`reload` leave this alone -- unlike `expanded`, a filter is
+    /// the reader's own standing choice, not tree-shape state that a
+    /// reload could invalidate.
+    filter: Filter,
     selected: NodeId,
     /// Which pane owns the direction keys/enter/esc right now.
     focus: Focus,
@@ -279,6 +336,7 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
         match key {
             input::Key::Char('?') => app.toggle_help(),
             input::Key::Char('/') => app.start_search(),
+            input::Key::Char('f') => app.cycle_filter(),
             input::Key::Char('n') => {
                 app.clear_transient();
                 app.search_next();
@@ -392,6 +450,7 @@ fn help_lines(keys: &Keymap) -> Vec<String> {
         "  tab                toggle focus between the tree and the link panel".to_string(),
         "  /                  jump to a node by title; enter confirms, esc cancels".to_string(),
         "  n / N              jump to the next / previous match of the last search".to_string(),
+        "  f                  cycle the tree filter: all, blocks, eval-chain, file-artifact".to_string(),
         "  esc                cancel an eval cycle or a search; leave the panel".to_string(),
         String::new(),
         format!("  {}                  cycle the selected node's named blocks; enter runs it", keys.eval),
@@ -444,15 +503,29 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         return write_frame(out, &clipped, term_rows);
     }
 
+    // A standing filter claims the status line one tier below search and
+    // an eval outcome -- it is a mode the reader turned on, not a
+    // one-shot action, the same reasoning `eval: [...]` and `/query`
+    // already outrank it for (dependency-surfacing.md, §3).
+    let filter_line =
+        (app.filter != Filter::All && app.status.is_none() && app.search.is_none()).then(|| format!("filter: {}", app.filter.label()));
+
     // The breadcrumb only ever claims the status line when nothing more
-    // urgent already does (search, then an eval outcome), and only while
-    // the panel has focus -- see *Origin breadcrumb* above.
-    let breadcrumb_line = (app.focus == Focus::Panel && app.breadcrumb && app.status.is_none() && app.search.is_none())
-        .then(|| app.index.node(&app.selected).map(|n| n.title.clone()).unwrap_or_else(|| app.selected.to_string()));
+    // urgent already does (search, then an eval outcome, then a standing
+    // filter), and only while the panel has focus -- see *Origin
+    // breadcrumb* above.
+    let breadcrumb_line = (app.focus == Focus::Panel
+        && app.breadcrumb
+        && app.status.is_none()
+        && app.search.is_none()
+        && filter_line.is_none())
+    .then(|| app.index.node(&app.selected).map(|n| n.title.clone()).unwrap_or_else(|| app.selected.to_string()));
 
     // One row reserved at the bottom for `app.status`, the `/query` typed
-    // so far while `app.search` is active, or the origin breadcrumb.
-    let status_rows = usize::from(app.status.is_some() || app.search.is_some() || breadcrumb_line.is_some());
+    // so far while `app.search` is active, the standing filter, or the
+    // origin breadcrumb.
+    let status_rows =
+        usize::from(app.status.is_some() || app.search.is_some() || filter_line.is_some() || breadcrumb_line.is_some());
     let content_rows = term_rows.saturating_sub(status_rows).max(1);
     let panel_cols = draw::panel_width(term_cols);
     let tree_cols = term_cols.saturating_sub(panel_cols + 1).max(1);
@@ -482,6 +555,11 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
             PanelRow::Outgoing { title, .. } => draw::panel_line("→ ", title, panel_cols),
             PanelRow::Backlink { title, .. } => draw::panel_line("← ", title, panel_cols),
             PanelRow::Relation { text } => draw::panel_line("", text, panel_cols),
+            PanelRow::DepOut { title, .. } => draw::panel_line("⇒ ", title, panel_cols),
+            PanelRow::DepIn { title, .. } => draw::panel_line("⇐ ", title, panel_cols),
+            PanelRow::FileDep { text } => draw::panel_line("", text, panel_cols),
+            PanelRow::DepBroken { text } => draw::panel_line("✗ ", text, panel_cols),
+            PanelRow::DepPending { text } => draw::panel_line("↻ ", text, panel_cols),
         })
         .collect();
     let navigable: Vec<usize> = panel_rows.iter().enumerate().filter(|(_, r)| r.target().is_some()).map(|(i, _)| i).collect();
@@ -518,6 +596,8 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         lines.push(format!("/{query}").chars().take(term_cols).collect());
     } else if let Some(status) = &app.status {
         lines.push(status.chars().take(term_cols).collect());
+    } else if let Some(line) = &filter_line {
+        lines.push(line.chars().take(term_cols).collect());
     } else if let Some(title) = &breadcrumb_line {
         lines.push(format!("from: {title}").chars().take(term_cols).collect());
     }
@@ -564,11 +644,49 @@ fn initial_expansion(children: &HashMap<NodeId, Vec<NodeId>>, roots: &[NodeId], 
     expanded
 }
 
-/// "→1 ←2 ⚭": outgoing links, backlinks, and a fixed marker for
-/// "touches at least one produces/reads relation." Zero-valued pieces
-/// are omitted, never printed as `→0`.
-fn badge_for(links: &query::NodeLinks) -> String {
+/// The glyph folded into a row's own title (`push_row`). Matches every
+/// `NodeKind` by name rather than falling back on a wildcard arm, the
+/// same way `NodeKind::as_str` already does -- a future variant fails
+/// to compile here until its own marker is decided, instead of
+/// silently rendering as unmarked as a heading. `Relation` never
+/// actually reaches this (`build_children` excludes it from the
+/// tree), but still gets its own arm for the same reason.
+fn kind_marker(kind: NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Block => "» ",
+        NodeKind::Heading => "",
+        NodeKind::Relation => "",
+    }
+}
+
+/// "⇒1 ⇐1 ✗1 ↻1 ▤ →2 ←1 ⚭": resolved `deps=`/`xdeps=` out and in,
+/// broken and not-yet-run entries, a declared file artifact, then the
+/// existing outgoing/backlink/relation-touch summary, unchanged
+/// (dependency-surfacing.md §B-§E). Zero-valued pieces are omitted,
+/// never printed as `⇒0`. The four dep-glyphs are a first cut, not a
+/// settled choice (§7).
+fn badge_for(id: &NodeId, links: &query::NodeLinks, deps: &DepData) -> String {
     let mut parts = Vec::new();
+    let count = |m: &HashMap<NodeId, Vec<String>>| m.get(id).map_or(0, Vec::len);
+    let out = deps.dep_out.get(id).map_or(0, Vec::len);
+    let inc = deps.dep_in.get(id).map_or(0, Vec::len);
+    if out > 0 {
+        parts.push(format!("⇒{out}"));
+    }
+    if inc > 0 {
+        parts.push(format!("⇐{inc}"));
+    }
+    let broken = count(&deps.dep_broken);
+    if broken > 0 {
+        parts.push(format!("✗{broken}"));
+    }
+    let pending = count(&deps.dep_pending);
+    if pending > 0 {
+        parts.push(format!("↻{pending}"));
+    }
+    if deps.file_deps.contains_key(id) {
+        parts.push("▤".to_string());
+    }
     if !links.outgoing.is_empty() {
         parts.push(format!("→{}", links.outgoing.len()));
     }
@@ -597,23 +715,66 @@ impl App {
     /// frame, without touching `self.expanded` at all (see *Jump and
     /// default depth*, architecture.md).
     fn visible_rows_with(&self, expanded: &HashSet<NodeId>) -> Vec<TreeRow> {
+        let membership = self.filter_membership();
         let mut rows = Vec::new();
         for root in &self.roots {
-            self.push_row(root, 0, expanded, &mut rows);
+            self.push_row(root, 0, expanded, membership.as_ref(), &mut rows);
         }
         rows
     }
 
-    fn push_row(&self, id: &NodeId, depth: u32, expanded: &HashSet<NodeId>, out: &mut Vec<TreeRow>) {
+    /// The node ids `self.filter` lets through, plus every ancestor of
+    /// each match, so a reader can still see where a match lives -- the
+    /// same "hide, not dim" mental model `/`-search's own ancestor-
+    /// reveal already trained, as a standing state instead of a
+    /// one-shot jump (dependency-surfacing.md, §3). `None` for
+    /// `Filter::All`: no membership set to consult, so `push_row` skips
+    /// the check entirely rather than paying for a no-op filter.
+    fn filter_membership(&self) -> Option<HashSet<NodeId>> {
+        if self.filter == Filter::All {
+            return None;
+        }
+        let mut set = HashSet::new();
+        for node in &self.index.nodes {
+            if self.matches_filter(&node.id) {
+                set.insert(node.id.clone());
+                set.extend(ancestors_of(&self.index, &node.id));
+            }
+        }
+        Some(set)
+    }
+
+    fn matches_filter(&self, id: &NodeId) -> bool {
+        match self.filter {
+            Filter::All => true,
+            Filter::Blocks => self.index.node(id).is_some_and(|n| n.kind == NodeKind::Block),
+            // "declares or is targeted" (§3's leaning): a block that
+            // only ever gets named by others' `deps=`/`xdeps=` -- a
+            // shared `setup`, say -- still belongs in its own filter.
+            Filter::EvalChain => {
+                self.deps.dep_out.contains_key(id)
+                    || self.deps.dep_in.contains_key(id)
+                    || self.deps.dep_broken.contains_key(id)
+                    || self.deps.dep_pending.contains_key(id)
+            }
+            Filter::FileArtifact => self.deps.file_deps.contains_key(id),
+        }
+    }
+
+    fn push_row(&self, id: &NodeId, depth: u32, expanded: &HashSet<NodeId>, filter: Option<&HashSet<NodeId>>, out: &mut Vec<TreeRow>) {
+        if filter.is_some_and(|allowed| !allowed.contains(id)) {
+            return;
+        }
         let Some(node) = self.index.node(id) else { return };
         let kids = self.children.get(id);
         let has_children = kids.is_some_and(|k| !k.is_empty());
         let is_expanded = has_children && expanded.contains(id);
-        let badge = badge_for(&query::links_for(&self.index, id));
-        out.push(TreeRow { id: id.clone(), title: node.title.clone(), depth, marker: has_children.then_some(is_expanded), badge });
+        let badge = badge_for(id, &query::links_for(&self.index, id), &self.deps);
+        let title = format!("{}{}", kind_marker(node.kind), node.title);
+        out.push(TreeRow { id: id.clone(), title, depth, marker: has_children.then_some(is_expanded), badge });
         if is_expanded {
             for kid in kids.unwrap() {
-                self.push_row(kid, depth + 1, expanded, out);
+                self.push_row(kid, depth + 1, expanded, filter, out);
             }
         }
     }
@@ -633,7 +794,10 @@ impl App {
     /// The selected node's own cross-references, against `self.index` --
     /// the panel describes the selection's place in the whole corpus,
     /// the same scope the tree itself always represents. Outgoing
-    /// links, then backlinks, then produces, then reads.
+    /// links, then backlinks, then produces, then reads, then this same
+    /// node's own dependency facts from `self.deps` (dep-out, dep-in,
+    /// file artifacts, broken, pending -- dependency-surfacing.md
+    /// §B-§E).
     fn panel_rows(&self) -> Vec<PanelRow> {
         let links = query::links_for(&self.index, &self.selected);
         let title_of = |id: &NodeId| self.index.node(id).map(|n| n.title.clone()).unwrap_or_else(|| id.to_string());
@@ -650,17 +814,199 @@ impl App {
         for rel in &links.reads {
             rows.push(PanelRow::Relation { text: format!("reads: {}", title_of(rel)) });
         }
+        for target in self.deps.dep_out.get(&self.selected).into_iter().flatten() {
+            rows.push(PanelRow::DepOut { target: target.clone(), title: title_of(target) });
+        }
+        for source in self.deps.dep_in.get(&self.selected).into_iter().flatten() {
+            rows.push(PanelRow::DepIn { target: source.clone(), title: title_of(source) });
+        }
+        for text in self.deps.file_deps.get(&self.selected).into_iter().flatten() {
+            rows.push(PanelRow::FileDep { text: text.clone() });
+        }
+        for text in self.deps.dep_broken.get(&self.selected).into_iter().flatten() {
+            rows.push(PanelRow::DepBroken { text: text.clone() });
+        }
+        for text in self.deps.dep_pending.get(&self.selected).into_iter().flatten() {
+            rows.push(PanelRow::DepPending { text: text.clone() });
+        }
         rows
     }
 }
 
-fn build(paths: &[String], cache: bool) -> Result<(PathBuf, Config, Keymap, Graph, u32, Vec<String>, Diags), String> {
+/// Every dependency-surfacing fact `App` needs, computed once at load
+/// time and cached alongside `children`/`roots` -- the same staleness
+/// policy as the rest of the tree (dependency-surfacing.md, §4). Empty
+/// for every test built from an in-memory `Graph` (`App::from_graph`):
+/// there is no real file on disk for `Files` to read there.
+struct DepData {
+    /// This node's own resolved `deps=`/`xdeps=` targets (§B).
+    dep_out: HashMap<NodeId, Vec<NodeId>>,
+    /// Other nodes whose resolved `deps=`/`xdeps=` name this one (§B).
+    dep_in: HashMap<NodeId, Vec<NodeId>>,
+    /// This node's own declared `deps=`/`xdeps=` entries that failed to
+    /// resolve, as `PlanError`'s own `Display` text (§D).
+    dep_broken: HashMap<NodeId, Vec<String>>,
+    /// This node's own resolved `xdeps=` entries whose target has not
+    /// actually run yet, as `eval::result`'s own error text (§E).
+    dep_pending: HashMap<NodeId, Vec<String>>,
+    /// This node's own declared `produces=file:PATH`/`reads=file:PATH`,
+    /// raw, one row of text per entry (§C).
+    file_deps: HashMap<NodeId, Vec<String>>,
+}
+
+impl DepData {
+    fn empty() -> DepData {
+        DepData {
+            dep_out: HashMap::new(),
+            dep_in: HashMap::new(),
+            dep_broken: HashMap::new(),
+            dep_pending: HashMap::new(),
+            file_deps: HashMap::new(),
+        }
+    }
+}
+
+/// The read-only pieces every per-entry resolver below needs. Bundled
+/// so each one takes a single reference instead of five, and so adding
+/// a sixth someday touches this struct, not every call site.
+struct DepCtx<'a> {
+    blocks: &'a [plan::BlockRef<'a>],
+    files: &'a Files,
+    config: &'a Config,
+    index: &'a Graph,
+    node_by_line: &'a HashMap<(String, u32), NodeId>,
+    index_of_node: &'a HashMap<NodeId, usize>,
+}
+
+impl DepCtx<'_> {
+    /// A block's own row, by `(file, line)` -- see `compute_dep_data`'s
+    /// own doc comment for why not `(file, name)`. `Node.file` and
+    /// `BlockRef.file` are both the on-disk path, extension included --
+    /// no `strip_extension` needed here, unlike `NodeId.file`.
+    fn node_of(&self, b: &plan::BlockRef) -> Option<NodeId> {
+        self.node_by_line.get(&(b.file.to_string(), b.line)).cloned()
+    }
+}
+
+fn compute_dep_data(root: &Path, config: &Config, index: &Graph, corpus_paths: &[String]) -> DepData {
+    let mut files = Files::new(root.to_path_buf());
+    let mut diags = Diags::new("dankg");
+    files.load_all(corpus_paths, &mut diags);
+    let blocks = files.all_blocks();
+
+    // `(file, line) -> NodeId`, `Block` nodes only -- the only kind
+    // `top_level_blocks` ever produces, and the only kind a `deps=`/
+    // `xdeps=` entry can ever legally name.
+    let mut node_by_line: HashMap<(String, u32), NodeId> = HashMap::new();
+    for node in &index.nodes {
+        if node.kind == NodeKind::Block {
+            node_by_line.insert((node.file.clone(), node.line), node.id.clone());
+        }
+    }
+
+    // The reverse: a `blocks` index for a `NodeId`, needed to call
+    // `result::verified_hash` on a `table:NAME` producer that
+    // `graph::query::find_producer` only ever hands back as a `NodeId`.
+    let index_of_node: HashMap<NodeId, usize> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| node_by_line.get(&(b.file.to_string(), b.line)).map(|id| (id.clone(), i)))
+        .collect();
+
+    let ctx = DepCtx { blocks: &blocks, files: &files, config, index, node_by_line: &node_by_line, index_of_node: &index_of_node };
+    let mut data = DepData::empty();
+    let mut hash_cache: HashMap<usize, Result<u64, String>> = HashMap::new();
+
+    for b in &blocks {
+        let Some(nid) = ctx.node_of(b) else { continue };
+        for dep in &b.deps {
+            resolve_plain_dep(&ctx, &nid, b, dep, &mut data);
+        }
+        for xdep in &b.xdeps {
+            resolve_xdep(&ctx, &nid, b, xdep, &mut hash_cache, &mut data);
+        }
+        push_file_deps(&nid, b, &mut data);
+    }
+    data
+}
+
+/// One `deps=` entry: resolved links this block to its target both
+/// ways (§B); unresolved records why, in `PlanError`'s own words (§D).
+fn resolve_plain_dep(ctx: &DepCtx, nid: &NodeId, b: &plan::BlockRef, dep: &str, data: &mut DepData) {
+    match plan::resolve_dep(ctx.blocks, b.file, dep) {
+        Ok(idx) => link(nid, ctx.node_of(&ctx.blocks[idx]), data),
+        Err(e) => broken(nid, plan::dep_error(b.name.to_string(), dep, e).to_string(), data),
+    }
+}
+
+/// One `xdeps=` entry, block- or `table:`-targeted (decision 35). Never
+/// `plan::resolve_xdeps`: that fails fast on a block's *first* broken
+/// entry, but this wants one outcome per declared entry (§4, §D).
+fn resolve_xdep(
+    ctx: &DepCtx,
+    nid: &NodeId,
+    b: &plan::BlockRef,
+    xdep: &str,
+    hash_cache: &mut HashMap<usize, Result<u64, String>>,
+    data: &mut DepData,
+) {
+    let Some(table_name) = xdep.strip_prefix("table:") else {
+        return match plan::resolve_dep(ctx.blocks, b.file, xdep) {
+            Ok(idx) => {
+                link(nid, ctx.node_of(&ctx.blocks[idx]), data);
+                check_pending(ctx, nid, idx, hash_cache, data);
+            }
+            Err(e) => broken(nid, plan::xdep_error(b.name.to_string(), xdep, e).to_string(), data),
+        };
+    };
+    match query::find_producer(ctx.index, table_name) {
+        Ok(producer_id) => {
+            link(nid, Some(producer_id.clone()), data);
+            if let Some(&idx) = ctx.index_of_node.get(&producer_id) {
+                check_pending(ctx, nid, idx, hash_cache, data);
+            }
+        }
+        Err(msg) => broken(nid, format!("`{}` xdeps on `table:{table_name}`: {msg}", b.name), data),
+    }
+}
+
+/// Flags a resolved `xdeps=` target that has not actually run yet --
+/// `xdeps=` alone never triggers a run (§E) -- reusing `dankg check`'s
+/// own staleness check rather than a second copy of it.
+fn check_pending(ctx: &DepCtx, nid: &NodeId, target_idx: usize, hash_cache: &mut HashMap<usize, Result<u64, String>>, data: &mut DepData) {
+    let mut visiting = HashSet::new();
+    if let Err(msg) = result::verified_hash(ctx.blocks, ctx.files, ctx.config, Some(ctx.index), target_idx, &mut visiting, hash_cache) {
+        data.dep_pending.entry(nid.clone()).or_default().push(msg);
+    }
+}
+
+fn link(nid: &NodeId, target: Option<NodeId>, data: &mut DepData) {
+    let Some(tid) = target else { return };
+    data.dep_out.entry(nid.clone()).or_default().push(tid.clone());
+    data.dep_in.entry(tid).or_default().push(nid.clone());
+}
+
+fn broken(nid: &NodeId, msg: String, data: &mut DepData) {
+    data.dep_broken.entry(nid.clone()).or_default().push(msg);
+}
+
+fn push_file_deps(nid: &NodeId, b: &plan::BlockRef, data: &mut DepData) {
+    if let Some(p) = b.produces {
+        data.file_deps.entry(nid.clone()).or_default().push(format!("produces: {p}"));
+    }
+    if let Some(r) = b.reads {
+        data.file_deps.entry(nid.clone()).or_default().push(format!("reads: {r}"));
+    }
+}
+
+fn build(paths: &[String], cache: bool) -> Result<(PathBuf, Config, Keymap, Graph, u32, Vec<String>, Vec<String>, Diags), String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
+    let corpus_paths: Vec<String> = corpus.files.iter().map(|f| f.path.clone()).collect();
     let index = resolve::resolve(&corpus.files, &mut diags);
     let default_depth = corpus.config.tui_depth(&mut diags);
     let keys = corpus.config.keymap(&mut diags);
-    Ok((corpus.root, corpus.config, keys, index, default_depth, corpus.entries, diags))
+    Ok((corpus.root, corpus.config, keys, index, default_depth, corpus.entries, corpus_paths, diags))
 }
 
 /// Which of `roots` the command line named, and how many levels below
@@ -687,12 +1033,13 @@ fn resolve_entry_roots(
 
 impl App {
     fn load(paths: &[String], cache: bool, depth: Option<u32>, all: bool) -> Result<App, String> {
-        let (root, config, keys, index, default_depth, entries, mut diags) = build(paths, cache)?;
+        let (root, config, keys, index, default_depth, entries, corpus_paths, mut diags) = build(paths, cache)?;
         let breadcrumb = config.tui_breadcrumb(&mut diags);
         let (children, roots) = build_children(&index);
         if roots.is_empty() {
             return Err("nothing to draw: the index is empty".to_string());
         }
+        let deps = compute_dep_data(&root, &config, &index, &corpus_paths);
         let (entry_roots, initial_depth) = resolve_entry_roots(&index, &roots, &entries, depth, all, default_depth);
         let expanded = initial_expansion(&children, &entry_roots, initial_depth);
         let selected = entry_roots.first().cloned().unwrap_or_else(|| roots[0].clone());
@@ -706,11 +1053,13 @@ impl App {
             keys,
             index,
             children,
+            deps,
             roots,
             entry_roots,
             initial_depth,
             default_depth,
             expanded,
+            filter: Filter::All,
             selected,
             focus: Focus::Tree,
             panel_cursor: 0,
@@ -769,7 +1118,7 @@ impl App {
     /// one risks a confusing placement more than starting clean costs a
     /// keypress.
     fn reload(&mut self) {
-        let Ok((root, config, keys, index, default_depth, entries, diags)) = build(&self.paths, self.cache) else {
+        let Ok((root, config, keys, index, default_depth, entries, corpus_paths, diags)) = build(&self.paths, self.cache) else {
             return;
         };
         self.diags.absorb(diags);
@@ -777,6 +1126,7 @@ impl App {
         if roots.is_empty() {
             return;
         }
+        let deps = compute_dep_data(&root, &config, &index, &corpus_paths);
         let (entry_roots, initial_depth) = resolve_entry_roots(&index, &roots, &entries, self.depth, self.all, default_depth);
         let expanded = initial_expansion(&children, &entry_roots, initial_depth);
         // Existing behind a now-collapsed ancestor is no more useful to
@@ -789,6 +1139,7 @@ impl App {
         self.keys = keys;
         self.index = index;
         self.children = children;
+        self.deps = deps;
         self.roots = roots;
         self.entry_roots = entry_roots;
         self.initial_depth = initial_depth;
@@ -830,6 +1181,48 @@ impl App {
     fn clear_transient(&mut self) {
         self.block_select = None;
         self.status = None;
+    }
+
+    /// `f`: cycles `self.filter` (`Filter::next`). A standing choice,
+    /// not tree-shape state -- `self.expanded` is left exactly as it
+    /// is, so cycling the filter never re-collapses the tree the way
+    /// `r` does. `self.selected` is the one exception: a new filter can
+    /// drop the current row out of the tree entirely, and leaving
+    /// `self.selected` pointed at a row `visible_rows` no longer
+    /// produces would strand every arrow key on a `position` lookup
+    /// that never finds it (`move_tree_cursor`) -- found by hand,
+    /// filtering to `Blocks` while a plain heading was selected.
+    fn cycle_filter(&mut self) {
+        self.filter = self.filter.next();
+        self.reselect_after_filter_change();
+        self.clear_transient();
+    }
+
+    /// After a filter change, walks `self.selected`'s own `Node.parent`
+    /// chain to the nearest ancestor the new filter still keeps --
+    /// mirroring `reload`'s own "still visible" handling, but for a
+    /// filter change rather than a fresh index. Falls back to the
+    /// first matching node anywhere, in `index.nodes`' own
+    /// deterministic order, when nothing in that chain (not even the
+    /// file root) survives either. Leaves `self.selected` untouched,
+    /// same as `reload`'s own best-effort policy, only when the filter
+    /// matches nothing in the whole corpus.
+    fn reselect_after_filter_change(&mut self) {
+        let Some(membership) = self.filter_membership() else { return }; // Filter::All: nothing to check
+        if membership.contains(&self.selected) {
+            return;
+        }
+        let mut ancestor = self.index.node(&self.selected).and_then(|n| n.parent.clone());
+        while let Some(id) = ancestor {
+            if membership.contains(&id) {
+                self.selected = id;
+                return;
+            }
+            ancestor = self.index.node(&id).and_then(|n| n.parent.clone());
+        }
+        if let Some(node) = self.index.nodes.iter().find(|n| membership.contains(&n.id)) {
+            self.selected = node.id.clone();
+        }
     }
 }
 
@@ -1134,11 +1527,13 @@ impl App {
             keys: Keymap::default(),
             index: graph,
             children,
+            deps: DepData::empty(),
             entry_roots: roots.clone(),
             roots,
             initial_depth: depth,
             default_depth: crate::config::DEFAULT_TUI_DEPTH,
             expanded,
+            filter: Filter::All,
             selected,
             focus: Focus::Tree,
             panel_cursor: 0,
@@ -1205,6 +1600,16 @@ mod tests {
     fn visible_rows_shows_only_the_entry_at_depth_zero() {
         let a = app_with_hidden_child();
         assert_eq!(ids(&a.visible_rows()), vec!["a#entry"]);
+    }
+
+    #[test]
+    fn block_rows_get_a_kind_marker_prefix_heading_rows_do_not() {
+        let a = app(&[("a.md", "# One\n\n```sh name=setup\necho hi\n```\n")]);
+        let rows = a.visible_rows();
+        let heading = rows.iter().find(|r| r.id.slug == "one").unwrap();
+        let block = rows.iter().find(|r| r.id.slug == "setup").unwrap();
+        assert_eq!(heading.title, "One");
+        assert_eq!(block.title, "» setup");
     }
 
     #[test]
@@ -1658,6 +2063,225 @@ mod tests {
             ids(&a.visible_rows())
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_resolved_dep_links_both_nodes() {
+        let dir = write_corpus(&[("a.md", "```sh name=setup\necho hi\n```\n\n```sh name=top deps=setup\necho hi\n```\n")]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, false).unwrap();
+        let top = a.index.nodes.iter().find(|n| n.id.slug == "top").unwrap().id.clone();
+        let setup = a.index.nodes.iter().find(|n| n.id.slug == "setup").unwrap().id.clone();
+        assert_eq!(a.deps.dep_out.get(&top), Some(&vec![setup.clone()]));
+        assert_eq!(a.deps.dep_in.get(&setup), Some(&vec![top]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unresolved_dep_is_recorded_as_broken_with_planerrors_own_wording() {
+        let dir = write_corpus(&[("a.md", "```sh name=top deps=ghost\necho hi\n```\n")]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, false).unwrap();
+        let top = a.index.nodes.iter().find(|n| n.id.slug == "top").unwrap().id.clone();
+        let msgs = a.deps.dep_broken.get(&top).cloned().unwrap_or_default();
+        assert_eq!(msgs, vec!["`top` depends on `ghost`, which is not a top-level named block".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_resolved_but_never_run_xdep_is_recorded_as_pending_not_broken() {
+        let dir =
+            write_corpus(&[("a.md", "```sh name=setup\necho hi\n```\n\n```sh name=top xdeps=setup\necho hi\n```\n")]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, false).unwrap();
+        let top = a.index.nodes.iter().find(|n| n.id.slug == "top").unwrap().id.clone();
+        assert!(a.deps.dep_broken.get(&top).is_none(), "a resolved xdep is not broken");
+        let msgs = a.deps.dep_pending.get(&top).cloned().unwrap_or_default();
+        assert_eq!(msgs, vec!["`setup` has no recorded result yet -- run it first".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn declared_file_artifacts_become_plain_panel_text() {
+        let dir = write_corpus(&[("a.md", "```sh name=top produces=file:out.csv\necho hi\n```\n")]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, false).unwrap();
+        let top = a.index.nodes.iter().find(|n| n.id.slug == "top").unwrap().id.clone();
+        assert_eq!(a.deps.file_deps.get(&top), Some(&vec!["produces: file:out.csv".to_string()]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_tree_badge_shows_dep_out_dep_in_and_file_artifact_glyphs() {
+        let dir = write_corpus(&[(
+            "a.md",
+            "```sh name=setup produces=file:out.csv\necho hi\n```\n\n```sh name=top deps=setup\necho hi\n```\n",
+        )]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, true).unwrap(); // all: true, fully expanded
+        let rows = a.visible_rows();
+        let setup = rows.iter().find(|r| r.id.slug == "setup").unwrap();
+        let top = rows.iter().find(|r| r.id.slug == "top").unwrap();
+        assert_eq!(setup.badge, "⇐1 ▤");
+        assert_eq!(top.badge, "⇒1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_tree_badge_shows_broken_and_pending_glyphs() {
+        let dir = write_corpus(&[(
+            "a.md",
+            "```sh name=setup\necho hi\n```\n\n```sh name=top deps=ghost xdeps=setup\necho hi\n```\n",
+        )]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, true).unwrap(); // all: true, fully expanded
+        let top = a.visible_rows().into_iter().find(|r| r.id.slug == "top").unwrap();
+        // deps=ghost fails to resolve (✗1); xdeps=setup resolves fine, so
+        // it still counts toward ⇒N, but setup has never run (↻1) --
+        // "resolved" and "not yet run" are independent, both true here.
+        assert_eq!(top.badge, "⇒1 ✗1 ↻1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panel_rows_expose_dep_out_dep_in_broken_and_pending_with_correct_navigability() {
+        let dir = write_corpus(&[(
+            "a.md",
+            "```sh name=setup\necho hi\n```\n\n```sh name=top deps=setup xdeps=ghost\necho hi\n```\n",
+        )]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.selected = a.index.nodes.iter().find(|n| n.id.slug == "top").unwrap().id.clone();
+        let rows = a.panel_rows();
+        let dep_out = rows.iter().find(|r| matches!(r, PanelRow::DepOut { .. })).unwrap();
+        assert!(dep_out.target().is_some(), "DepOut is navigable");
+        let broken = rows.iter().find(|r| matches!(r, PanelRow::DepBroken { .. })).unwrap();
+        assert!(broken.target().is_none(), "DepBroken is not navigable");
+
+        a.selected = a.index.nodes.iter().find(|n| n.id.slug == "setup").unwrap().id.clone();
+        let dep_in = a.panel_rows().into_iter().find(|r| matches!(r, PanelRow::DepIn { .. })).unwrap();
+        assert!(dep_in.target().is_some(), "DepIn is navigable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn f_cycles_through_every_filter_and_wraps() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        assert_eq!(a.filter, Filter::All);
+        a.cycle_filter();
+        assert_eq!(a.filter, Filter::Blocks);
+        a.cycle_filter();
+        assert_eq!(a.filter, Filter::EvalChain);
+        a.cycle_filter();
+        assert_eq!(a.filter, Filter::FileArtifact);
+        a.cycle_filter();
+        assert_eq!(a.filter, Filter::All, "wraps back to All");
+    }
+
+    #[test]
+    fn cycling_the_filter_never_touches_expanded() {
+        let mut a = app_with_hidden_child();
+        let expanded_before = a.expanded.clone();
+        a.cycle_filter();
+        assert_eq!(a.expanded, expanded_before, "a filter is a standing choice, not tree-shape state");
+    }
+
+    #[test]
+    fn cycling_the_filter_leaves_selected_alone_when_nothing_matches_at_all() {
+        // `app_with_hidden_child` has no blocks anywhere, so `Blocks`
+        // membership is empty -- reselect_after_filter_change's own
+        // best-effort fallback, mirroring reload's, has nothing to fall
+        // back to.
+        let mut a = app_with_hidden_child();
+        let selected_before = a.selected.clone();
+        a.cycle_filter();
+        assert_eq!(a.selected, selected_before);
+    }
+
+    #[test]
+    fn cycling_the_filter_reselects_when_the_current_row_gets_filtered_out() {
+        // The bug found by hand: select a heading with no block
+        // descendant, filter to Blocks, and every arrow key used to be
+        // stuck -- move_tree_cursor's own `position` lookup never found
+        // a `self.selected` that visible_rows no longer produces.
+        let mut a = app(&[("a.md", "# One\n\n## Two\n\n```sh name=x\n:\n```\n\n## Three\n")]);
+        a.selected = a.index.nodes.iter().find(|n| n.id.slug == "three").unwrap().id.clone();
+        a.cycle_filter(); // -> Blocks; Three has no block descendant
+        assert_ne!(a.selected.slug, "three", "no longer pointed at a hidden row");
+        assert!(a.visible_rows().iter().any(|r| r.id == a.selected), "reselected onto something visible");
+        assert_eq!(a.selected.slug, "one", "One is the nearest surviving ancestor of the old selection");
+
+        let before = a.selected.clone();
+        a.down();
+        assert_ne!(a.selected, before, "movement works again");
+    }
+
+    #[test]
+    fn cycling_the_filter_falls_back_to_the_first_match_when_no_ancestor_survives() {
+        // Two unrelated top-level files: selecting a heading in the one
+        // with no blocks at all, then filtering to Blocks, has no
+        // surviving ancestor in that file's own chain to fall back to.
+        let mut a = app(&[("a.md", "# NoBlocks\n"), ("b.md", "# HasBlock\n\n```sh name=x\n:\n```\n")]);
+        a.selected = a.index.nodes.iter().find(|n| n.id.slug == "noblocks").unwrap().id.clone();
+        a.cycle_filter(); // -> Blocks
+        // Falls back to the first matching node anywhere, in `index.nodes`'
+        // own order -- b's containing heading (an ancestor of the match)
+        // comes before the block itself in that order.
+        assert_eq!(a.selected.slug, "hasblock");
+        assert!(a.visible_rows().iter().any(|r| r.id == a.selected));
+    }
+
+    #[test]
+    fn blocks_filter_hides_headings_but_keeps_a_blocks_own_ancestor() {
+        let mut a = app(&[("a.md", "# One\n\n## Two\n\n```sh name=x\n:\n```\n\n## Three\n")]);
+        a.filter = Filter::Blocks;
+        let ids = a.visible_rows().into_iter().map(|r| r.id.slug).collect::<Vec<_>>();
+        assert!(ids.contains(&"x".to_string()), "the block itself stays: {ids:?}");
+        assert!(ids.contains(&"two".to_string()), "its containing heading stays too, as an ancestor: {ids:?}");
+        assert!(ids.contains(&"one".to_string()), "One is also an ancestor of x, so it stays too: {ids:?}");
+        assert!(!ids.contains(&"three".to_string()), "a heading with no block descendant is hidden: {ids:?}");
+    }
+
+    #[test]
+    fn eval_chain_filter_matches_a_shared_target_even_though_it_declares_nothing_of_its_own() {
+        // §3's leaning: "declares or is targeted", so a block only ever
+        // named by someone else's deps= (nothing of its own to declare)
+        // still shows under this filter -- the leaves this filter exists
+        // to reveal must not be the thing it hides.
+        let dir =
+            write_corpus(&[("a.md", "```sh name=setup\necho hi\n```\n\n```sh name=top deps=setup\necho hi\n```\n")]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, true).unwrap();
+        a.filter = Filter::EvalChain;
+        let ids = a.visible_rows().into_iter().map(|r| r.id.slug).collect::<Vec<_>>();
+        assert!(ids.contains(&"setup".to_string()), "targeted-only still shows: {ids:?}");
+        assert!(ids.contains(&"top".to_string()), "{ids:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_artifact_filter_keeps_only_blocks_declaring_one() {
+        let dir = write_corpus(&[(
+            "a.md",
+            "```sh name=setup\necho hi\n```\n\n```sh name=out produces=file:o.csv\necho hi\n```\n",
+        )]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, true).unwrap();
+        a.filter = Filter::FileArtifact;
+        let ids = a.visible_rows().into_iter().map(|r| r.id.slug).collect::<Vec<_>>();
+        assert!(ids.contains(&"out".to_string()), "{ids:?}");
+        assert!(!ids.contains(&"setup".to_string()), "declares no file artifact: {ids:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_standing_filter_shows_on_the_status_line() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.filter = Filter::EvalChain;
+        let mut out = Vec::new();
+        render(&mut a, &mut out).unwrap();
+        let rendered = String::from_utf8_lossy(&out);
+        assert!(rendered.contains("filter: eval-chain"), "{rendered:?}");
     }
 
     /// `eval::blocks_in_section`/`eval::run` re-read from disk, unlike

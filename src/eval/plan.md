@@ -251,6 +251,18 @@ from here. Both are just "not found." That is exactly what
 `PlanError::UnknownDep`'s own message already says, without needing to
 explain why.
 
+`resolve_dep`, `dep_error`, `xdep_error`, and `DepLookup` itself are
+all `pub(crate)`, not `pub`: `tui::app` calls the three functions
+directly, at load time, to show *why* a declared `deps=`/`xdeps=`
+entry failed to resolve, reusing the exact `PlanError` wording
+`dankg check` already prints rather than inventing its own
+(dependency-surfacing.md, §D). `DepLookup` has to widen too, even
+though a caller only ever passes one straight into `dep_error`/
+`xdep_error` without matching its variants: Rust still requires a
+type be visibly nameable from a `match` arm's own module, not merely
+"never spelled out," for any value of it to be handled outside the
+module that defines it.
+
 ```rust name=split_dep_and_resolve path=eval/plan.rs
 /// Splits a `deps=` entry into a cross-file path part (if any) and the
 /// name, mirroring a written link's own `other.md#heading` shape exactly.
@@ -265,7 +277,7 @@ pub fn split_dep(raw: &str) -> (Option<&str>, &str) {
     }
 }
 
-enum DepLookup {
+pub(crate) enum DepLookup {
     Escapes,
     NotFound,
 }
@@ -280,7 +292,7 @@ enum DepLookup {
 /// *was* loaded are indistinguishable from here on purpose. Both are
 /// just "not found". That is exactly what `PlanError::UnknownDep`'s
 /// existing message already says, without needing to say why.
-fn resolve_dep(blocks: &[BlockRef], from_file: &str, raw: &str) -> Result<usize, DepLookup> {
+pub(crate) fn resolve_dep(blocks: &[BlockRef], from_file: &str, raw: &str) -> Result<usize, DepLookup> {
     let (path_part, name) = split_dep(raw);
     let target_file: std::borrow::Cow<str> = match path_part {
         None => std::borrow::Cow::Borrowed(from_file),
@@ -292,14 +304,14 @@ fn resolve_dep(blocks: &[BlockRef], from_file: &str, raw: &str) -> Result<usize,
     blocks.iter().position(|b| b.file == target_file.as_ref() && b.name == name).ok_or(DepLookup::NotFound)
 }
 
-fn dep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
+pub(crate) fn dep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
     match err {
         DepLookup::Escapes => PlanError::DepEscapesRoot { block, dep: dep.to_string() },
         DepLookup::NotFound => PlanError::UnknownDep { block, dep: dep.to_string() },
     }
 }
 
-fn xdep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
+pub(crate) fn xdep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
     match err {
         DepLookup::Escapes => PlanError::XDepEscapesRoot { block, dep: dep.to_string() },
         DepLookup::NotFound => PlanError::UnknownXDep { block, dep: dep.to_string() },

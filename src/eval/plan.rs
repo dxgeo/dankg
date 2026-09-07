@@ -223,7 +223,7 @@ pub fn split_dep(raw: &str) -> (Option<&str>, &str) {
     }
 }
 
-enum DepLookup {
+pub(crate) enum DepLookup {
     Escapes,
     NotFound,
 }
@@ -238,7 +238,7 @@ enum DepLookup {
 /// *was* loaded are indistinguishable from here on purpose. Both are
 /// just "not found". That is exactly what `PlanError::UnknownDep`'s
 /// existing message already says, without needing to say why.
-fn resolve_dep(blocks: &[BlockRef], from_file: &str, raw: &str) -> Result<usize, DepLookup> {
+pub(crate) fn resolve_dep(blocks: &[BlockRef], from_file: &str, raw: &str) -> Result<usize, DepLookup> {
     let (path_part, name) = split_dep(raw);
     let target_file: std::borrow::Cow<str> = match path_part {
         None => std::borrow::Cow::Borrowed(from_file),
@@ -250,14 +250,14 @@ fn resolve_dep(blocks: &[BlockRef], from_file: &str, raw: &str) -> Result<usize,
     blocks.iter().position(|b| b.file == target_file.as_ref() && b.name == name).ok_or(DepLookup::NotFound)
 }
 
-fn dep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
+pub(crate) fn dep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
     match err {
         DepLookup::Escapes => PlanError::DepEscapesRoot { block, dep: dep.to_string() },
         DepLookup::NotFound => PlanError::UnknownDep { block, dep: dep.to_string() },
     }
 }
 
-fn xdep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
+pub(crate) fn xdep_error(block: String, dep: &str, err: DepLookup) -> PlanError {
     match err {
         DepLookup::Escapes => PlanError::XDepEscapesRoot { block, dep: dep.to_string() },
         DepLookup::NotFound => PlanError::UnknownXDep { block, dep: dep.to_string() },

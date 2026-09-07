@@ -143,7 +143,7 @@ fn chain_xdep_hashes(
 /// slug that no longer matches its raw name -- a documented limitation,
 /// not solved here, the same class of gap decision 34 already accepts
 /// for title collisions generally.
-fn block_index_for(blocks: &[BlockRef], id: &NodeId) -> Option<usize> {
+pub(crate) fn block_index_for(blocks: &[BlockRef], id: &NodeId) -> Option<usize> {
     blocks.iter().position(|b| strip_extension(b.file) == id.file && b.name == id.slug)
 }
 
@@ -163,7 +163,7 @@ fn block_index_for(blocks: &[BlockRef], id: &NodeId) -> Option<usize> {
 /// shape, or several downstream blocks sharing one upstream `xdeps`
 /// target) and re-deriving it every time is pure waste once it is
 /// already known.
-fn verified_hash(
+pub(crate) fn verified_hash(
     blocks: &[BlockRef],
     files: &Files,
     config: &crate::config::Config,

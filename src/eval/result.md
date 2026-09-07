@@ -102,6 +102,12 @@ mismatch propagates outward as an error, exactly like "never run" does
 below -- which is what makes staleness cross a language boundary at
 all, rather than stopping dead at the first one.
 
+`block_index_for` and `verified_hash` are `pub(crate)`, not `pub`:
+`tui::app` calls both directly, at load time, to flag a resolved but
+unexecuted `xdeps=` target as "needs to run" rather than broken
+(dependency-surfacing.md, §E), reusing this exact staleness check
+instead of a second copy of it.
+
 ```rust name=xdep_lookup path=eval/result.rs
 /// A block's own last recorded result hash, read straight from its
 /// `<!-- dankg:result -->` marker. `None` covers both "no result yet"
@@ -186,7 +192,7 @@ fn chain_xdep_hashes(
 /// slug that no longer matches its raw name -- a documented limitation,
 /// not solved here, the same class of gap decision 34 already accepts
 /// for title collisions generally.
-fn block_index_for(blocks: &[BlockRef], id: &NodeId) -> Option<usize> {
+pub(crate) fn block_index_for(blocks: &[BlockRef], id: &NodeId) -> Option<usize> {
     blocks.iter().position(|b| strip_extension(b.file) == id.file && b.name == id.slug)
 }
 
@@ -206,7 +212,7 @@ fn block_index_for(blocks: &[BlockRef], id: &NodeId) -> Option<usize> {
 /// shape, or several downstream blocks sharing one upstream `xdeps`
 /// target) and re-deriving it every time is pure waste once it is
 /// already known.
-fn verified_hash(
+pub(crate) fn verified_hash(
     blocks: &[BlockRef],
     files: &Files,
     config: &crate::config::Config,

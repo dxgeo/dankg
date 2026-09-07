@@ -971,6 +971,50 @@ Each tree row's compact badge (`→1 ←2 ⚭`) summarizes the same
 at-a-glance scanning for every *other* row, so a reader does not have to
 select something just to learn whether it connects to anything at all.
 
+## Dependency surfacing
+
+A `Block` row's own title gets a `» ` prefix (`App::kind_marker`),
+and the badge grows four more glyphs alongside `→N ←N ⚭`: `⇒N`/`⇐N`
+for a block's own resolved `deps=`/`xdeps=` targets and the blocks
+that name it, `▤` for a declared `produces=file:PATH`/
+`reads=file:PATH` (decision 33's file artifact -- still never
+resolved on its own, just shown), `✗N` for a `deps=`/`xdeps=` entry
+that failed to resolve, and `↻N` for one that resolved but has not
+actually run. `xdeps=` alone never triggers a run, so that last case
+is a real, expected state, not a corpus error.
+
+<!-- dankg:depends target=dependency-surfacing.md#e-unresolved-but-correct----needs-to-run-not-broken quote="An `xdeps=` target, block- or `table:`-targeted, never does: it is checked, not run." -->
+
+Five matching panel rows (`PanelRow::DepOut`/`DepIn`/`FileDep`/
+`DepBroken`/`DepPending`) carry the same facts in full for the
+selected node. `DepOut`/`DepIn` are navigable exactly like
+`Outgoing`/`Backlink`; the rest are plain text, reusing `PlanError`'s
+and `eval::result`'s own existing wording rather than inventing new
+copy, so a broken or pending dependency reads the same in the TUI as
+it would from `dankg check`. `App::compute_dep_data` computes all of
+it once at load time, the same staleness policy as the rest of the
+tree: a second parse of the whole corpus through
+`eval::files::Files`, correlated back to each row by `(file, line)`
+rather than `(file, name)`, since a name can collide and get
+`Slugger`-suffixed where a line never does. Six items moved from
+private to
+`pub(crate)` for this, reused rather than re-derived:
+`eval::plan::resolve_dep`/`dep_error`/`xdep_error`/`DepLookup`, and
+`eval::result::verified_hash`/`block_index_for`.
+
+`f` cycles a `Filter` state (`App::cycle_filter`) through `All`/
+`Blocks`/`Eval-chain`/`File-artifact`, hiding a non-matching row while
+keeping its ancestors visible -- the same "hide, not dim" model
+`/`-search's own ancestor-reveal already trained, as a standing
+choice instead of a one-shot jump. `Eval-chain` settles
+dependency-surfacing.md §3's own open question in favor of "declares
+*or* is targeted": a block only ever named by another's `deps=`/
+`xdeps=`, with nothing of its own to declare, still matches --
+otherwise the filter would hide the very leaves a reader turns it on
+to find. The full rationale for all of this, including the glyph
+choices still open for debate, is dependency-surfacing.md's own
+design record.
+
 ## Jump and default depth
 
 `dankg tui` selects its initial expansion from its own default depth
