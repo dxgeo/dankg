@@ -1112,6 +1112,29 @@ entirely" is needed either: each pane is already just a vertical list,
 and switching which one has focus (`tab`) is what changes which current
 row a reader is looking at, not a second scrolling mode layered on top.
 
+### A filter change that moved the row, not just the node
+
+`apply_filter` was already tested for *which* node ends up selected
+across a filter change: `filter_history`, `reveal_and_select`'s
+force-expand, `reselect_after_filter_change`'s ancestor search. None
+of that accounted for where the selection lands on screen. Filtering
+hides or reveals rows *above* the selection, so its row-in-list moves
+even when the selected node itself does not. `scroll_row` never moved
+to compensate, so the same node's screen row shifted on every filter
+change. Confirmed against the real binary through a pty: switching
+from `blocks` back to `all` moved a selection from screen row 4 to
+row 11, on an unchanged terminal.
+
+The fix captures the selection's offset from the top of the pane --
+its row-in-list minus `scroll_row`, both read under the *old* filter
+\-- before `apply_filter` touches anything. It re-derives `scroll_row`
+from that same offset once the new filter and selection have
+settled, so it works the same way whichever path `apply_filter` took
+to get there: staying on the reader's own node, restoring one
+`filter_history` remembered, or falling back to the nearest surviving
+ancestor. The offset is a property of the pane, not of which node
+ends up under it.
+
 # Code evaluation
 
 Never automatic. `dankg graph` only ever *displays* stored results. It

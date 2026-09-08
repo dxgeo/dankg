@@ -1510,7 +1510,21 @@ impl App {
     /// back to `reselect_after_filter_change`'s own nearest-ancestor-
     /// or-first-match search, the same safety net a first-ever visit
     /// to a filter (nothing remembered yet) already needs.
+    ///
+    /// Even the "stays exactly where it is" case can still move the
+    /// selection's own screen row. Filtering hides or reveals rows
+    /// *above* it without moving `scroll_row`, so the highlighted row
+    /// would otherwise jump on every filter change, even when the
+    /// selection itself never changed. `anchor` captures the
+    /// selection's row offset from the top of the pane, under the old
+    /// filter/expansion. The end of this function re-derives
+    /// `scroll_row` so that offset holds under the new one -- the
+    /// reader's eye stays on the same screen row, not just on the
+    /// same node.
     fn apply_filter(&mut self, new_filter: Filter) {
+        let anchor =
+            self.visible_rows().iter().position(|r| r.id == self.selected).map(|row| row.saturating_sub(self.scroll_row));
+
         self.filter_history.insert(self.filter, self.selected.clone());
         self.filter = new_filter;
 
@@ -1523,6 +1537,12 @@ impl App {
         }
         self.moved_since_filter_change = false;
         self.clear_transient();
+
+        if let Some(offset) = anchor {
+            if let Some(row) = self.visible_rows().iter().position(|r| r.id == self.selected) {
+                self.scroll_row = row.saturating_sub(offset);
+            }
+        }
     }
 
     /// Whether `id` both still exists and is a member of `self.filter`'s
