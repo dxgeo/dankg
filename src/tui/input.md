@@ -18,7 +18,7 @@ and `read_key` directly, with no terminal in the loop at all.
 
 use std::io::{self, Read};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
     Char(char),
     /// A control byte with no more specific meaning below, as the letter it
@@ -53,11 +53,11 @@ ever gets silently absorbed into the wrong key.
 /// does, to cancel an eval cycle or dismiss help) without silently
 /// eating whatever key the reader pressed right after it.
 ///
-/// `None` means `bytes` is a prefix of a longer sequence. [`read_key`]
-/// has no read timeout, so a bare Esc keypress still blocks until
-/// another key arrives before it is recognised. This is a bounded
-/// latency quirk, not a correctness one, now that no byte is lost
-/// either way.
+/// `None` means `bytes` is a prefix of a longer sequence. `decode`
+/// itself has no sense of time. It cannot tell "the rest of the
+/// sequence is still in flight" apart from "there is no rest of the
+/// sequence coming." [`read_key`] is what actually waits. Only it
+/// knows how long is too long.
 pub fn decode(bytes: &[u8]) -> Option<(Key, usize)> {
     let &first = bytes.first()?;
     match first {
@@ -95,6 +95,64 @@ pub fn decode(bytes: &[u8]) -> Option<(Key, usize)> {
     }
 }
 
+/// Parses a `key=` attribute's value (`[tui] commands`) into the `Key`
+/// it names: a single character (`g`), `ctrl+` followed by one
+/// (`ctrl+g`), or one of the named keys `decode` itself can produce
+/// (`enter`, `tab`, `backspace`, `esc`, `up`, `down`, `left`, `right`),
+/// matched case-insensitively. `ctrl+`'s own letter is always
+/// lowercased, since `decode` never reports an uppercase `Ctrl` either
+/// -- a real terminal cannot tell Ctrl-G from Ctrl-g apart. Anything
+/// else -- more than one character, an empty string, an unrecognised
+/// word -- is not a `Key` at all.
+pub fn parse(raw: &str) -> Option<Key> {
+    let raw = raw.trim();
+    let mut chars = raw.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        return Some(Key::Char(c));
+    }
+    let lower = raw.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("ctrl+") {
+        let mut rest_chars = rest.chars();
+        return match (rest_chars.next(), rest_chars.next()) {
+            (Some(c), None) => Some(Key::Ctrl(c)),
+            _ => None,
+        };
+    }
+    match lower.as_str() {
+        "enter" => Some(Key::Enter),
+        "tab" => Some(Key::Tab),
+        "backspace" => Some(Key::Backspace),
+        "esc" | "escape" => Some(Key::Esc),
+        "up" => Some(Key::Up),
+        "down" => Some(Key::Down),
+        "left" => Some(Key::Left),
+        "right" => Some(Key::Right),
+        _ => None,
+    }
+}
+
+/// The exact text `parse` accepts back: `Key::Char('g')` is `g`,
+/// `Key::Ctrl('g')` is `ctrl+g`, and every other variant is its own
+/// lowercase name (`enter`, `tab`, `esc`, `up`, ...). `parse(&key.to_string())
+/// == Some(key)` for every `Key`, so this is also what a help screen or a
+/// collision warning shows a reader, rather than `Key`'s own `Debug` form.
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Key::Char(c) => write!(f, "{c}"),
+            Key::Ctrl(c) => write!(f, "ctrl+{c}"),
+            Key::Enter => write!(f, "enter"),
+            Key::Tab => write!(f, "tab"),
+            Key::Backspace => write!(f, "backspace"),
+            Key::Esc => write!(f, "esc"),
+            Key::Up => write!(f, "up"),
+            Key::Down => write!(f, "down"),
+            Key::Left => write!(f, "left"),
+            Key::Right => write!(f, "right"),
+        }
+    }
+}
+
 /// Bytes in the UTF-8 sequence starting with `first`. An invalid leading
 /// byte is treated as width 1 so decoding cannot stall waiting for bytes
 /// that were never going to complete a scalar.
@@ -114,6 +172,12 @@ fn utf8_width(first: u8) -> usize {
 ```
 
 ```rust name=read_key path=tui/input.rs
+/// How long `read_key` gives a lone `ESC` to turn into `ESC [
+/// <letter>` before deciding nothing more is coming. A real terminal
+/// sends the rest of an escape sequence essentially at once. This
+/// only ever adds latency to an Esc the reader actually pressed alone.
+const ESC_TIMEOUT_MS: i32 = 50;
+
 /// Blocks until one key event is available on `r`, threading
 /// `pending` across calls for exactly one reason: a standalone Esc is
 /// only disambiguated from the start of `ESC [ <letter>` by reading
@@ -127,12 +191,23 @@ fn utf8_width(first: u8) -> usize {
 /// pressed right after Esc. The caller owns `pending` (an empty `Vec`
 /// to start) purely so it survives between calls. Nothing about its
 /// contents matters to the caller otherwise.
-pub fn read_key<R: Read>(mut r: R, pending: &mut Vec<u8>) -> io::Result<Key> {
+///
+/// `esc_ready` is asked exactly one question, only when `buf` is a
+/// lone, unresolved `0x1b`: "is a second byte likely within
+/// `ESC_TIMEOUT_MS`?" A `false` answer means the reader pressed Esc by
+/// itself. `read_key` then reports it immediately, rather than
+/// blocking on `r` for a follow-up byte that a plain keypress was
+/// never going to send. In production this is `term::stdin_ready`.
+/// Tests pass a fixed answer instead of polling a real terminal.
+pub fn read_key<R: Read>(mut r: R, pending: &mut Vec<u8>, esc_ready: impl Fn(i32) -> bool) -> io::Result<Key> {
     let mut buf = std::mem::take(pending);
     loop {
         if let Some((key, used)) = decode(&buf) {
             *pending = buf.split_off(used);
             return Ok(key);
+        }
+        if buf == [0x1b] && !esc_ready(ESC_TIMEOUT_MS) {
+            return Ok(Key::Esc);
         }
         let mut byte = [0u8; 1];
         if r.read(&mut byte)? == 0 {
@@ -193,7 +268,9 @@ mod tests {
     fn read_key_assembles_bytes_from_a_reader() {
         let mut src: &[u8] = b"\x1b[A";
         let mut pending = Vec::new();
-        assert_eq!(read_key(&mut src, &mut pending).unwrap(), Key::Up);
+        // `esc_ready` says "yes, more is coming" -- there really is.
+        // This reads straight through to the full sequence.
+        assert_eq!(read_key(&mut src, &mut pending, |_| true).unwrap(), Key::Up);
         assert!(pending.is_empty(), "a fully-used sequence leaves nothing pending");
     }
 
@@ -206,10 +283,85 @@ mod tests {
         // read_key call, rather than being silently dropped.
         let mut src: &[u8] = b"\x1bq";
         let mut pending = Vec::new();
-        assert_eq!(read_key(&mut src, &mut pending).unwrap(), Key::Esc);
+        assert_eq!(read_key(&mut src, &mut pending, |_| true).unwrap(), Key::Esc);
         assert_eq!(pending, vec![b'q'], "'q' was read but not yet consumed by decode");
-        assert_eq!(read_key(&mut src, &mut pending).unwrap(), Key::Char('q'));
+        assert_eq!(read_key(&mut src, &mut pending, |_| true).unwrap(), Key::Char('q'));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn read_key_reports_a_standalone_esc_without_blocking_on_more_input() {
+        // Nothing follows the Esc in `src` at all. If `read_key` tried
+        // to block-read a second byte here regardless of `esc_ready`,
+        // it would hit EOF on the empty remainder and return an error
+        // instead of `Key::Esc` -- this is what proves it did not try.
+        let mut src: &[u8] = b"\x1b";
+        let mut pending = Vec::new();
+        assert_eq!(read_key(&mut src, &mut pending, |_| false).unwrap(), Key::Esc);
+        assert!(pending.is_empty(), "a standalone Esc used its one byte outright");
+    }
+
+    #[test]
+    fn read_key_still_waits_out_a_slow_but_real_escape_sequence() {
+        // `esc_ready` says yes. A lone `0x1b` alone is not enough to
+        // report Esc -- read_key keeps reading until `decode` actually
+        // resolves it, exactly as it always has.
+        let mut src: &[u8] = b"\x1b[D";
+        let mut pending = Vec::new();
+        assert_eq!(read_key(&mut src, &mut pending, |_| true).unwrap(), Key::Left);
+    }
+
+    #[test]
+    fn parse_reads_a_single_character() {
+        assert_eq!(parse("g"), Some(Key::Char('g')));
+        assert_eq!(parse("G"), Some(Key::Char('G')), "shift is a distinct char, not lowercased");
+    }
+
+    #[test]
+    fn parse_reads_ctrl_combinations_case_insensitively_and_lowercases_the_letter() {
+        assert_eq!(parse("ctrl+g"), Some(Key::Ctrl('g')));
+        assert_eq!(parse("Ctrl+G"), Some(Key::Ctrl('g')), "a real terminal cannot tell Ctrl-G from Ctrl-g apart");
+    }
+
+    #[test]
+    fn parse_reads_named_keys_case_insensitively() {
+        assert_eq!(parse("Enter"), Some(Key::Enter));
+        assert_eq!(parse("tab"), Some(Key::Tab));
+        assert_eq!(parse("BACKSPACE"), Some(Key::Backspace));
+        assert_eq!(parse("esc"), Some(Key::Esc));
+        assert_eq!(parse("escape"), Some(Key::Esc));
+        assert_eq!(parse("Up"), Some(Key::Up));
+        assert_eq!(parse("down"), Some(Key::Down));
+        assert_eq!(parse("left"), Some(Key::Left));
+        assert_eq!(parse("right"), Some(Key::Right));
+    }
+
+    #[test]
+    fn parse_rejects_empty_multi_word_and_unknown_input() {
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("ctrl+"), None);
+        assert_eq!(parse("ctrl+gg"), None);
+        assert_eq!(parse("pageup"), None);
+    }
+
+    #[test]
+    fn display_round_trips_through_parse_for_every_variant() {
+        let keys = [
+            Key::Char('g'),
+            Key::Char('G'),
+            Key::Ctrl('g'),
+            Key::Enter,
+            Key::Tab,
+            Key::Backspace,
+            Key::Esc,
+            Key::Up,
+            Key::Down,
+            Key::Left,
+            Key::Right,
+        ];
+        for key in keys {
+            assert_eq!(parse(&key.to_string()), Some(key), "{key} did not round-trip");
+        }
     }
 
     #[test]
@@ -219,7 +371,7 @@ mod tests {
         // here would hang forever if it did.
         let mut empty: &[u8] = b"";
         let mut pending = vec![b'q'];
-        assert_eq!(read_key(&mut empty, &mut pending).unwrap(), Key::Char('q'));
+        assert_eq!(read_key(&mut empty, &mut pending, |_| true).unwrap(), Key::Char('q'));
     }
 }
 ```

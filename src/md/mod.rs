@@ -166,7 +166,7 @@ pub struct InfoString {
 
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
 pub const KNOWN_ATTRS: &[&str] =
-    &["db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path"];
+    &["db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key"];
 
 impl InfoString {
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -229,6 +229,15 @@ impl InfoString {
     /// resolved on its own.
     pub fn reads(&self) -> Option<&str> {
         self.get("reads")
+    }
+
+    /// A raw `key=` value, whole and unvalidated. `[tui] commands` (the
+    /// TUI's own keybinding surface) is the only current reader:
+    /// `tui::eval::keyed_commands` checks it is exactly one character,
+    /// warning and skipping the block otherwise. This accessor hands back
+    /// whatever was written, the same way `db()`/`path()` do.
+    pub fn key(&self) -> Option<&str> {
+        self.get("key")
     }
 }
 
@@ -330,6 +339,19 @@ mod tests {
         let info = InfoString { lang: Some("sh".into()), ..Default::default() };
         assert_eq!(info.produces(), None);
         assert_eq!(info.reads(), None);
+    }
+
+    #[test]
+    fn info_string_key_is_read_raw_and_none_when_absent() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("key".into(), "g".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.key(), Some("g"));
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert_eq!(info.key(), None);
     }
 
     #[test]

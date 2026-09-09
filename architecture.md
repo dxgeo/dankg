@@ -246,6 +246,12 @@ A `SELECT` result's row count, or any other captured output, never enters the st
 
 **Rationale:** Every hash `dankg` computes is a source hash, never a content hash -- the direct lesson of [agent_tests/deps_pilot.md](agent_tests/deps_pilot.md): a source can change while its output happens to look the same, so hashing output instead risks silence on exactly the change that matters. A snapshot's row count adds nothing a source hash does not already cover, since nothing changes it without the SQL re-running. A running pipeline's row count drifts independent of source by definition, so no hash bit can represent it as a single stale/fresh signal without answering a question `check` was never built to ask. The two cases do not actually disagree; they fail for different reasons and land on the same answer.
 
+## Decision 40: TUI custom commands
+
+`[tui] commands` names a file whose top-level blocks may carry `key=`. Each one becomes a keybinding that runs the block directly through `eval::run`, skipping the cycle-then-`enter` ritual `keys.eval` otherwise requires.
+
+**Rationale:** No new execution engine and no new trust model -- this reuses `eval`'s existing spawn/capture/write-back machinery outright, and the same configured-by-the-reader trust boundary `[lang.*] command` already has (decision 9). A binding that collides with a built-in, or with another command in the same file, is refused individually rather than reverting the whole set the way `Keymap` reverts wholesale on a collision (decision 18): commands load one file at a time, independently, with no single moment a whole table is parsed atomically the way `[keys]` has.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -728,7 +734,7 @@ src/tui/
 - `/`: jump to a node by title, anywhere in the corpus (see *Jump and default depth*, below). `enter` confirms, `esc` cancels.
 - `n`/`N`: jump to the next/previous match of the last confirmed search, wrapping past either end, reporting the match's own rank and the total match count on the status line -- vim's own binding exactly. An earlier pass bound `p` instead of shift-`N`, since `p` was free once panning retired; that saved nothing an experienced vim user would notice and cost them a keybinding they already knew, so it went back to `N`.
 - `e`: cycle the selected node's named blocks. `enter` runs the cycled one, in place, without leaving the tree (see *Eval* below)
-- `esc`: cancel an in-progress block cycle or an in-progress search; return focus from the panel to the tree.
+- `esc`: while typing a search, cancel just the prompt, keeping the last confirmed pattern alive for `n`/`N`. While the panel has focus, return focus to the tree. Otherwise, in the base tree state, dismiss: cancel an in-progress block cycle, clear the status line, and turn off search highlighting (*Jump and default depth*, below) -- vim's own `:nohlsearch`, not a full end to the search: `last_search` itself survives, so `n`/`N` still work and turn the highlight back on.
 - `r`: collapse back to the entry view
 - `q`: quit, restoring the terminal
 - `b`: toggle the origin breadcrumb on the status line (see *Origin breadcrumb*, below)
@@ -792,12 +798,27 @@ outranks status, which outranks the breadcrumb -- the two the reader
 is actively acting on always win the one shared line. It shows the
 block-cycle list while cycling
 (`eval: [setup] index   enter=run esc=cancel`, the cycled name
-bracketed) and the last run's outcome afterward (`index: ok`,
-`index: failed`, `index: timed out`, or the error text for something
-that could not even be attempted, such as an unconfigured language).
-`reload`, which a completed run always triggers since the file just
-changed, leaves `status` alone on purpose. The reader just ran the
-block. Reloading is not itself a reason to hide what happened.
+bracketed) and the last run's outcome afterward: `index: <first line of what it printed>` on success (`stdout`, falling back to the bare
+`index: ok` when it printed nothing), `index: <first line of stderr, or stdout if stderr is empty>` on a nonzero exit (falling back to
+`index: failed`), `index: timed out`, or the error text for something
+that could not even be attempted, such as an unconfigured language.
+Only the first non-blank line is shown -- the status line is one row,
+and a run's full output is never lost either way, since `eval::run`'s
+own write-back already recorded all of it in the source file, the same
+as any other eval block. `reload`, which a completed run always
+triggers since the file just changed, leaves `status` alone on
+purpose. The reader just ran the block. Reloading is not itself a
+reason to hide what happened. Navigating away leaves it alone too --
+`cancel_cycle` (below) cancels a cycle tied to the old selection, but
+a run's outcome or a search result is not tied to the selection at
+all, so it stays up while the reader keeps looking around. `esc`, in
+the base tree state, is the one action that does dismiss it: `dismiss`
+clears both `block_select` and `status` together, unconditionally.
+It is the reader's own "never mind," and the only thing that means it.
+A `[tui] commands` binding (*`[tui] commands`*, below) reports through
+this identical line, in the identical format -- `App::run_command`
+calls the same `eval::run` and builds the same outcome string
+`run_selected_block` already does.
 
 ### Origin breadcrumb
 
@@ -829,6 +850,49 @@ Both paths end at the same call (`eval::run`, `run_selected_block`). So they
 cannot disagree about what running a block does, only about how a reader
 gets there.
 
+### `[tui] commands`
+
+Decision 40. `keys.eval` reaches any named block, but always by cycling
+to it first -- there is no way to bind a brand-new key to one specific
+action directly. `[tui] commands` closes that gap without adding a
+second config format: a command is an ordinary named block, in an
+ordinary corpus file, carrying one more attribute. `key=g` on a
+top-level block is enough; `[tui] commands = commands.md` in
+`.dankg/config` is what tells the TUI to actually scan that file for
+them. Nothing is scanned unless a file is named explicitly, the same
+allowlist instinct as `[lang.*]`.
+
+`key=`'s value is parsed by `input::parse` (`tui/input.rs`), the exact
+inverse of `input::decode`: a single character, `ctrl+` followed by
+one, or one of `decode`'s own named keys (`enter`, `tab`, `backspace`,
+`esc`, the arrows), matched case-insensitively. `input::Key` also
+implements `Display` so `parse(&key.to_string()) == Some(key)` always
+holds -- what a reader writes in `key=` and what a diagnostic or the
+help screen shows back are the same text, not two representations that
+could quietly drift apart.
+
+`App::load_commands` checks every parsed binding against
+`reserved_keys`: `Keymap`'s eight fields, the fixed literals
+`event_loop` checks directly (`?`, `/`, `f`, `n`, `N`), and the
+structural keys (`enter`, `tab`, `esc`, the arrows) that are always
+fixed regardless of `Keymap` or config. A binding matching any of these
+is refused, with a diagnostic naming which command and which key --
+otherwise a structural-key binding would parse cleanly and simply never
+fire, since its own hardcoded `event_loop` arm always claims the key
+first, which is a worse failure than a refusal because nothing about it
+looks wrong until a reader notices the key does nothing. Two commands
+in the same file claiming the same key: same refusal, the second one
+loses and is named in the warning.
+
+Running a command is `App::run_command`: look up the key's recorded
+block position, call `eval::run` (`tui::eval::run`, the identical
+function `run_selected_block` already calls), report the outcome on
+the status line, `reload`. `reload` also re-runs `load_commands`, so
+editing `commands.md` and reloading (any completed run does this
+already) picks up the change without restarting the session.
+
+<!-- dankg:depends target=#decision-40-tui-custom-commands quote="A binding that collides with a built-in, or with another command in the same file, is refused individually rather than reverting the whole set the way `Keymap` reverts wholesale on a collision" -->
+
 ### Discoverability outside the TUI
 
 `dankg eval <path>... --list` (`eval::session::list_blocks`/`list_corpus_text`)
@@ -854,25 +918,36 @@ file's, each line still prefixed by its own root-relative path.
 ## Help screen
 
 `?` is fixed, not remappable (see *Interaction* above), and toggles a
-full-screen keybinding reference (`app::help_lines`) that *replaces* the
-graph rather than overlaying it. There is no compositing in this module.
-Full-screen takeover is exactly what `enter`'s editor handoff already
-does for the same reason. It reads `keys` live, so a remapped letter shows up
-correctly rather than the reference silently going stale next to a config
-that no longer matches it.
+keybinding reference (`app::help_lines`) drawn as a small box floating
+over the still-visible tree and panel -- the same `draw::box_grid` +
+`draw::overlay` mechanism the filter-menu picker uses (*Jump and
+default depth*, below), not a full-screen replacement; an earlier
+version of this screen really did take over the whole frame, but that
+stopped being true once the filter-menu picker introduced the
+box-overlay mechanism, and this is that later, accurate description.
+It reads `keys` live, so a remapped letter shows up correctly rather
+than the reference silently going stale next to a config that no
+longer matches it. When `[tui] commands` is configured, `help_lines`
+also lists every loaded command by name and key, alphabetically by
+name rather than by table order (a `HashMap`'s own iteration order is
+unspecified) -- the same reference that shows a reader what `hjkl` do
+is where a `[tui] commands` binding shows up too, so nothing about a
+reader's own corpus can silently claim a key they would not discover
+until they happened to press it by accident.
 
 Help mode is fully modal in the event loop. Every key but the dismissers
 (`?`, esc, `keys.quit`) is swallowed before it reaches the tree/panel's own
 match arms, so nothing about the selection, panel focus, or an in-progress
 eval cycle can change while help is on screen. `write_frame` (the
 buffered-write, no-trailing-`\r\n`-on-the-last-line logic decision-critical
-to not scrolling the alternate screen: see the Terminal UI intro) is shared
-between the tree/panel frame and the help screen, the only two things this
-module ever renders. It deliberately does not clip columns itself, since a
-frame line carries ANSI attribute codes that count as characters but not
-screen columns. Column-clipping those would cut one off mid-escape-sequence.
-Plain-text callers (the status line, help's own lines) clip themselves
-before handing `write_frame` anything.
+to not scrolling the alternate screen: see the Terminal UI intro) is the
+one write every frame goes through, whatever is currently composited onto
+it -- the plain tree/panel frame, or that same frame with a help or
+filter-menu box overlaid on top. It deliberately does not clip columns
+itself, since a frame line carries ANSI attribute codes that count as
+characters but not screen columns. Column-clipping those would cut one
+off mid-escape-sequence. Plain-text callers (the status line, help's own
+lines) clip themselves before handing `write_frame` anything.
 
 ### A byte lost after a standalone Esc
 
@@ -899,6 +974,40 @@ driving the real binary through a pty, not by the unit tests alone. The
 existing suite only ever fed `decode` and `read_key` complete, single
 sequences in one shot, never a standalone Esc immediately followed by
 another real keystroke in the same read.
+
+### A standalone Esc that never returned
+
+The byte-loss fix above left a second problem in the same code
+standing, undetected because nothing at the time made it visible. A
+reader reported that `esc` did not close the help screen, cancel a
+search, or dismiss the status line until they pressed some *other*
+key first. \[`decode`\] cannot tell a standalone Esc apart from the
+first byte of `ESC [ <letter>` without reading one more byte.
+`read_key` had no way to get that byte except a plain blocking `read`
+on stdin. A real Esc keypress with nothing typed after it, though, has
+no second byte coming at all -- not "not yet," but never, until the
+reader's *next* keypress supplies one. `read_key` sat blocked on that
+`read` the whole time. The Esc it had already received stayed
+undelivered until whatever the reader typed next unblocked it. This
+was flagged in `decode`'s own doc comment as a known "bounded latency
+quirk," but in practice a reader pressing Esc alone and getting no
+response at all does not read as latency. It reads as broken.
+
+The fix gives `read_key` a way to ask, once, exactly when `buf` is a
+lone unresolved `0x1b`: is a second byte likely within
+`ESC_TIMEOUT_MS` (50ms, in the same ballpark as vim's own
+`ttimeoutlen`)? A real escape sequence's remaining bytes arrive
+essentially at once. A `false` answer means the reader pressed Esc by
+itself. `read_key` reports it immediately, rather than waiting on a
+follow-up byte that was never coming. `read_key` takes this as an
+`esc_ready: impl Fn(i32) -> bool` argument rather than reaching for
+`term::stdin_ready` itself -- the same pure-core/thin-I/O-wrapper
+split \[`decode`\]/`read_key` already draws. `event_loop` supplies
+`term::stdin_ready` in production. Tests supply a fixed answer
+instead of a real terminal. `decode` itself still knows nothing about
+time. It still just reports `None` for an unresolved prefix, exactly
+as before. Disambiguating that `None` by waiting, or not, stays
+entirely `read_key`'s job.
 
 ## The tree and the cross-reference panel
 
@@ -1076,6 +1185,57 @@ have left to cycle through. The rank is always the match's plain
 position in corpus order, even right after a wrap; it says nothing
 about which direction the jump came from, the same way vim's own
 `n`/`N` never mark a wrap either.
+
+`render` also highlights every occurrence of `last_search`'s own text,
+in every visible row -- not just the one `n`/`N` currently sits on, so
+a reader scanning by eye can see every other place there is to jump to
+without cycling through them one at a time first, and not the whole
+row either, so the highlight points at exactly what matched rather
+than making the reader re-read the row to find it. `App::match_ranges`
+finds them: every non-overlapping, case-insensitive occurrence of
+`last_search` in a title, as character ranges, advancing past a whole
+match rather than one character at a time so `"aaa"` against needle
+`"aa"` reports one hit, not two overlapping ones. It works in `char`s
+throughout, never bytes, so a range lines up directly with the drawn
+grid's own columns (`pane_grid` builds one `Vec<char>` cell per
+character) with no byte-to-column translation to get wrong. A range
+still has to be placed *inside* a row that also carries indent and a
+`▾`/`▸` marker ahead of the title -- `draw::tree_line_title_col`
+exposes exactly the column `tree_line` itself starts the title at
+(`2 * depth + 2`, indent plus the marker's own two columns) precisely
+so this arithmetic lives in one place, not reimplemented wherever
+something needs to point inside a title rather than at a whole row.
+
+The first attempt marked whole rows in bold rather than the matched
+text. Both parts of that turned out wrong. Bold was dropped as the
+attribute: weight is a weak, easily missed signal for "this is a hit,"
+and it is not the terminal convention here in the first place --
+`less` and vim's own `hlsearch` both use reverse video for exactly
+this, without a color to fall back on either. Reverse video is what
+`current` already uses, though, so `matches` (`Drawing`, `draw.rs`)
+shares that channel rather than getting one of its own: `render_ansi`
+ORs `current` and `matches` together into a single run per cell,
+rather than tracking a separate SGR toggle for each. This sidesteps
+the collision a genuinely separate attribute would create -- after
+`n`/`N`, the row a match lands on usually *is* the current selection,
+and two different attributes stacked on the same cells would compete
+for attention on the row that most deserves it. Folding them into one
+reverse-video run means that row just reads as reverse video, same as
+`current` alone, which is correct: it is both at once. `secondary`'s
+underline stays fully independent of either, so a matched row on the
+unfocused pane still shows both at a glance -- an underlined row with
+a reverse-video patch marking the hit inside it. Highlighting persists
+through navigation exactly as the status line now does (above) -- only
+`esc`'s `dismiss`, from the base tree state, turns it off, by clearing
+`highlight_search` rather than `last_search` itself. This is vim's own
+`:nohlsearch`, not a full end to the search: the pattern is still
+remembered, so `n`/`N` (`jump_to_search_match`) still jump to a match
+afterward, and turn `highlight_search` back on the moment either
+actually runs, the same as vim's own `n`/`N` bring highlighting back
+after `:nohlsearch`. A genuine end to the search -- forgetting
+`last_search` outright -- was tried first and reverted: it meant `n`/
+`N` went dead the instant a reader dismissed the highlight, which is
+not what dismissing a *highlight* should cost.
 
 ## Scope decisions this would actually need
 
@@ -2989,17 +3149,23 @@ in the act again.
 - Eval in the TUI: cycling finds only the blocks inside a node's own
   line range, wraps, and is a silent no-op with none to find. Running
   writes back and reports `ok`/`failed` on the status line and clears
-  the cycle either way. Navigation and `esc` both cancel a cycle, the
-  former via the same `clear_transient` path movement, `tab`, and `r`
-  all share. `render` is checked to draw the help screen instead of
-  the tree while `help` is on. `read_key` is checked to carry an
-  unused byte from a standalone Esc into the next call rather than
-  losing it, and to resolve a `pending` buffer that already decodes to
-  a full key without blocking on a read that would hang forever
-  against an empty reader. These are the two ends of the bug a real
-  pty session against the built binary found (see *Terminal UI*, *Help
-  screen*), neither reachable from feeding `decode`/`read_key` one
-  complete sequence at a time the way the rest of the suite already did.
+  the cycle either way. Navigation and `esc` both cancel a cycle --
+  navigation via the same `cancel_cycle` path movement, `tab`, and `r`
+  all share, `esc` via `dismiss`, which also clears the status line,
+  the one thing navigation leaves alone. `render` is checked to draw
+  the help screen instead of the tree while `help` is on. `read_key`
+  is checked to carry an unused byte from a standalone Esc into the
+  next call rather than losing it, and to resolve a `pending` buffer
+  that already decodes to a full key without blocking on a read that
+  would hang forever against an empty reader. These are the two ends
+  of the bug a real pty session against the built binary found (see
+  *Terminal UI*, *Help screen*), neither reachable from feeding
+  `decode`/`read_key` one complete sequence at a time the way the rest
+  of the suite already did. `read_key` is also checked to report a
+  standalone Esc immediately rather than blocking on a follow-up byte
+  that a plain keypress was never going to send -- the second bug in
+  the same code, found by a reader's report rather than a pty session
+  (*A standalone Esc that never returned*).
 - Block nodes (decision 20): a named top-level block becomes a node
   contained by its heading with the right `(line, end_line)`. An
   unnamed block or one nested in a list does not. A block before any

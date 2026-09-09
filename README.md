@@ -108,7 +108,27 @@ Keys:
 - `r` — reset
 - `b` — toggle the origin breadcrumb (status line, while the panel has focus)
 - `q` — quit
-- `?` — full keybinding reference; both this and the filter menu draw as a small box over the tree, not a full-screen replacement
+- `?` — full keybinding reference, including any `[tui] commands` below; both this and the filter menu draw as a small box over the tree, not a full-screen replacement
+
+Give a block `key=` and name its file in `[tui] commands` (see
+Configuration below) to bind a key directly to it, skipping the
+`e`-then-`enter` cycle:
+
+````markdown
+```sh name=greet key=g
+echo "hello from a custom dankg command"
+```
+````
+
+Pressing `g` while the tree has focus runs it through the same
+`eval::run` `e`/`enter` already use, and reports the outcome on the
+status line. Help, the filter menu, and panel focus are all modal and
+swallow the key like any other, the same way they swallow `e`/`enter`
+too. `key=` accepts a single character, `ctrl+<char>`, or one of
+`enter`/`tab`/`backspace`/`esc`/`up`/`down`/`left`/`right`. A binding
+that collides with a built-in key, or with another command in the
+same file, is refused with a warning rather than silently shadowing
+one.
 
 ### `eval` — run and record literate code blocks
 
@@ -288,6 +308,9 @@ ext     = rs
 [keys]
 up   = k
 down = j
+
+[tui]
+commands = commands.md
 ```
 
 `{file}` substitutes the temporary file eval writes (or the assembled

@@ -44,7 +44,7 @@ pub const DEFAULT_TUI_DEPTH: u32 = 1;
 /// Sections DanKG reads today, with the keys each one accepts.
 const KNOWN: &[(&str, &[&str])] = &[
     ("graph", &["depth"]),
-    ("tui", &["depth", "breadcrumb"]),
+    ("tui", &["depth", "breadcrumb", "commands"]),
     ("editor", &["command"]),
     ("keys", &["up", "down", "left", "right", "quit", "reset", "eval", "breadcrumb"]),
 ];
@@ -355,6 +355,16 @@ impl Config {
                 true
             }
         }
+    }
+
+    /// `[tui] commands`: a root-relative path to a file whose top-level
+    /// blocks may carry `key=`. Each one becomes a TUI keybinding that
+    /// runs it directly, skipping the cycle-then-`enter` ritual
+    /// `keys.eval` otherwise requires. `None` when unconfigured -- the
+    /// TUI never scans any file for `key=` blocks unless a reader
+    /// explicitly names one.
+    pub fn tui_commands(&self) -> Option<&str> {
+        self.get("tui", "commands")
     }
 }
 ```

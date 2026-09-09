@@ -24,7 +24,7 @@ panel are windowed independently -- each can scroll on its own schedule
 
 pub type Grid = Vec<Vec<char>>;
 
-/// A drawn pane, or a joined frame: the glyphs, plus two parallel
+/// A drawn pane, or a joined frame: the glyphs, plus three parallel
 /// "which cells carry this attribute" grids, kept separate from `grid`
 /// rather than a grid of `(char, flags)` cells so `Grid` alone still
 /// round-trips through [`render_lines`] and every glyph-content test
@@ -41,6 +41,17 @@ pub struct Drawing {
     /// forth never loses track of where it was, without inverting or
     /// otherwise altering the row's own text the way `current` does.
     pub secondary: Vec<Vec<bool>>,
+    /// Same dimensions as `grid`. `true` marks a cell inside a standing
+    /// search's (`app.last_search`) matched text -- just the matched
+    /// characters, not the whole row. Reverse video, the same as
+    /// `current`: [`render_ansi`] ORs the two together into one run
+    /// rather than giving `matches` a channel of its own, so a match
+    /// that is also the current selection stays exactly as prominent as
+    /// `current` alone, not competing with it for attention. Any number
+    /// of cells across a frame can carry this, not just one row's worth
+    /// -- every hit stays marked wherever the reader scrolls, until
+    /// `esc` ends the search.
+    pub matches: Vec<Vec<bool>>,
 }
 
 /// Which attribute [`mark_row`] applies.
@@ -48,6 +59,7 @@ pub struct Drawing {
 pub enum RowStyle {
     Current,
     Secondary,
+    Match,
 }
 
 /// `grid`'s rows joined into strings, ready to write to a terminal one
@@ -69,6 +81,7 @@ pub fn mark_row(drawing: &mut Drawing, row: usize, col_start: usize, width: usiz
     let target = match style {
         RowStyle::Current => &mut drawing.current,
         RowStyle::Secondary => &mut drawing.secondary,
+        RowStyle::Match => &mut drawing.matches,
     };
     let Some(row_flags) = target.get_mut(row) else { return };
     let end = (col_start + width).min(row_flags.len());
@@ -85,36 +98,55 @@ pub fn mark_row(drawing: &mut Drawing, row: usize, col_start: usize, width: usiz
 underline SGR attributes, rather than hardcoded colors. Both are
 relative to whatever foreground and background the terminal already
 has, so they read correctly on a dark theme or a light one without
-this module ever needing to know which. A fixed color could not do
-that. Underline over "faint" (the earlier treatment) is also what
-keeps `secondary` from changing the row's own text at all -- weight,
-color, everything about the glyphs stays exactly as drawn, with only a
-line added beneath them, so a reader scanning the unfocused pane for
-its last position is never left wondering whether a dimmer title means
-something about the node itself.
+this module ever needing to know which -- a fixed color could not do
+that. Underline over "faint" (the earlier treatment for `secondary`)
+is also what keeps `secondary` from changing the row's own text at
+all -- weight, color, everything about the glyphs stays exactly as
+drawn, with only a line added beneath them.
+
+`matches` shares `current`'s reverse-video run rather than getting a
+third SGR attribute of its own: a cell is reversed when *either* is
+`true`. Bold was tried first and dropped -- weight is a weak, easily
+missed signal for "this is a hit," and it is not what a reader expects
+here anyway. Reverse video is the terminal convention `less` and vim's
+own `hlsearch` already use for exactly this. Sharing the channel
+`current` already has, rather than adding a fourth, also sidesteps the
+one real collision a separate attribute would create: after `n`/`N`,
+the row a match lands on usually *is* the current selection, and two
+different attributes stacked on the same cells would visually compete
+for the reader's attention on the row that most deserves it. Folding
+them into one run means that row simply reads as reverse video, same
+as `current` alone -- correct, since it is both at once. `secondary`'s
+underline stays fully distinct from either, so a matched row on the
+unfocused pane still shows both: an underlined row with a reverse-video
+patch marking the hit inside it.
 
 ```rust name=render_ansi path=tui/draw.rs
-/// [`Drawing::current`] wrapped in reverse video (`\x1b[7m`...`\x1b[27m`)
-/// and [`Drawing::secondary`] wrapped in underline (`\x1b[4m`...`\x1b[24m`),
-/// each tracked as its own run across a row so either attribute can
-/// start or end independently of the other.
+/// [`Drawing::current`] and [`Drawing::matches`] are ORed together
+/// into one reverse-video run (`\x1b[7m`...`\x1b[27m`) -- see the
+/// prose above for why they share a channel rather than each getting
+/// their own. [`Drawing::secondary`] is wrapped in underline
+/// (`\x1b[4m`...`\x1b[24m`) independently, so it can start or end
+/// without disturbing whichever reverse-video run is already open.
 pub fn render_ansi(drawing: &Drawing) -> Vec<String> {
     drawing
         .grid
         .iter()
         .zip(&drawing.current)
         .zip(&drawing.secondary)
-        .map(|((row, current_row), secondary_row)| {
+        .zip(&drawing.matches)
+        .map(|(((row, current_row), secondary_row), match_row)| {
             let mut out = String::new();
-            let mut current = false;
+            let mut reversed = false;
             let mut underlined = false;
-            for ((&ch, &cur), &sec) in row.iter().zip(current_row).zip(secondary_row) {
-                if cur && !current {
+            for (((&ch, &cur), &sec), &mat) in row.iter().zip(current_row).zip(secondary_row).zip(match_row) {
+                let rev = cur || mat;
+                if rev && !reversed {
                     out.push_str("\x1b[7m");
-                    current = true;
-                } else if !cur && current {
+                    reversed = true;
+                } else if !rev && reversed {
                     out.push_str("\x1b[27m");
-                    current = false;
+                    reversed = false;
                 }
                 if sec && !underlined {
                     out.push_str("\x1b[4m");
@@ -125,7 +157,7 @@ pub fn render_ansi(drawing: &Drawing) -> Vec<String> {
                 }
                 out.push(ch);
             }
-            if current {
+            if reversed {
                 out.push_str("\x1b[27m");
             }
             if underlined {
@@ -149,6 +181,7 @@ pub fn window(drawing: &Drawing, row: usize, col: usize, rows: usize, cols: usiz
         grid: drawing.grid.iter().skip(row).take(rows).map(|l| clip_ch(l)).collect(),
         current: drawing.current.iter().skip(row).take(rows).map(|l| clip_flag(l)).collect(),
         secondary: drawing.secondary.iter().skip(row).take(rows).map(|l| clip_flag(l)).collect(),
+        matches: drawing.matches.iter().skip(row).take(rows).map(|l| clip_flag(l)).collect(),
     }
 }
 
@@ -194,6 +227,18 @@ pub fn clip_with_ellipsis(text: &str, cols: usize) -> String {
     let mut out: String = chars[..cols - 1].iter().collect();
     out.push('…');
     out
+}
+
+/// The column [`tree_line`] starts `title` at, for a row at `depth`:
+/// two columns of indent per level, plus the marker's own two columns
+/// -- `▾ `/`▸ `/`  ` are all exactly two characters wide, whichever one
+/// a row gets. Exposed so a caller marking up something *inside* the
+/// title text, rather than the row as a whole, can find where it
+/// actually starts without re-deriving `tree_line`'s own layout by
+/// hand -- `app::render`'s search-match highlight (*Jump and default
+/// depth*, `architecture.md`) is the one caller today.
+pub fn tree_line_title_col(depth: u32) -> usize {
+    2 * depth as usize + 2
 }
 
 /// One tree row's plain text: two spaces of indent per `depth`, then a
@@ -251,7 +296,7 @@ pub fn pane_grid(lines: &[String], cols: usize) -> Drawing {
         })
         .collect();
     let flags = vec![vec![false; cols]; grid.len()];
-    Drawing { grid, current: flags.clone(), secondary: flags }
+    Drawing { grid, current: flags.clone(), secondary: flags.clone(), matches: flags }
 }
 
 /// Horizontally joins two already-[`window`]ed panes, both already
@@ -261,20 +306,21 @@ pub fn pane_grid(lines: &[String], cols: usize) -> Drawing {
 /// still runs the full frame height instead of stopping wherever that
 /// pane's real content ran out first.
 pub fn compose(tree: &Drawing, panel: &Drawing, rows: usize, tree_cols: usize, panel_cols: usize) -> Drawing {
-    let blank = |cols: usize| (vec![' '; cols], vec![false; cols], vec![false; cols]);
+    let blank = |cols: usize| (vec![' '; cols], vec![false; cols], vec![false; cols], vec![false; cols]);
     let mut grid = Vec::with_capacity(rows);
     let mut current = Vec::with_capacity(rows);
     let mut secondary = Vec::with_capacity(rows);
+    let mut matches = Vec::with_capacity(rows);
     for i in 0..rows {
-        let (t_row, t_cur, t_sec) = tree
+        let (t_row, t_cur, t_sec, t_mat) = tree
             .grid
             .get(i)
-            .map(|g| (g.clone(), tree.current[i].clone(), tree.secondary[i].clone()))
+            .map(|g| (g.clone(), tree.current[i].clone(), tree.secondary[i].clone(), tree.matches[i].clone()))
             .unwrap_or_else(|| blank(tree_cols));
-        let (p_row, p_cur, p_sec) = panel
+        let (p_row, p_cur, p_sec, p_mat) = panel
             .grid
             .get(i)
-            .map(|g| (g.clone(), panel.current[i].clone(), panel.secondary[i].clone()))
+            .map(|g| (g.clone(), panel.current[i].clone(), panel.secondary[i].clone(), panel.matches[i].clone()))
             .unwrap_or_else(|| blank(panel_cols));
 
         let mut row = t_row;
@@ -291,8 +337,13 @@ pub fn compose(tree: &Drawing, panel: &Drawing, rows: usize, tree_cols: usize, p
         sec.push(false);
         sec.extend(p_sec);
         secondary.push(sec);
+
+        let mut mat = t_mat;
+        mat.push(false);
+        mat.extend(p_mat);
+        matches.push(mat);
     }
-    Drawing { grid, current, secondary }
+    Drawing { grid, current, secondary, matches }
 }
 ```
 
@@ -321,9 +372,9 @@ pub fn box_grid(lines: &[String]) -> Drawing {
 }
 
 /// Pastes `content` on top of `base` at `(row, col)`, overwriting
-/// whatever was already there, including any `current`/`secondary`
-/// attribute underneath it -- a stale reverse-video tree row must
-/// never bleed through a box drawn on top of it. Out-of-range rows or
+/// whatever was already there, including any `current`/`secondary`/
+/// `matches` attribute underneath it -- a stale reverse-video tree row
+/// must never bleed through a box drawn on top of it. Out-of-range rows or
 /// columns are silently clipped, the same tolerance [`mark_row`]
 /// already has for a scroll offset that leaves a row off screen.
 pub fn overlay(base: &Drawing, content: &Drawing, row: usize, col: usize) -> Drawing {
@@ -332,6 +383,7 @@ pub fn overlay(base: &Drawing, content: &Drawing, row: usize, col: usize) -> Dra
         let Some(target) = out.grid.get_mut(row + r) else { break };
         let Some(cur) = out.current.get_mut(row + r) else { break };
         let Some(sec) = out.secondary.get_mut(row + r) else { break };
+        let Some(mat) = out.matches.get_mut(row + r) else { break };
         for (c, &ch) in content_row.iter().enumerate() {
             let Some(cell) = target.get_mut(col + c) else { break };
             *cell = ch;
@@ -346,6 +398,9 @@ pub fn overlay(base: &Drawing, content: &Drawing, row: usize, col: usize) -> Dra
             }
             if let Some(f) = sec.get_mut(col + c) {
                 *f = content.secondary[r][c];
+            }
+            if let Some(f) = mat.get_mut(col + c) {
+                *f = content.matches[r][c];
             }
         }
     }
@@ -375,6 +430,7 @@ mod tests {
             grid: vec![vec!['a', 'b', 'c'], vec!['d', 'e', 'f'], vec!['g', 'h', 'i']],
             current: vec![vec![false; 3]; 3],
             secondary: vec![vec![false; 3]; 3],
+            matches: vec![vec![false; 3]; 3],
         };
         let w = window(&drawing, 1, 1, 2, 2);
         assert_eq!(render_lines(&w.grid), vec!["ef".to_string(), "hi".to_string()]);
@@ -382,7 +438,12 @@ mod tests {
 
     #[test]
     fn window_past_the_grids_edge_yields_fewer_rows_and_columns_not_padding() {
-        let drawing = Drawing { grid: vec![vec!['a', 'b']], current: vec![vec![false; 2]], secondary: vec![vec![false; 2]] };
+        let drawing = Drawing {
+            grid: vec![vec!['a', 'b']],
+            current: vec![vec![false; 2]],
+            secondary: vec![vec![false; 2]],
+            matches: vec![vec![false; 2]],
+        };
         let w = window(&drawing, 0, 0, 5, 5);
         assert_eq!(w.grid, drawing.grid, "asking for more room than exists just returns what exists");
     }
@@ -405,6 +466,34 @@ mod tests {
     }
 
     #[test]
+    fn a_search_match_renders_reverse_video() {
+        let mut drawing = pane_grid(&["one".to_string()], 3);
+        mark_row(&mut drawing, 0, 0, 3, RowStyle::Match);
+        let joined = render_ansi(&drawing).join("\n");
+        assert!(joined.contains("\x1b[7mone\x1b[27m"), "{joined:?}");
+    }
+
+    #[test]
+    fn a_matched_current_row_renders_as_one_reverse_video_run_not_two() {
+        // `current` and `matches` share a channel (see the prose
+        // above `render_ansi`) -- overlapping cells must not toggle
+        // `\x1b[7m` off and back on again between them.
+        let mut drawing = pane_grid(&["one".to_string()], 3);
+        mark_row(&mut drawing, 0, 0, 3, RowStyle::Current);
+        mark_row(&mut drawing, 0, 0, 3, RowStyle::Match);
+        let joined = render_ansi(&drawing).join("\n");
+        assert_eq!(joined, "\x1b[7mone\x1b[27m", "{joined:?}");
+    }
+
+    #[test]
+    fn only_the_matched_part_of_a_row_renders_in_reverse_video() {
+        let mut drawing = pane_grid(&["one two".to_string()], 7);
+        mark_row(&mut drawing, 0, 4, 3, RowStyle::Match); // "two" only
+        let joined = render_ansi(&drawing).join("\n");
+        assert_eq!(joined, "one \x1b[7mtwo\x1b[27m", "{joined:?}");
+    }
+
+    #[test]
     fn mark_row_out_of_range_is_a_no_op() {
         let mut drawing = pane_grid(&["one".to_string()], 3);
         mark_row(&mut drawing, 5, 0, 3, RowStyle::Current); // no such row
@@ -416,6 +505,18 @@ mod tests {
     fn tree_line_indents_by_depth_and_shows_the_expand_marker() {
         assert_eq!(tree_line(0, Some(true), "One", "", 40), "▾ One");
         assert_eq!(tree_line(1, Some(false), "Two", "", 40), "  ▸ Two");
+    }
+
+    #[test]
+    fn tree_line_title_col_matches_where_tree_line_actually_starts_the_title() {
+        for depth in 0..3 {
+            let line = tree_line(depth, Some(true), "X", "", 40);
+            assert_eq!(
+                line.chars().nth(tree_line_title_col(depth)),
+                Some('X'),
+                "depth {depth}: {line:?}"
+            );
+        }
     }
 
     #[test]
@@ -502,6 +603,15 @@ mod tests {
     }
 
     #[test]
+    fn compose_carries_a_search_match_from_either_pane_through_to_the_frame() {
+        let mut tree = pane_grid(&["a".to_string()], 1);
+        mark_row(&mut tree, 0, 0, 1, RowStyle::Match);
+        let panel = pane_grid(&["c".to_string()], 1);
+        let frame = compose(&tree, &panel, 1, 1, 1);
+        assert_eq!(frame.matches[0], vec![true, false, false], "the divider and panel column are untouched");
+    }
+
+    #[test]
     fn box_grid_sizes_itself_to_its_own_longest_line() {
         let b = box_grid(&["hi".to_string(), "longer".to_string()]);
         assert_eq!(
@@ -534,6 +644,15 @@ mod tests {
         mark_row(&mut content, 0, 0, 2, RowStyle::Current);
         let out = overlay(&base, &content, 0, 1);
         assert_eq!(out.current[0], vec![false, true, true, false], "a menu box's own selected row survives the paste");
+    }
+
+    #[test]
+    fn overlay_clears_a_search_match_underneath_it_and_carries_its_own() {
+        let mut base = pane_grid(&["aaaa".to_string()], 4);
+        mark_row(&mut base, 0, 0, 4, RowStyle::Match);
+        let content = pane_grid(&["bb".to_string()], 2);
+        let out = overlay(&base, &content, 0, 1);
+        assert_eq!(out.matches[0], vec![true, false, false, true], "only the pasted-over cells lose the match highlight");
     }
 
     #[test]

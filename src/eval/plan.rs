@@ -81,6 +81,11 @@ pub struct BlockRef<'a> {
     /// same way `check_consistent_lang` already refuses one that disagrees
     /// on `lang`.
     pub db: Option<&'a str>,
+    /// `key=` (`[tui] commands`), raw and unvalidated. Ignored by
+    /// planning, evaluation, and write-back entirely -- `tui::eval::
+    /// keyed_commands` is the one reader, the same way `path` is read
+    /// only by `tangle` and otherwise carried along for free.
+    pub key: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -207,6 +212,7 @@ fn block_ref<'a>(
         produces: info.produces(),
         reads: info.reads(),
         db: info.db(),
+        key: info.key(),
     })
 }
 
@@ -743,6 +749,14 @@ mod tests {
     fn a_named_block_nested_in_a_list_is_invisible_to_eval() {
         let d = doc("- ```sh name=hidden\n  :\n  ```\n");
         assert!(top_level_blocks(&d, FILE).is_empty());
+    }
+
+    #[test]
+    fn top_level_blocks_carries_key_raw_and_none_when_absent() {
+        let d = doc("```sh name=a key=g\n:\n```\n\n```sh name=b\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        assert_eq!(blocks[0].key, Some("g"));
+        assert_eq!(blocks[1].key, None);
     }
 
     #[test]

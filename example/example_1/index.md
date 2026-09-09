@@ -15,6 +15,10 @@ This one points at a file `.dankgignore` deliberately excludes from the
 corpus, so it renders as an unresolved placeholder with a warning on
 stderr: [draft notes](scratch/draft.md).
 
+[TUI commands](commands.md) shows off `[tui] commands`: a corpus file can
+define its own `dankg tui` keybindings, no different from any other
+document here.
+
 ## About this graph
 
 Nodes are headings; links between headings become edges. [[Garden]] links

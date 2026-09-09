@@ -272,7 +272,18 @@ struct App {
     /// `search` itself is cleared -- vim's own `n`/`N` convention: the
     /// pattern survives the search prompt closing, so `n`/`N` can keep
     /// cycling through its matches long after `/`'s own buffer is gone.
+    /// `esc` (`dismiss`) never touches this -- only `highlight_search`
+    /// (below).
     last_search: Option<String>,
+    /// Whether `render` should highlight `last_search`'s matches right
+    /// now -- independent of whether `last_search` itself is set at
+    /// all. `jump_to_search_match` (`confirm_search`/`n`/`N`) turns
+    /// this on whenever it actually runs; `dismiss` (`esc`, the base
+    /// tree state) turns it off without clearing `last_search`, vim's
+    /// own `:nohlsearch` convention: the pattern is still remembered,
+    /// so `n`/`N` still jumps and turns the highlight back on, exactly
+    /// as if the search had never been dismissed.
+    highlight_search: bool,
     /// The one line `render` reserves at the bottom of the viewport: the
     /// block-cycle list while `block_select` is active, the `/query` typed
     /// so far while `search` is active, or the last eval outcome
@@ -295,6 +306,16 @@ struct App {
     /// no marker at all once they start exploring links elsewhere in the
     /// tree.
     breadcrumb: bool,
+    /// `[tui] commands`'s own root-relative path, resolved once per
+    /// load/reload -- `None` when unconfigured. Kept alongside `commands`
+    /// rather than re-read from `config` on every keypress, the same
+    /// reasoning `default_depth` already follows.
+    commands_file: Option<String>,
+    /// `[tui] commands`'s own keybinding table (`load_commands`): every
+    /// `key=` block in `commands_file` that parsed and did not collide
+    /// with a built-in or an earlier command, keyed by the `Key` that
+    /// runs it.
+    commands: HashMap<input::Key, (usize, String)>,
     diags: Diags,
 }
 ```
@@ -320,6 +341,11 @@ exception is `pending` already decoding to a full key on its own (the
 byte right after a standalone Esc) -- that never waits on stdin at
 all, matching `read_key`'s own "replay before reading again" rule, so
 a resize check never delays a keystroke that had already arrived.
+
+`read_key`'s own `esc_ready` argument is `term::stdin_ready` here too.
+A lone Esc with nothing typed after it must not sit blocked on a
+`read` waiting for a keystroke that may never come (*A standalone Esc
+that never returned*, `architecture.md`).
 
 ```rust name=run_and_event_loop path=tui/app.rs
 /// `dankg tui <path>...`. Needs a real terminal. There is nothing sound
@@ -357,7 +383,7 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
     loop {
         let key = loop {
             if input::decode(&pending).is_some() || term::stdin_ready(RESIZE_POLL_MS) {
-                break input::read_key(io::stdin(), &mut pending)?;
+                break input::read_key(io::stdin(), &mut pending, |ms| term::stdin_ready(ms))?;
             }
             if term::take_resized() {
                 render(app, out)?;
@@ -434,52 +460,52 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
             input::Key::Char('/') => app.start_search(),
             input::Key::Char('f') => app.open_filter_menu(),
             input::Key::Char('n') => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.search_next();
             }
             input::Key::Char('N') => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.search_prev();
             }
             input::Key::Up => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.up();
             }
             input::Key::Down => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.down();
             }
             input::Key::Left => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.left();
             }
             input::Key::Right => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.right();
             }
-            input::Key::Esc => app.cancel_block_select(),
+            input::Key::Esc => app.dismiss(),
             input::Key::Char(c) if c == app.keys.quit => return Ok(()),
             input::Key::Char(c) if c == app.keys.up => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.up();
             }
             input::Key::Char(c) if c == app.keys.down => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.down();
             }
             input::Key::Char(c) if c == app.keys.left => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.left();
             }
             input::Key::Char(c) if c == app.keys.right => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.right();
             }
             input::Key::Char(c) if c == app.keys.reset => app.reset_selection(),
             input::Key::Char(c) if c == app.keys.eval => app.eval_key(),
             input::Key::Char(c) if c == app.keys.breadcrumb => app.toggle_breadcrumb(),
             input::Key::Tab => {
-                app.clear_transient();
+                app.cancel_cycle();
                 app.toggle_focus();
             }
             input::Key::Enter if app.block_select.is_some() => app.run_selected_block(),
@@ -497,6 +523,11 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
                     app.reload();
                 }
             }
+            // `[tui] commands`: every key here already passed
+            // `reserved_keys` at load time, so it can never shadow a
+            // built-in arm above -- this is deliberately the last thing
+            // checked, not what makes it safe.
+            key if app.commands.contains_key(&key) => app.run_command(key),
             _ => {}
         }
         render(app, out)?;
@@ -539,12 +570,58 @@ fn block_select_status(sel: &BlockSelect) -> String {
     format!("eval: {}   enter=run esc=cancel", parts.join(" "))
 }
 
+/// `name: <what happened>` for the status line: `eval::Outcome::Ok`/
+/// `Failed` already carry the run's own captured text, but the status
+/// line is one row, so only its first non-blank line is shown, trimmed.
+/// `fallback` (`"ok"`/`"failed"`) covers a run that printed nothing at
+/// all -- the reader still learns it ran, just not what it said, since
+/// there was nothing to say.
+fn outcome_status(name: &str, text: &str, fallback: &str) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(fallback);
+    format!("{name}: {line}")
+}
+
+/// Every non-overlapping, case-insensitive occurrence of `needle` in
+/// `title`, as character-index ranges -- what `render` marks up, one
+/// call per visible row. Works in `char`s throughout, never bytes, so
+/// a range lines up directly with `title`'s own column positions in
+/// the drawn grid (`pane_grid` builds one `Vec<char>` cell per
+/// character) with no byte-to-column translation to get wrong.
+/// Advances past a whole match rather than by one character, the same
+/// as `str::matches` would for a literal, non-overlapping needle. An
+/// empty `needle` matches nowhere, rather than at every position --
+/// `confirm_search` already refuses to confirm one, so this is a
+/// guard against a stray direct call, not a real case `render` hits.
+fn match_ranges(title: &str, needle: &str) -> Vec<std::ops::Range<usize>> {
+    let hay: Vec<char> = title.chars().collect();
+    let needle: Vec<char> = needle.chars().collect();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= hay.len() {
+        if hay[i..i + needle.len()].iter().zip(&needle).all(|(a, b)| a.to_lowercase().eq(b.to_lowercase())) {
+            ranges.push(i..i + needle.len());
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    ranges
+}
+
 /// Every action bound today. Fixed keys first (never remappable --
 /// arrows, enter, tab, esc, `/`, `?`), then the `[keys]`-configurable
-/// letters, read live from `keys`. This way, a remap shows up here too
-/// rather than the reference silently going stale.
-fn help_lines(keys: &Keymap) -> Vec<String> {
-    vec![
+/// letters, read live from `keys`, then -- when `[tui] commands` is
+/// configured -- every command it defines, one row per binding, name
+/// and all. This is the one place a reader can see *every* key that
+/// does something before pressing it, built-in or their own: showing a
+/// command's key here is what makes it safe to add one without also
+/// having to remember it separately, and what warns a reader off
+/// reusing a key some other command (or a built-in) already claimed.
+fn help_lines(keys: &Keymap, commands: &HashMap<input::Key, (usize, String)>) -> Vec<String> {
+    let mut lines = vec![
         "DanKG -- keybindings".to_string(),
         String::new(),
         format!(
@@ -564,11 +641,26 @@ fn help_lines(keys: &Keymap) -> Vec<String> {
         format!("  {}                  collapse back to the entry view", keys.reset),
         format!("  {}                  quit", keys.quit),
         format!("  {}                  toggle the origin breadcrumb (status line, panel focus only)", keys.breadcrumb),
-        String::new(),
-        "  ?                  toggle this help".to_string(),
-        String::new(),
-        "press ? (or esc, or q) to close".to_string(),
-    ]
+    ];
+    if !commands.is_empty() {
+        // Sorted by name, not by key or table order: a `HashMap`'s own
+        // iteration order is unspecified, and a reader scanning for a
+        // command they wrote wants it alphabetical, not wherever the
+        // hash happened to land it.
+        let mut entries: Vec<(&input::Key, &str)> =
+            commands.iter().map(|(key, (_, name))| (key, name.as_str())).collect();
+        entries.sort_by_key(|(_, name)| *name);
+        lines.push(String::new());
+        lines.push("  -- [tui] commands --".to_string());
+        for (key, name) in entries {
+            lines.push(format!("  {:<18} {name}", key.to_string()));
+        }
+    }
+    lines.push(String::new());
+    lines.push("  ?                  toggle this help".to_string());
+    lines.push(String::new());
+    lines.push("press ? (or esc, or q) to close".to_string());
+    lines
 }
 
 /// The filter-picker's own overlay content, `cursor`'s row already
@@ -772,6 +864,26 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         }
     }
 
+    // Every occurrence of a standing search's own text, in every
+    // visible row -- not just wherever `n`/`N` currently sits, so the
+    // reader can see at a glance everywhere else there is to jump to,
+    // and not the whole row either, so the highlight points at exactly
+    // what matched. `highlight_search` (not just `last_search` being
+    // set) gates this: `esc` (`dismiss`) turns highlighting off without
+    // forgetting the pattern, vim's own `:nohlsearch` -- `n`/`N` bring
+    // it back without the reader having to search again.
+    if let Some(needle) = app.last_search.as_ref().filter(|_| app.highlight_search) {
+        for (i, row) in tree_rows.iter().enumerate() {
+            if i < app.scroll_row || i >= app.scroll_row + content_rows {
+                continue;
+            }
+            let title_col = draw::tree_line_title_col(row.depth);
+            for m in match_ranges(&row.title, needle) {
+                draw::mark_row(&mut frame, i - app.scroll_row, title_col + m.start, m.len(), draw::RowStyle::Match);
+            }
+        }
+    }
+
     // `help`/`filter_menu` each draw as a small box floating over the
     // tree and panel already composed above, rather than replacing
     // either -- `frame` still shows real content around the box.
@@ -781,7 +893,8 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         // off screen. Clipped to what the frame can actually fit,
         // minus the box's own four columns of border and padding.
         let max_line = term_cols.saturating_sub(4).max(1);
-        let lines: Vec<String> = help_lines(&app.keys).iter().map(|l| draw::clip_with_ellipsis(l, max_line)).collect();
+        let lines: Vec<String> =
+            help_lines(&app.keys, &app.commands).iter().map(|l| draw::clip_with_ellipsis(l, max_line)).collect();
         Some(draw::box_grid(&lines))
     } else {
         app.filter_menu.map(filter_menu_box)
@@ -1289,6 +1402,55 @@ fn resolve_entry_roots(
     (entry_roots, depth.unwrap_or(default_depth))
 }
 
+/// Every key already spoken for by a built-in action: `keys`'s own eight
+/// remappable fields, plus the literals `event_loop` checks directly
+/// (`?`, `/`, `f`, `n`, `N`) that never route through `Keymap` at all,
+/// plus the structural keys (`Enter`, `Tab`, `Esc`, the arrows) that are
+/// always fixed regardless of `Keymap` or config. A `[tui] commands`
+/// binding matching any of these is refused rather than silently
+/// shadowing (or, for the structural keys, silently never firing at
+/// all, since their own hardcoded match arms would always claim the key
+/// first).
+fn reserved_keys(keys: &Keymap) -> HashSet<input::Key> {
+    let mut out: HashSet<input::Key> = [
+        keys.up, keys.down, keys.left, keys.right, keys.quit, keys.reset, keys.eval, keys.breadcrumb, '?', '/', 'f',
+        'n', 'N',
+    ]
+    .into_iter()
+    .map(input::Key::Char)
+    .collect();
+    out.extend([input::Key::Enter, input::Key::Tab, input::Key::Esc, input::Key::Up, input::Key::Down, input::Key::Left, input::Key::Right]);
+    out
+}
+
+/// Resolves `[tui] commands`, if configured, to a `Key -> block position`
+/// table: every top-level block in the named file with a `key=`
+/// `keyed_commands` recognises, minus any that collide. Unlike
+/// `Keymap`'s own "any collision reverts the whole map" (`config.rs`),
+/// a collision here refuses only the one binding involved and keeps
+/// every other command loaded -- there is no single moment a whole
+/// table of commands is parsed atomically the way `[keys]` is, so
+/// reverting all of them over one bad entry would punish every other
+/// command for a mistake in one.
+fn load_commands(root: &Path, config: &Config, keys: &Keymap, diags: &mut Diags) -> (Option<String>, HashMap<input::Key, (usize, String)>) {
+    let Some(configured) = config.tui_commands() else { return (None, HashMap::new()) };
+    let file = root.join(configured).to_string_lossy().into_owned();
+    let reserved = reserved_keys(keys);
+    let mut commands = HashMap::new();
+    for (position, key, name) in eval::keyed_commands(&file) {
+        if reserved.contains(&key) {
+            diags.warn_in(file.clone(), 0, format!("`{name}` binds `{key}`, already a built-in key; ignored"));
+            continue;
+        }
+        if commands.contains_key(&key) {
+            diags.warn_in(file.clone(), 0, format!("`{name}` binds `{key}`, already used by another command in this file; ignored"));
+            continue;
+        }
+        commands.insert(key, (position, name));
+    }
+    (Some(file), commands)
+}
+
 impl App {
     fn load(paths: &[String], cache: bool, depth: Option<u32>, all: bool) -> Result<App, String> {
         let (root, config, keys, index, default_depth, entries, corpus_paths, mut diags) = build(paths, cache)?;
@@ -1301,6 +1463,7 @@ impl App {
         let (entry_roots, initial_depth) = resolve_entry_roots(&index, &roots, &entries, depth, all, default_depth);
         let expanded = initial_expansion(&children, &entry_roots, initial_depth);
         let selected = entry_roots.first().cloned().unwrap_or_else(|| roots[0].clone());
+        let (commands_file, commands) = load_commands(&root, &config, &keys, &mut diags);
         Ok(App {
             paths: paths.to_vec(),
             cache,
@@ -1329,9 +1492,12 @@ impl App {
             block_select: None,
             search: None,
             last_search: None,
+            highlight_search: false,
             status: None,
             help: false,
             breadcrumb,
+            commands_file,
+            commands,
             diags,
         })
     }
@@ -1413,6 +1579,10 @@ impl App {
         // actually visible under the fresh expansion, not merely present.
         let still_visible = index.contains(&self.selected) && is_visible_under(&index, &self.selected, &expanded);
 
+        let (commands_file, commands) = load_commands(&root, &config, &keys, &mut self.diags);
+        self.commands_file = commands_file;
+        self.commands = commands;
+
         self.root = root;
         self.config = config;
         self.keys = keys;
@@ -1456,22 +1626,39 @@ impl App {
         // here" choice -- the next filter change should restore
         // whatever that filter remembers, not preserve this reset.
         self.moved_since_filter_change = false;
-        self.clear_transient();
+        self.cancel_cycle();
     }
 
-    /// Drops any in-progress block cycle and its status line. Called before
-    /// every action that moves the selection or the tree out from under a
-    /// cycle that was tied to the *previous* selection. Navigating,
-    /// expanding, or resetting all count.
-    fn clear_transient(&mut self) {
+    /// Drops any in-progress block cycle, on its own -- the status line
+    /// is untouched. Called before every action that moves the
+    /// selection or the tree out from under a cycle tied to the
+    /// *previous* selection -- navigating, expanding, or resetting all
+    /// count. A cycle stops meaning anything once the selection moves,
+    /// but the status line does not: only `esc` (`dismiss`, below)
+    /// dismisses that, so a run's outcome or a search result stays
+    /// readable while the reader keeps looking around.
+    fn cancel_cycle(&mut self) {
+        self.block_select = None;
+    }
+
+    /// `esc`, in the base tree state: cancels any in-progress cycle,
+    /// dismisses the status line, and turns off search highlighting --
+    /// all three are the reader's own "never mind" for whatever is
+    /// currently showing, and `esc` is the only action that clears any
+    /// of them. `last_search` itself is deliberately left alone: vim's
+    /// own `:nohlsearch` clears the highlight, not the pattern, and
+    /// `n`/`N` (`jump_to_search_match`) still work afterward, turning
+    /// `highlight_search` back on the moment the reader uses either.
+    fn dismiss(&mut self) {
         self.block_select = None;
         self.status = None;
+        self.highlight_search = false;
     }
 
     /// `f`: opens the filter-picker overlay, its cursor starting on
     /// whichever `Filter` is already active.
     fn open_filter_menu(&mut self) {
-        self.clear_transient();
+        self.cancel_cycle();
         self.filter_menu = Some(self.filter);
     }
 
@@ -1536,7 +1723,7 @@ impl App {
             }
         }
         self.moved_since_filter_change = false;
-        self.clear_transient();
+        self.cancel_cycle();
 
         if let Some(offset) = anchor {
             if let Some(row) = self.visible_rows().iter().position(|r| r.id == self.selected) {
@@ -1727,10 +1914,10 @@ are excluded from the tree: there is nowhere to reveal one into.
 ```rust name=search path=tui/app.rs
 impl App {
     /// `/`: opens the typed-query buffer. Cancels any in-progress block
-    /// cycle first (`clear_transient`), the same as any other action
+    /// cycle first (`cancel_cycle`), the same as any other action
     /// about to move the selection out from under one.
     fn start_search(&mut self) {
-        self.clear_transient();
+        self.cancel_cycle();
         self.search = Some(String::new());
     }
 
@@ -1803,9 +1990,14 @@ impl App {
     /// have left to cycle through. The rank is always the match's plain
     /// position in corpus order, even right after a wrap; it says
     /// nothing about which direction the jump came from, the same way
-    /// vim's own `n`/`N` never mark a wrap either.
+    /// vim's own `n`/`N` never mark a wrap either. Also turns
+    /// `highlight_search` on, regardless of whether a match turns up --
+    /// this is the one place all three callers (the initial confirm,
+    /// `n`, `N`) actually run a search, so it is the one place that
+    /// needs to undo `dismiss`'s own `highlight_search = false`.
     fn jump_to_search_match(&mut self, delta: i32) {
         let Some(needle) = self.last_search.clone() else { return };
+        self.highlight_search = true;
         let matches: Vec<(usize, NodeId)> = self
             .index
             .nodes
@@ -1835,8 +2027,11 @@ impl App {
 }
 ```
 
-`eval_key`, `cancel_block_select`, and `run_selected_block` are the
-whole of `keys.eval` cycling. The first press looks up the selected
+`eval_key` and `run_selected_block` are the whole of `keys.eval`
+cycling. `esc` leaves it too, through `dismiss` -- the same
+`block_select = None` `cancel_cycle` does elsewhere, plus dismissing
+the status line the way only `esc` does. The first press looks up the
+selected
 node's own named blocks (exactly `node.line..=node.end_line`, the
 extent `graph::build` already computes for it) and starts cycling. A
 later press just advances, wrapping. A node with no named blocks in
@@ -1875,13 +2070,6 @@ impl App {
         self.block_select = Some(sel);
     }
 
-    /// `esc`, while cycling: cancels back to plain node selection, no run.
-    fn cancel_block_select(&mut self) {
-        if self.block_select.take().is_some() {
-            self.status = None;
-        }
-    }
-
     /// `enter`, while cycling: runs the currently cycled block and leaves
     /// cycle mode either way, successful or not -- the action is complete,
     /// and the outcome is what the status line shows next. No separate
@@ -1893,8 +2081,29 @@ impl App {
         let (position, name) = sel.blocks[sel.cursor].clone();
         let outcome = eval::run(&sel.file, &self.config, position);
         self.status = Some(match outcome {
-            eval::Outcome::Ok => format!("{name}: ok"),
-            eval::Outcome::Failed => format!("{name}: failed"),
+            eval::Outcome::Ok(text) => outcome_status(&name, &text, "ok"),
+            eval::Outcome::Failed(text) => outcome_status(&name, &text, "failed"),
+            eval::Outcome::TimedOut => format!("{name}: timed out"),
+            eval::Outcome::Error(e) => format!("{name}: {e}"),
+        });
+        self.reload();
+    }
+
+    /// A `[tui] commands` key, already resolved to a real binding by
+    /// `load_commands`: runs the block at that position in
+    /// `commands_file` through `eval::run`, the same shared entry point
+    /// `run_selected_block` above already uses, and reports the outcome
+    /// on the status line. A no-op if `key` is not actually bound --
+    /// `event_loop` only ever calls this after checking `commands`
+    /// itself, so this only happens if the two disagree.
+    fn run_command(&mut self, key: input::Key) {
+        let Some(file) = self.commands_file.clone() else { return };
+        let Some(&(position, ref name)) = self.commands.get(&key) else { return };
+        let name = name.clone();
+        let outcome = eval::run(&file, &self.config, position);
+        self.status = Some(match outcome {
+            eval::Outcome::Ok(text) => outcome_status(&name, &text, "ok"),
+            eval::Outcome::Failed(text) => outcome_status(&name, &text, "failed"),
             eval::Outcome::TimedOut => format!("{name}: timed out"),
             eval::Outcome::Error(e) => format!("{name}: {e}"),
         });
@@ -1959,9 +2168,12 @@ impl App {
             block_select: None,
             search: None,
             last_search: None,
+            highlight_search: false,
             status: None,
             help: false,
             breadcrumb: true,
+            commands_file: None,
+            commands: HashMap::new(),
             diags: Diags::new("test"),
         }
     }
@@ -2721,7 +2933,7 @@ mod tests {
         a.eval_key();
         assert!(a.block_select.is_some());
         a.open_filter_menu();
-        assert!(a.block_select.is_none(), "the same clear_transient discipline every other mode-entry action follows");
+        assert!(a.block_select.is_none(), "the same cancel_cycle discipline every other mode-entry action follows");
     }
 
     #[test]
@@ -2812,6 +3024,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // -- `[tui] commands` --------------------------------------------
+
+    #[test]
+    fn commands_are_empty_and_unconfigured_when_tui_commands_is_unset() {
+        let dir = write_corpus(&[("a.md", "# One\n")]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, false).unwrap();
+        assert_eq!(a.commands_file, None);
+        assert!(a.commands.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_configured_commands_file_loads_its_keyed_blocks() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n"),
+            ("cmds.md", "```sh name=reindex key=g\necho hi\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, false).unwrap();
+        assert_eq!(a.commands_file.as_deref(), Some(dir.join("cmds.md").to_string_lossy().as_ref()));
+        assert_eq!(a.commands.get(&input::Key::Char('g')), Some(&(0, "reindex".to_string())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_command_colliding_with_a_built_in_key_is_refused_and_warned_about() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n"),
+            // `q` is the default quit key.
+            ("cmds.md", "```sh name=oops key=q\necho hi\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, false).unwrap();
+        assert!(a.commands.is_empty(), "the colliding binding is refused, not silently kept");
+        assert!(
+            a.diags.items().iter().any(|d| d.message.contains("oops") && d.message.contains("already a built-in key")),
+            "{:?}",
+            a.diags.items()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_commands_binding_the_same_key_keep_the_first_and_warn_about_the_second() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n"),
+            ("cmds.md", "```sh name=first key=g\necho hi\n```\n\n```sh name=second key=g\necho hi\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, false).unwrap();
+        assert_eq!(a.commands.get(&input::Key::Char('g')), Some(&(0, "first".to_string())));
+        assert!(
+            a.diags.items().iter().any(|d| d.message.contains("second") && d.message.contains("already used by another command")),
+            "{:?}",
+            a.diags.items()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_command_runs_the_bound_block_and_reports_the_outcome() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n"),
+            ("cmds.md", "```sh name=reindex key=g\necho hi\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+        assert_eq!(a.status.as_deref(), Some("reindex: hi"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_command_is_a_no_op_for_an_unbound_key() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.run_command(input::Key::Char('z'));
+        assert_eq!(a.status, None);
+    }
+
     #[test]
     fn a_standing_filter_shows_on_the_status_line() {
         let mut a = app(&[("a.md", "# One\n")]);
@@ -2873,24 +3169,65 @@ mod tests {
     }
 
     #[test]
-    fn cancel_block_select_clears_the_cycle_and_status() {
+    fn dismiss_drops_an_in_progress_cycle_and_its_status() {
         let (mut a, _path) = app_with_real_file("a.md", "# One\n\n```sh name=x\n:\n```\n");
         a.eval_key();
         assert!(a.block_select.is_some());
-        a.cancel_block_select();
+        a.dismiss();
         assert!(a.block_select.is_none());
         assert!(a.status.is_none());
     }
 
     #[test]
-    fn navigation_clears_an_in_progress_cycle() {
+    fn dismiss_clears_a_standing_status_with_no_cycle_active() {
+        // `esc` in the base tree state calls this directly. A status
+        // line left over from a finished run or a search, with no
+        // cycle to cancel, must still go away -- `esc` is the reader's
+        // "never mind" regardless of what put the status line there.
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.status = Some("index: ok".to_string());
+        a.dismiss();
+        assert!(a.status.is_none());
+    }
+
+    #[test]
+    fn dismiss_turns_off_highlighting_but_keeps_last_search_for_n_and_shift_n() {
+        // Vim's own `:nohlsearch`: `esc` clears the highlight, not the
+        // pattern, so `n`/`N` still work afterward -- they just do not
+        // repaint anything until they run and turn `highlight_search`
+        // back on themselves (`jump_to_search_match`).
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.last_search = Some("one".to_string());
+        a.highlight_search = true;
+        a.dismiss();
+        assert_eq!(a.last_search, Some("one".to_string()), "the pattern survives dismiss");
+        assert!(!a.highlight_search, "but the highlight does not");
+    }
+
+    #[test]
+    fn jump_to_search_match_turns_highlighting_back_on() {
+        let mut a = app(&[("a.md", "# One\n\n## Two\n")]);
+        searched(&mut a, "two");
+        a.dismiss();
+        assert!(!a.highlight_search);
+        a.search_next();
+        assert!(a.highlight_search, "n reactivates it, the same as vim's own n/N after :nohlsearch");
+    }
+
+    #[test]
+    fn navigation_cancels_an_in_progress_cycle_but_leaves_the_status_line() {
+        // Moving away cancels the cycle -- it belonged to the old
+        // selection. The status line it was showing is not `esc`'s
+        // job to clear, so it stays up until the reader dismisses it
+        // themselves or something else overwrites it.
         let (mut a, _path) =
             app_with_real_file("a.md", "# One\n\n## Two\n\n```sh name=x\n:\n```\n");
         a.eval_key();
         assert!(a.block_select.is_some());
-        a.clear_transient();
+        let status_before = a.status.clone();
+        a.cancel_cycle();
         assert!(a.block_select.is_none());
-        assert!(a.status.is_none());
+        assert_eq!(a.status, status_before);
     }
 
     #[test]
@@ -2901,7 +3238,7 @@ mod tests {
         assert!(a.block_select.is_some());
         a.run_selected_block();
         assert!(a.block_select.is_none(), "the cycle ends once the block has run");
-        assert_eq!(a.status.as_deref(), Some("x: ok"));
+        assert_eq!(a.status.as_deref(), Some("x: hi"));
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("dankg:result name=x"), "{written:?}");
     }
@@ -2912,7 +3249,46 @@ mod tests {
         a.config = crate::config::Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         a.eval_key();
         a.run_selected_block();
-        assert_eq!(a.status.as_deref(), Some("x: failed"));
+        assert_eq!(a.status.as_deref(), Some("x: failed"), "no output at all falls back to the bare word");
+    }
+
+    #[test]
+    fn run_selected_block_shows_only_the_first_line_of_multi_line_output() {
+        let (mut a, _path) = app_with_real_file("a.md", "```sh name=x\necho first\necho second\n```\n");
+        a.config = crate::config::Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
+        a.eval_key();
+        a.run_selected_block();
+        assert_eq!(a.status.as_deref(), Some("x: first"));
+    }
+
+    #[test]
+    fn outcome_status_falls_back_when_the_text_is_blank() {
+        assert_eq!(outcome_status("x", "", "ok"), "x: ok");
+        assert_eq!(outcome_status("x", "\n  \n", "ok"), "x: ok");
+    }
+
+    #[test]
+    fn match_ranges_finds_a_single_case_insensitive_occurrence() {
+        assert_eq!(match_ranges("Foobar", "oob"), vec![1..4]);
+    }
+
+    #[test]
+    fn match_ranges_finds_every_non_overlapping_occurrence() {
+        assert_eq!(match_ranges("abcabcabc", "abc"), vec![0..3, 3..6, 6..9]);
+    }
+
+    #[test]
+    fn match_ranges_does_not_double_count_an_overlapping_repeat() {
+        // "aaa" against "aa": a naive re-scan from `i + 1` after a hit
+        // would also find a second, overlapping match at index 1.
+        // Advancing past the whole match instead means exactly one.
+        assert_eq!(match_ranges("aaa", "aa"), vec![0..2]);
+    }
+
+    #[test]
+    fn match_ranges_is_empty_with_no_occurrence_or_an_empty_needle() {
+        assert!(match_ranges("Foobar", "xyz").is_empty());
+        assert!(match_ranges("Foobar", "").is_empty());
     }
 
     #[test]
@@ -2928,17 +3304,33 @@ mod tests {
     #[test]
     fn help_lines_reflect_remapped_keys() {
         let keys = Keymap { eval: 'x', ..Keymap::default() };
-        let lines = help_lines(&keys);
+        let lines = help_lines(&keys, &HashMap::new());
         assert!(lines.iter().any(|l| l.trim_start().starts_with("x ")), "{lines:?}");
     }
 
     #[test]
     fn help_lines_include_the_breadcrumb_key() {
-        let lines = help_lines(&Keymap::default());
+        let lines = help_lines(&Keymap::default(), &HashMap::new());
         assert!(
             lines.iter().any(|l| l.trim_start().starts_with("b ") && l.contains("breadcrumb")),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn help_lines_list_configured_commands_by_name_and_key() {
+        let mut commands = HashMap::new();
+        commands.insert(input::Key::Char('g'), (0, "reindex".to_string()));
+        commands.insert(input::Key::Ctrl('g'), (1, "go-to-graph".to_string()));
+        let lines = help_lines(&Keymap::default(), &commands);
+        assert!(lines.iter().any(|l| l.contains("reindex") && l.trim_start().starts_with("g ")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("go-to-graph") && l.trim_start().starts_with("ctrl+g")), "{lines:?}");
+    }
+
+    #[test]
+    fn help_lines_omit_the_commands_section_when_none_are_configured() {
+        let lines = help_lines(&Keymap::default(), &HashMap::new());
+        assert!(!lines.iter().any(|l| l.contains("[tui] commands")), "{lines:?}");
     }
 
     #[test]
@@ -2986,6 +3378,41 @@ mod tests {
         let out = String::from_utf8(sink).unwrap();
         assert!(out.contains("\x1b[7m"), "the focused panel row should be reverse video: {out:?}");
         assert!(out.contains("\x1b[4m"), "the tree's own remembered row should be underlined: {out:?}");
+    }
+
+    #[test]
+    fn render_highlights_only_the_matched_text_in_reverse_video() {
+        let mut a = app(&[("a.md", "# Alpha\n"), ("b.md", "# Beta\n")]);
+        a.last_search = Some("beta".to_string());
+        a.highlight_search = true;
+        let mut sink = Vec::new();
+        render(&mut a, &mut sink).unwrap();
+        let out = String::from_utf8(sink).unwrap();
+        assert!(out.contains("\x1b[7mBeta\x1b[27m"), "just \"Beta\", not the row's leading indent too: {out:?}");
+    }
+
+    #[test]
+    fn render_shows_no_match_highlight_with_no_search_standing() {
+        let mut a = app(&[("a.md", "# Alpha\n"), ("b.md", "# Beta\n")]);
+        assert!(a.last_search.is_none());
+        let mut sink = Vec::new();
+        render(&mut a, &mut sink).unwrap();
+        let out = String::from_utf8(sink).unwrap();
+        assert!(!out.contains("\x1b[7mBeta"), "{out:?}");
+    }
+
+    #[test]
+    fn render_shows_no_match_highlight_once_dismissed_even_with_last_search_still_set() {
+        // `last_search` alone is not enough -- `dismiss` clears
+        // `highlight_search`, not the pattern, and `render` must
+        // honor that rather than repainting from `last_search` alone.
+        let mut a = app(&[("a.md", "# Alpha\n"), ("b.md", "# Beta\n")]);
+        a.last_search = Some("beta".to_string());
+        a.highlight_search = false;
+        let mut sink = Vec::new();
+        render(&mut a, &mut sink).unwrap();
+        let out = String::from_utf8(sink).unwrap();
+        assert!(!out.contains("\x1b[7mBeta"), "{out:?}");
     }
 
     #[test]

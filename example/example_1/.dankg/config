@@ -22,3 +22,8 @@ path    = data/warehouse.duckdb
 # line. +{line} is nvim's (and vim's) own line-jump flag.
 [editor]
 command = nvim +{line} {file}
+
+# `dankg tui` scans commands.md for top-level blocks carrying `key=`,
+# each becoming its own keybinding. See commands.md itself.
+[tui]
+commands = commands.md
