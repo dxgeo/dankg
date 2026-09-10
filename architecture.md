@@ -3780,7 +3780,7 @@ echo "$contains Contains edges against $link Link edges"
 <!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
 
 ```
-497 Contains edges against 55 Link edges
+596 Contains edges against 56 Link edges
 ```
 
 # Open questions
