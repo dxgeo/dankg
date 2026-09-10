@@ -220,6 +220,31 @@ pub fn write_back(source: &str, anchor_line: u32, existing: Option<u32>, kind: &
     }
     out
 }
+
+/// The inverse of [`write_back`]: deletes an existing marker outright
+/// -- its own line and the blank line `write_back` always leaves
+/// after it -- rather than replacing it with another. `existing` is
+/// the marker's own line (`locate_existing`'s numbering); callers
+/// that already know there is nothing there (`locate_existing`
+/// returned `None`) have nothing to call this for. `App::
+/// clear_tag_for` is the one caller.
+pub fn remove_back(source: &str, anchor_line: u32, existing: u32) -> String {
+    let had_trailing_newline = source.ends_with('\n');
+    let mut lines: Vec<String> = source.split('\n').map(str::to_string).collect();
+    if had_trailing_newline {
+        lines.pop(); // drop the phantom empty element `split` leaves after a trailing `\n`
+    }
+
+    let end = (anchor_line - 1) as usize; // 0-indexed: right before the node's own (1-indexed) line
+    let start = (existing - 1) as usize;
+    lines.splice(start..end, std::iter::empty());
+
+    let mut out = lines.join("\n");
+    if had_trailing_newline {
+        out.push('\n');
+    }
+    out
+}
 ```
 
 ## Guarding against a wide or colored icon
@@ -374,6 +399,27 @@ mod tests {
     fn write_back_does_not_disturb_content_that_follows() {
         let got = write_back("# One\n\n## Two\n\n- kept\n", 3, None, "task", "#two");
         assert!(got.ends_with("## Two\n\n- kept\n"));
+    }
+
+    #[test]
+    fn remove_back_deletes_the_marker_and_its_trailing_blank_line() {
+        let src = "# One\n\n<!-- dankg:tag kind=task target=#two -->\n\n## Two\n\n# Next\n";
+        let got = remove_back(src, 5, 3);
+        assert_eq!(got, "# One\n\n## Two\n\n# Next\n");
+    }
+
+    #[test]
+    fn remove_back_preserves_a_missing_trailing_newline() {
+        let src = "# One\n\n<!-- dankg:tag kind=task target=#two -->\n\n## Two";
+        let got = remove_back(src, 5, 3);
+        assert!(!got.ends_with('\n'), "{got:?}");
+    }
+
+    #[test]
+    fn remove_back_does_not_disturb_content_that_follows() {
+        let src = "# One\n\n<!-- dankg:tag kind=task target=#two -->\n\n## Two\n\n- kept\n";
+        let got = remove_back(src, 5, 3);
+        assert!(got.ends_with("## Two\n\n- kept\n"), "{got:?}");
     }
 
     #[test]

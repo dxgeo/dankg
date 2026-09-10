@@ -232,30 +232,46 @@ pub fn clip_with_ellipsis(text: &str, cols: usize) -> String {
 /// The column [`tree_line`] starts `title` at, for a row at `depth`:
 /// two columns of indent per level, plus the marker's own two columns
 /// -- `▾ `/`▸ `/`  ` are all exactly two characters wide, whichever one
-/// a row gets. Exposed so a caller marking up something *inside* the
-/// title text, rather than the row as a whole, can find where it
-/// actually starts without re-deriving `tree_line`'s own layout by
-/// hand -- `app::render`'s search-match highlight (*Jump and default
-/// depth*, `architecture.md`) is the one caller today.
+/// a row gets -- plus the tag column's own two columns, reserved the
+/// same way whether or not this particular row carries a tag (§7,
+/// `tag::icon_may_break_alignment`'s own one-column assumption).
+/// Exposed so a caller marking up something *inside* the title text,
+/// rather than the row as a whole, can find where it actually starts
+/// without re-deriving `tree_line`'s own layout by hand --
+/// `app::render`'s search-match highlight (*Jump and default depth*,
+/// `architecture.md`) is the one caller today.
 pub fn tree_line_title_col(depth: u32) -> usize {
-    2 * depth as usize + 2
+    2 * depth as usize + 4
 }
 
 /// One tree row's plain text: two spaces of indent per `depth`, then a
-/// `▾`/`▸` marker for `Some(expanded)`, or two blank columns for `None`
-/// (a childless leaf -- no marker at all, but titles still line up in a
-/// column with everything else), then `title`, then `badge` after two
-/// spaces when it is not empty. Clipped to `cols`.
-pub fn tree_line(depth: u32, marker: Option<bool>, title: &str, badge: &str, cols: usize) -> String {
+/// `▾`/`▸` marker for `Some(expanded)`, or two blank columns for
+/// `None` (a childless leaf -- no marker at all, but titles still
+/// line up in a column with everything else), then `tag` (a node's
+/// own classified-kind icon) followed by one space, or two blank
+/// columns when `tag` is empty -- reserved the same way as the
+/// marker's own slot, so a tagged and an untagged row's titles still
+/// start in the same column -- then `title`. `badge` goes last,
+/// right-justified against `cols` with at least one space of gap
+/// rather than trailing `title` directly, so a reader scanning the
+/// pane's right edge sees every row's link/dependency glyphs lined up
+/// regardless of how long each row's own title is. When `title` (plus
+/// the reserved columns ahead of it) already leaves less than a
+/// single space of room, the gap collapses to exactly one space and
+/// `clip_with_ellipsis` truncates whatever does not fit, the same
+/// fallback an overlong title with no badge at all already gets.
+pub fn tree_line(depth: u32, marker: Option<bool>, tag: &str, title: &str, badge: &str, cols: usize) -> String {
     let indent = "  ".repeat(depth as usize);
     let mark = match marker {
         Some(true) => "▾ ",
         Some(false) => "▸ ",
         None => "  ",
     };
-    let mut line = format!("{indent}{mark}{title}");
+    let tag_col = if tag.is_empty() { "  ".to_string() } else { format!("{tag} ") };
+    let mut line = format!("{indent}{mark}{tag_col}{title}");
     if !badge.is_empty() {
-        line.push_str("  ");
+        let gap = cols.saturating_sub(line.chars().count() + badge.chars().count()).max(1);
+        line.push_str(&" ".repeat(gap));
         line.push_str(badge);
     }
     clip_with_ellipsis(&line, cols)
@@ -503,14 +519,14 @@ mod tests {
 
     #[test]
     fn tree_line_indents_by_depth_and_shows_the_expand_marker() {
-        assert_eq!(tree_line(0, Some(true), "One", "", 40), "▾ One");
-        assert_eq!(tree_line(1, Some(false), "Two", "", 40), "  ▸ Two");
+        assert_eq!(tree_line(0, Some(true), "", "One", "", 40), "▾   One");
+        assert_eq!(tree_line(1, Some(false), "", "Two", "", 40), "  ▸   Two");
     }
 
     #[test]
     fn tree_line_title_col_matches_where_tree_line_actually_starts_the_title() {
         for depth in 0..3 {
-            let line = tree_line(depth, Some(true), "X", "", 40);
+            let line = tree_line(depth, Some(true), "", "X", "", 40);
             assert_eq!(
                 line.chars().nth(tree_line_title_col(depth)),
                 Some('X'),
@@ -521,22 +537,51 @@ mod tests {
 
     #[test]
     fn tree_line_uses_blank_columns_for_a_childless_leaf() {
-        assert_eq!(tree_line(0, None, "Leaf", "", 40), "  Leaf");
+        assert_eq!(tree_line(0, None, "", "Leaf", "", 40), "    Leaf");
     }
 
     #[test]
-    fn tree_line_appends_the_badge() {
-        assert_eq!(tree_line(0, None, "One", "→1 ←2", 40), "  One  →1 ←2");
+    fn tree_line_shows_the_tag_icon_ahead_of_the_title() {
+        assert_eq!(tree_line(0, None, "☐", "One", "", 40), "  ☐ One");
+    }
+
+    #[test]
+    fn tree_line_title_col_still_holds_when_a_row_carries_no_tag() {
+        // The tag column is reserved either way (§7) -- a tagged and an
+        // untagged row's own titles land in the same column.
+        let tagged = tree_line(1, None, "☐", "X", "", 40);
+        let untagged = tree_line(1, None, "", "X", "", 40);
+        let col = tree_line_title_col(1);
+        assert_eq!((tagged.chars().nth(col), untagged.chars().nth(col)), (Some('X'), Some('X')));
+    }
+
+    #[test]
+    fn tree_line_right_justifies_the_badge_against_cols() {
+        let line = tree_line(0, None, "", "One", "→1 ←2", 40);
+        assert_eq!(line.chars().count(), 40);
+        assert!(line.starts_with("    One"), "{line:?}");
+        assert!(line.ends_with("→1 ←2"), "{line:?}");
     }
 
     #[test]
     fn tree_line_omits_the_badge_separator_when_there_is_no_badge() {
-        assert_eq!(tree_line(0, None, "One", "", 40), "  One");
+        assert_eq!(tree_line(0, None, "", "One", "", 40), "    One");
+    }
+
+    #[test]
+    fn tree_line_falls_back_to_a_single_space_gap_when_the_badge_would_not_fit() {
+        // The title alone already fills most of `cols`; the
+        // right-justified badge collapses to a one-space gap and
+        // `clip_with_ellipsis` truncates the rest, the same fallback an
+        // overlong title with no badge at all already gets.
+        let line = tree_line(0, None, "", "A title that almost fills the row", "→1 ←2", 40);
+        assert_eq!(line.chars().count(), 40);
+        assert!(line.ends_with('…'), "{line:?}");
     }
 
     #[test]
     fn tree_line_clips_an_overlong_title() {
-        let line = tree_line(0, None, "A very long title indeed", "", 10);
+        let line = tree_line(0, None, "", "A very long title indeed", "", 10);
         assert_eq!(line.chars().count(), 10);
         assert!(line.ends_with('…'), "{line:?}");
     }

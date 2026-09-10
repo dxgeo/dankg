@@ -989,9 +989,12 @@ name, just an iconless one.
 (`tag::markers_in`), resolves each one back to the `NodeId` at that
 file and line, and resolves its own icon by looking `kind` up in
 `config.kind()` -- purely additive metadata, kept entirely apart from
-`graph::model::NodeKind`, which stays exactly as it is. `badge_for`
-appends a node's own resolved icon, if any, to its badge -- the one
-new read point this needed; `panel_rows` did not turn out to need one.
+`graph::model::NodeKind`, which stays exactly as it is. `push_row`
+reads a node's own resolved icon, if any, straight into `TreeRow::tag`
+\-- the one new read point this needed; `panel_rows` did not turn out
+to need one. `badge_for` never touches it: a tag names what a node
+*is*, drawn ahead of the title (below), not folded into the badge of
+what it links to.
 
 Centralizing the vocabulary is what makes it checkable: `dankg check`
 gained a sixth pass, over every `dankg:tag` marker in the corpus,
@@ -1153,6 +1156,30 @@ from a real one in the tree. `badge_for` gained a leading `∅` for
 the same `Node.resolved` flag `dankg check`'s own unresolved-link
 count already reads, just surfaced in the tree instead of only at the
 CLI.
+
+### Clearing a tag
+
+`write_tag_for` only ever wrote a marker -- applying a fresh `kind=`
+onto a node already got a replace-in-place for free (*Revised once
+more: the icon moves to config* above), but there was no way to
+remove one outright, short of a hand edit to the file.
+`tag::remove_back` is `write_back`'s own inverse: given a marker's
+own line (`locate_existing`), it splices out both that line and the
+blank line `write_back` always leaves after it, the same range math
+`write_back` already does for a replace, just with nothing put back
+in its place. `App::clear_tag_for` mirrors `write_tag_for` exactly,
+down to the same `Relation`/unresolved refusal -- there was already
+a good reason to trust that guard, so it earns no rewrite here.
+
+The one real decision was where clearing lives in the UI. It joins
+`c` to `n` inside the existing `Pick` stage of `keys.tag`'s own
+overlay (`clear_selected_tag`), rather than a new top-level
+keybinding of its own: the overlay is already open on the selected
+node by the time a reader would reach for it, the same way `n`
+already extends `Pick` rather than living outside it. Pressing `c`
+on a node with nothing to clear is a harmless no-op, reported as
+such ("nothing to clear") rather than silently indistinguishable
+from having actually cleared something.
 
 ### Discoverability outside the TUI
 
@@ -1411,6 +1438,34 @@ no awareness of the terminal, so `render` clips each help line to
 what actually fits first -- some are long enough on their own to have
 pushed an unclipped box's right border off screen entirely.
 
+### Tag icon left of the title, badge right-justified
+
+Two follow-up layout changes, once real tags made both problems
+visible at once. First: a node's own classified icon had briefly
+lived inside `badge`, appended after every dependency and link glyph
+\-- but a tag names what a node *is*, not what it links to, so
+`push_row` now reads it into a separate `TreeRow::tag` field, and
+`draw::tree_line` draws it as its own fixed-width column just ahead of
+`title`, the same two-column reservation the `▾`/`▸` marker already
+gets. An untagged row still leaves that column blank rather than
+shifting `title` left, so `tree_line_title_col` (now `2 * depth + 4`,
+one more reserved pair of columns than before) stays a pure function
+of `depth`, and the search-match highlighter (below) needed no change
+of its own.
+
+Second: the badge itself moves to the row's right edge. It used to
+trail `title` after two fixed spaces, so a long title pushed its own
+badge further right than a short one's -- fine for one row, useless
+for scanning a column of them. `tree_line` now right-justifies badge
+against the row's own `cols` instead, so every row's `⇒N`/`⇐N`/`→N`/
+`←N` glyphs line up on the pane's right edge no matter how long each
+row's own title runs. A title long enough to leave no real room for
+the badge falls back to a single-space gap, then lets
+`clip_with_ellipsis` truncate whatever does not fit -- the same
+fallback an overlong title with no badge at all already had, just
+applied one column later rather than a new truncation rule of its
+own.
+
 ## Jump and default depth
 
 `dankg tui` selects its initial expansion from its own default depth
@@ -1464,12 +1519,14 @@ match rather than one character at a time so `"aaa"` against needle
 throughout, never bytes, so a range lines up directly with the drawn
 grid's own columns (`pane_grid` builds one `Vec<char>` cell per
 character) with no byte-to-column translation to get wrong. A range
-still has to be placed *inside* a row that also carries indent and a
-`▾`/`▸` marker ahead of the title -- `draw::tree_line_title_col`
-exposes exactly the column `tree_line` itself starts the title at
-(`2 * depth + 2`, indent plus the marker's own two columns) precisely
-so this arithmetic lives in one place, not reimplemented wherever
-something needs to point inside a title rather than at a whole row.
+still has to be placed *inside* a row that also carries indent, a
+`▾`/`▸` marker, and a tag column ahead of the title --
+`draw::tree_line_title_col` exposes exactly the column `tree_line`
+itself starts the title at (`2 * depth + 4`: indent, the marker's own
+two columns, and the tag column's own two, *Tag icon left of the
+title, badge right-justified* above) precisely so this arithmetic
+lives in one place, not reimplemented wherever something needs to
+point inside a title rather than at a whole row.
 
 The first attempt marked whole rows in bold rather than the matched
 text. Both parts of that turned out wrong. Bold was dropped as the

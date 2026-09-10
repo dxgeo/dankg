@@ -71,8 +71,11 @@ struct BlockSelect {
 }
 
 /// State for `keys.tag`'s own overlay: pick an already-declared
-/// `[kind.*]` for the selected node, or press `n` to declare a new
-/// one. `Pick` is a picker, the same shape `Filter`'s own menu already
+/// `[kind.*]` for the selected node, press `n` to declare a new one,
+/// or `c` to clear the node's own tag outright (`clear_selected_tag`,
+/// not a `TagMenu` variant of its own -- it never needs a second
+/// stage the way declaring a new kind does). `Pick` is a picker, the
+/// same shape `Filter`'s own menu already
 /// is; `NewName`/`NewIcon` are a tiny two-step text prompt, the same
 /// shape `search` already is -- one type covers both because the
 /// picker and the prompt are really one flow, not two features
@@ -151,6 +154,10 @@ struct TreeRow {
     /// non-containment edges (`query::links_for`) and dependency facts
     /// (`self.deps`, `badge_for`); empty when it touches none.
     badge: String,
+    /// This node's own classified-kind icon (`compute_tags`), if any.
+    /// Drawn ahead of `title` (`draw::tree_line`), not folded into
+    /// `badge` -- a tag names what a node *is*, not what it links to.
+    tag: String,
 }
 
 /// One right-pane row. `Outgoing`/`Backlink`/`DepOut`/`DepIn` are
@@ -338,8 +345,8 @@ struct App {
     /// lines at all (eval-custom-plan.md).
     commands: HashMap<input::Key, (usize, String, bool)>,
     /// Every node's own `tag:`-line classification, set by a
-    /// `protocol=lines` command and read by `badge_for` and
-    /// `matches_filter`'s `Filter::Tag` arm. Unlike `deps`, this is not
+    /// `protocol=lines` command and read by `push_row` (`TreeRow::tag`)
+    /// and `matches_filter`'s `Filter::Tag` arm. Unlike `deps`, this is not
     /// recomputed by `reload()` -- it is the reader's own standing
     /// classification data, the same "not tree-shape state a reload
     /// could invalidate" reasoning `filter`/`filter_history` already
@@ -465,12 +472,13 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
 
         // Fully modal, the same way the others above are -- but not one
         // shape throughout: `Pick` is a picker (up/down/enter, plus `n`
-        // to switch into naming), `NewName`/`NewIcon` are free text
-        // (every character is input, so no navigation shortcut can
-        // steal one). Dispatched separately rather than folded into one
-        // `match` so a tag literally named "junk" is still typeable --
-        // `j`/`k`/`n` are only shortcuts while there is a list to move
-        // a cursor through, never while there is text to type.
+        // to switch into naming and `c` to clear outright), `NewName`/
+        // `NewIcon` are free text (every character is input, so no
+        // navigation shortcut can steal one). Dispatched separately
+        // rather than folded into one `match` so a tag literally named
+        // "junk" is still typeable -- `j`/`k`/`n`/`c` are only
+        // shortcuts while there is a list to move a cursor through,
+        // never while there is text to type.
         if app.tag_menu.is_some() {
             if matches!(app.tag_menu, Some(TagMenu::Pick { .. })) {
                 match key {
@@ -481,6 +489,7 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
                     input::Key::Char(c) if c == app.keys.up => app.move_tag_menu_cursor(-1),
                     input::Key::Char(c) if c == app.keys.down => app.move_tag_menu_cursor(1),
                     input::Key::Char('n') => app.start_new_tag(),
+                    input::Key::Char('c') => app.clear_selected_tag(),
                     _ => {}
                 }
             } else {
@@ -705,7 +714,10 @@ fn help_lines(keys: &Keymap, commands: &HashMap<input::Key, (usize, String, bool
         format!("  {}                  collapse back to the entry view", keys.reset),
         format!("  {}                  quit", keys.quit),
         format!("  {}                  toggle the origin breadcrumb (status line, panel focus only)", keys.breadcrumb),
-        format!("  {}                  tag the selected node; n in that menu declares a new one", keys.tag),
+        format!(
+            "  {}                  tag the selected node; n declares a new kind, c clears the tag",
+            keys.tag
+        ),
     ];
     if !commands.is_empty() {
         // Sorted by name, not by key or table order: a `HashMap`'s own
@@ -757,7 +769,7 @@ fn filter_menu_box(cursor: &Filter, options: &[Filter]) -> draw::Drawing {
 fn tag_menu_box(tag_menu: &TagMenu, kinds: &[Kind]) -> draw::Drawing {
     match tag_menu {
         TagMenu::Pick { cursor } => {
-            let mut lines = vec!["Tag (n: new)".to_string()];
+            let mut lines = vec!["Tag (n: new, c: clear)".to_string()];
             if kinds.is_empty() {
                 lines.push("  (none configured -- press n)".to_string());
             } else {
@@ -915,7 +927,7 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         None => app.visible_rows(),
     };
     let tree_lines: Vec<String> =
-        tree_rows.iter().map(|r| draw::tree_line(r.depth, r.marker, &r.title, &r.badge, tree_cols)).collect();
+        tree_rows.iter().map(|r| draw::tree_line(r.depth, r.marker, &r.tag, &r.title, &r.badge, tree_cols)).collect();
     let tree_highlight = preview.as_ref().unwrap_or(&app.selected);
     let tree_current_row = tree_rows.iter().position(|r| &r.id == tree_highlight);
 
@@ -1142,23 +1154,17 @@ fn compute_tags(root: &Path, corpus_paths: &[String], index: &Graph, config: &Co
     out
 }
 
-/// "∅ ⇒1 ⇐1 ✗1 ↻1 ▤ →2 ←1 ⚭ ☐": whether the node itself is unresolved
+/// "∅ ⇒1 ⇐1 ✗1 ↻1 ▤ →2 ←1 ⚭": whether the node itself is unresolved
 /// (a dangling link's own placeholder, never real content), then
 /// resolved `deps=`/`xdeps=` out and in, broken and not-yet-run
 /// entries, a declared file artifact, then the existing outgoing/
 /// backlink/relation-touch summary, unchanged (dependency-
-/// surfacing.md §B-§E), then this node's own classified `kind`'s
-/// icon, if any -- the one glyph here that is not built in, since its
-/// value comes from `[kind.*]` config, not a fixed table. Zero-valued
-/// pieces are omitted, never printed as `⇒0`. The four dep-glyphs are
-/// a first cut, not a settled choice (§7).
-fn badge_for(
-    id: &NodeId,
-    resolved: bool,
-    links: &query::NodeLinks,
-    deps: &DepData,
-    annotations: &HashMap<NodeId, Annotation>,
-) -> String {
+/// surfacing.md §B-§E). A node's own classified `kind` icon is not
+/// part of this badge -- `push_row` reads it separately, straight off
+/// `TreeRow::tag`. Zero-valued pieces are omitted, never printed as
+/// `⇒0`. The four dep-glyphs are a first cut, not a settled choice
+/// (§7).
+fn badge_for(id: &NodeId, resolved: bool, links: &query::NodeLinks, deps: &DepData) -> String {
     let mut parts = Vec::new();
     if !resolved {
         // Leading, not trailing -- an unresolved node is a placeholder
@@ -1195,9 +1201,6 @@ fn badge_for(
     }
     if !links.produces.is_empty() || !links.reads.is_empty() {
         parts.push("⚭".to_string());
-    }
-    if let Some(icon) = annotations.get(id).and_then(|a| a.icon.as_deref()) {
-        parts.push(icon.to_string());
     }
     parts.join(" ")
 }
@@ -1289,9 +1292,10 @@ impl App {
         let kids = self.children.get(id);
         let has_children = kids.is_some_and(|k| !k.is_empty());
         let is_expanded = has_children && expanded.contains(id);
-        let badge = badge_for(id, node.resolved, &query::links_for(&self.index, id), &self.deps, &self.annotations);
+        let badge = badge_for(id, node.resolved, &query::links_for(&self.index, id), &self.deps);
+        let tag = self.annotations.get(id).and_then(|a| a.icon.clone()).unwrap_or_default();
         let title = format!("{}{}", kind_marker(node.kind), node.title);
-        out.push(TreeRow { id: id.clone(), title, depth, marker: has_children.then_some(is_expanded), badge });
+        out.push(TreeRow { id: id.clone(), title, depth, marker: has_children.then_some(is_expanded), badge, tag });
         if is_expanded {
             for kid in kids.unwrap() {
                 self.push_row(kid, depth + 1, expanded, filter, out);
@@ -2441,6 +2445,29 @@ impl App {
         std::fs::write(&path, updated).is_ok()
     }
 
+    /// The inverse of `write_tag_for`: deletes `id`'s own marker
+    /// outright rather than replacing it. `false` for the same
+    /// `Relation`/unresolved cases `write_tag_for` already refuses, a
+    /// read/write failure, or -- the one case with nothing to write at
+    /// all -- a node that was never tagged in the first place.
+    /// `clear_selected_tag` is the one caller.
+    fn clear_tag_for(&mut self, id: &NodeId) -> bool {
+        let Some(node) = self.index.node(id) else { return false };
+        if node.kind == NodeKind::Relation || !node.resolved {
+            return false;
+        }
+        let path = self.root.join(&node.file);
+        let Ok(source) = std::fs::read_to_string(&path) else { return false };
+        let mut diags = Diags::new(&node.file);
+        let doc = Document::parse(&source, &mut diags);
+        let Some(existing_line) = tag::locate_existing(&doc, node.line).map(|(line, _, _)| line) else {
+            return false;
+        };
+
+        let updated = tag::remove_back(&source, node.line, existing_line);
+        std::fs::write(&path, updated).is_ok()
+    }
+
     /// `keys.tag`'s own overlay: opens on the selected node, its
     /// cursor on `Config::kinds()`'s first entry. Refuses outright for
     /// a `Relation` node (nowhere for a marker to attach -- decision:
@@ -2566,6 +2593,22 @@ impl App {
         } else {
             "could not write the tag marker".to_string()
         }
+    }
+
+    /// `c`, while picking: clears the selected node's own tag outright
+    /// and closes the menu, the same way `enter` does. Distinct status
+    /// text either way -- pressing `c` on a node with no tag to begin
+    /// with is a harmless no-op, not silently indistinguishable from
+    /// actually clearing one.
+    fn clear_selected_tag(&mut self) {
+        self.tag_menu = None;
+        let id = self.selected.clone();
+        self.status = Some(if self.clear_tag_for(&id) {
+            self.reload();
+            "tag cleared".to_string()
+        } else {
+            "nothing to clear".to_string()
+        });
     }
 
     /// Declares a new `[kind.<name>]` section by appending to
@@ -4162,12 +4205,61 @@ mod tests {
     }
 
     #[test]
-    fn a_tag_lines_icon_shows_up_in_the_nodes_own_badge() {
+    fn clearing_via_the_menu_removes_the_marker_and_the_annotation() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n[kind.task]\n"),
+            ("a.md", "# One\n\n## Two\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.selected = NodeId::new("a", "two");
+        a.open_tag_menu();
+        a.confirm_tag_menu(); // applies "task"
+
+        a.selected = NodeId::new("a", "two");
+        a.open_tag_menu();
+        a.clear_selected_tag();
+
+        assert_eq!(a.tag_menu, None);
+        assert_eq!(a.status.as_deref(), Some("tag cleared"));
+        assert_eq!(a.annotations.get(&NodeId::new("a", "two")), None);
+        let on_disk = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        assert_eq!(on_disk, "# One\n\n## Two\n", "the marker is gone outright, not just blanked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_an_already_untagged_node_is_a_harmless_no_op() {
+        let dir = write_corpus(&[(".dankg/config", "[lang.sh]\ncommand = sh {file}\n"), ("a.md", "# One\n\n## Two\n")]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.selected = NodeId::new("a", "two");
+        let before = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        a.open_tag_menu();
+        a.clear_selected_tag();
+
+        assert_eq!(a.tag_menu, None);
+        assert_eq!(a.status.as_deref(), Some("nothing to clear"));
+        let after = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        assert_eq!(before, after);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_tag_for_an_unresolved_node_writes_nothing_and_does_not_panic() {
+        let mut a = app(&[("a.md", "# One\n\n[gone](nope.md)\n")]);
+        let unresolved = a.index.nodes.iter().find(|n| !n.resolved).unwrap().id.clone();
+        assert!(!a.clear_tag_for(&unresolved));
+    }
+
+    #[test]
+    fn a_tag_lines_icon_shows_up_in_the_nodes_own_tag_column_not_the_badge() {
         let mut a = app(&[("a.md", "# One\n\n## Two\n")]);
         let id = NodeId::new("a", "two");
         a.annotations.insert(id.clone(), Annotation { kind: Some("task".to_string()), icon: Some("☐".to_string()) });
         let row = a.visible_rows().into_iter().find(|r| r.id == id).unwrap();
-        assert!(row.badge.contains('☐'), "{:?}", row.badge);
+        assert_eq!(row.tag, "☐");
+        assert!(!row.badge.contains('☐'), "{:?}", row.badge);
     }
 
     #[test]
