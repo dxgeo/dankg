@@ -24,7 +24,8 @@ ext = rs
 glue = python3 glue/rust.py {dir}
 
 # Used by `dankg tui`: enter on a selected node spawns this at its source
-# line. Unconfigured, enter falls back to $EDITOR/$VISUAL, and does
-# nothing if neither is set either -- a documented gap, not a crash.
+# line. Unconfigured, enter falls back to $EDITOR/$VISUAL, and reports
+# so on the status line if neither is set either -- a documented gap,
+# not a silent one.
 [editor]
 command = nvim +{line} {file}

@@ -587,11 +587,10 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
                     let file = app.root.join(&node.file).to_string_lossy().into_owned();
                     let line = node.line;
                     raw.take(); // restore the terminal for the editor
-                    // Best-effort: a spawn failure has nowhere to report to
-                    // yet in this path (there is one now for eval, but not
-                    // for this), so it is swallowed rather than crashing
-                    // the session.
-                    let _ = editor::open(&app.config, &file, line);
+                    let result = editor::open(&app.config, &file, line);
+                    if let Some(status) = editor_status(&result) {
+                        app.status = Some(status);
+                    }
                     *raw = Some(term::RawMode::enter()?);
                     app.reload();
                 }
@@ -1106,6 +1105,29 @@ fn kind_marker(kind: NodeKind) -> &'static str {
         NodeKind::Block => "» ",
         NodeKind::Heading => "",
         NodeKind::Relation => "",
+    }
+}
+
+/// What `enter`'s editor handoff should leave on the status line,
+/// given what `editor::open` actually returned. `None` means leave
+/// `self.status` exactly as it was: the editor ran, and whatever the
+/// status line showed before is not necessarily stale just because
+/// the reader came back. `Ok(None)` (neither `[editor] command` nor
+/// `$EDITOR`/`$VISUAL` resolved to anything -- `editor::open`'s own
+/// documented gap) and `Err` (a resolved command that failed to spawn
+/// at all) both used to be swallowed here outright; both now alert,
+/// the same "there is somewhere to report to now" reasoning
+/// `run_command` already applies to a configured command's own
+/// failure. Pure and separately testable from the event loop itself,
+/// the same "thin wrapper, tested decision function" split
+/// `editor::open`/`resolve` already follow.
+fn editor_status(result: &std::io::Result<Option<std::process::ExitStatus>>) -> Option<String> {
+    match result {
+        Ok(Some(_)) => None,
+        Ok(None) => {
+            Some("no editor configured -- set [editor] command in .dankg/config, or $EDITOR/$VISUAL".to_string())
+        }
+        Err(e) => Some(format!("could not open editor: {e}")),
     }
 }
 
@@ -2234,11 +2256,10 @@ selected
 node's own named blocks (exactly `node.line..=node.end_line`, the
 extent `graph::build` already computes for it) and starts cycling. A
 later press just advances, wrapping. A node with no named blocks in
-its section is a silent no-op, the same "nowhere to report to"
-reasoning `enter`'s editor spawn already follows for its own
-best-effort failures. `enter`
-while cycling needs no separate confirmation, the same way `enter` needs
-none before it spawns the configured editor on a plain selected node --
+its section is a silent no-op: there is genuinely nothing to cycle
+to, not a failure worth a status line for. `enter` while cycling
+needs no separate confirmation, the same way `enter` needs none
+before it spawns the configured editor on a plain selected node --
 cycling to a block and pressing `enter` to run it already *is* the
 confirmation.
 
@@ -2249,9 +2270,8 @@ impl App {
     /// extent `graph/build.rs` already computes for it) and starts cycling
     /// on the first one. A second and later press, already cycling, instead
     /// advances to the next block, wrapping. A node with no named blocks in
-    /// its section is a silent no-op: there is nothing to cycle to, the
-    /// same "nowhere to report to" reasoning `enter`'s editor spawn already
-    /// follows for its own best-effort failures.
+    /// its section is a silent no-op: there is genuinely nothing to cycle
+    /// to, not a failure worth a status line for.
     fn eval_key(&mut self) {
         if let Some(sel) = &mut self.block_select {
             sel.cursor = (sel.cursor + 1) % sel.blocks.len();
@@ -2734,6 +2754,28 @@ mod tests {
 
     fn ids(rows: &[TreeRow]) -> Vec<String> {
         rows.iter().map(|r| r.id.to_string()).collect()
+    }
+
+    #[test]
+    fn editor_status_leaves_the_status_line_alone_when_the_editor_ran() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(0);
+        assert_eq!(editor_status(&Ok(Some(status))), None);
+    }
+
+    #[test]
+    fn editor_status_names_what_to_configure_when_nothing_resolved() {
+        let got = editor_status(&Ok(None)).unwrap();
+        assert!(got.contains("[editor] command"), "{got:?}");
+        assert!(got.contains("$EDITOR"), "{got:?}");
+    }
+
+    #[test]
+    fn editor_status_reports_a_spawn_failure_rather_than_swallowing_it() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file or directory");
+        let got = editor_status(&Err(err)).unwrap();
+        assert!(got.contains("could not open editor"), "{got:?}");
+        assert!(got.contains("no such file or directory"), "{got:?}");
     }
 
     #[test]

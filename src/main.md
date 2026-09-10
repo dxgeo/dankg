@@ -20,6 +20,7 @@ use dankg::eval::{plan, result, session};
 use dankg::graph::build;
 use dankg::graph::index::{self, Corpus};
 use dankg::graph::{query, resolve, view, EdgeKind, Graph, NodeId};
+use dankg::init;
 use dankg::layout;
 use dankg::md::{fmt, Document};
 use dankg::render::{dot, html, json, mermaid};
@@ -82,6 +83,7 @@ fn main() -> ExitCode {
         Command::Tangle { paths, lang, output, cache } => {
             report(tangle_cmd(&paths, &lang, output.as_deref(), cache))
         }
+        Command::Init { path } => report(init_report(&path)),
     }
 }
 ```
@@ -102,6 +104,26 @@ fn tangle_cmd(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -
     }
     if report.ran_command {
         eprintln!("ran `[tangle.{lang}] command`");
+    }
+    Ok(())
+}
+
+/// `dankg init`: `init::run` does the actual writing and refusing;
+/// this only turns its `Report` into the same "here is what happened"
+/// summary every other command's own report function already gives.
+fn init_report(path: &str) -> Result<(), String> {
+    let report = init::run(path)?;
+    eprintln!("created {}", report.dankg_dir.display());
+    eprintln!("created {}", report.config.display());
+    if report.wrote_ignore {
+        eprintln!("created {}", report.ignore.display());
+    } else {
+        eprintln!("{} already exists, left untouched", report.ignore.display());
+    }
+    if report.wrote_index {
+        eprintln!("created {}", report.index.display());
+    } else {
+        eprintln!("{} already exists, left untouched", report.index.display());
     }
     Ok(())
 }

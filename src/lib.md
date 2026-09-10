@@ -28,6 +28,7 @@ pub mod diag;
 pub mod eval;
 pub mod graph;
 pub mod hash;
+pub mod init;
 pub mod layout;
 pub mod md;
 pub mod render;

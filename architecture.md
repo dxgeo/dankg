@@ -778,12 +778,36 @@ prompt either. Cycling to a block and pressing `enter` to run it already
 *is* the confirmation, the same reasoning decision 9's `dankg eval` prompt
 does not apply to `enter`'s editor handoff.
 
-A node with no named blocks in its section is a silent no-op on `e`. There is
-nowhere to cycle to, the same "nowhere to report to" call `enter`'s
-best-effort editor-spawn failure already makes. Navigating away (any
+A node with no named blocks in its section is a silent no-op on `e`.
+There is genuinely nowhere to cycle to, not a failure worth a status
+line for -- unlike `enter`'s own editor handoff, which alerts on the
+status line when there is truly no editor to open (below). Navigating
+away (any
 direction key, `tab`, `r`) cancels an in-progress cycle. It was scoped to
 whichever node was selected when it started, and moving off that node makes
 it stale. `esc` cancels it explicitly, without moving anything.
+
+### Alerting when there is no editor to open
+
+`enter`'s editor handoff used to swallow both of `editor::open`'s own
+failure cases outright: nothing configured and no `$EDITOR`/`$VISUAL`
+either (`Ok(None)`), or a resolved command that failed to spawn at all
+(`Err`). The excuse at the time was that this path had "nowhere to
+report to" -- written before `app.status` existed as a channel every
+other command-driven action already reports through (`run_command`'s
+own `Outcome::Failed`/`Error` arms, `tag_result`, `clear_selected_tag`).
+Once that channel existed, the excuse stopped being true. A reader
+pressing `enter` on a fresh corpus with no `[editor] command` and no
+`$EDITOR` set saw nothing happen at all -- indistinguishable from the
+key not being bound.
+
+Both cases now set `self.status`. `Ok(None)` names what to configure
+(`[editor] command` or `$EDITOR`/`$VISUAL`). `Err` reports the spawn
+error itself, the same way `run_command` already surfaces a
+configured command's own failure. `Ok(Some(_))`, the editor actually
+ran, leaves the status line untouched rather than clearing it --
+whatever it showed before the reader left is not necessarily stale
+just because they came back.
 
 ### The status line
 
@@ -3698,6 +3722,46 @@ in the act again.
     reaches a `glue` command through an optional sidecar manifest
     (decision 28) rather than DanKG's own code ever branching on it.
     See *Tangle*.
+
+## `dankg init`
+
+Every other command reads a corpus that already exists. `init` is
+the first one whose entire job is writing something new: a `.dankg/`
+directory with a commented starter `config`, a `.dankgignore`, and an
+`index.md`. All three land at `<path>` (default `.`), which `init`
+creates first if it is not there yet. It turns the README's own
+*Quick start* -- several separate steps by hand -- into one command.
+See `init.md` for the templates themselves and the full reasoning;
+this section records the two decisions that would otherwise need
+re-deriving from the code.
+
+**Refusal never walks upward.** `graph::index::discover_root` does:
+it looks for a `.dankg/` directory starting at `<path>` and walking up
+through every parent. It falls back to the paths' own common ancestor
+only when it finds none. This repo already nests one corpus inside
+another that way: `example/example_1` declares its own root well
+inside DanKG's own, with nothing declared at the `example/` level
+between them. `init` deliberately does not reuse that upward walk for
+its own refusal check. It only ever asks whether `<path>/.dankg/`
+already exists *at that exact path*. A `.dankg/` somewhere above
+`<path>` is not refused against -- running `init` inside an existing
+corpus on purpose is exactly how a nested one like `example_1` gets
+made, not a mistake to guard against.
+
+**The scaffold explains itself but declares nothing real.**
+`Config::load` already treats a missing `.dankg/config` as
+`Config::none()`, no warning. An *empty* one would do the exact same
+job as no file at all. The one thing that actually changes behavior
+is the `.dankg/` directory's own existence, not anything written
+inside it. The generated `config` and `.dankgignore` are comments
+only: a short explanation of the mechanism, plus a couple of
+commented-out example sections a reader can uncomment. Real
+`[lang.*]`/`[tui]` content is never guessed, since `init` has no way
+to know what language a fresh corpus's own blocks will even be
+written in. `index.md` is the one exception. It needs *a* real
+top-level heading to be worth opening at all, so it reuses the
+README's own *Quick start* heading verbatim (`# Index`) instead of
+inventing a second convention for the same thing.
 
 # Self-hosted corpus stats
 

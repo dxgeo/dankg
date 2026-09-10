@@ -62,6 +62,9 @@ A `.dankg/` directory marks the root of a knowledge base. Create one with
 the root from the paths you name. Everything under the root belongs to
 the corpus. Nothing outside it does.
 
+`dankg init notes` does the `mkdir`/`.dankg/`/`index.md` steps above
+for you -- see [`init`](#init-scaffold-a-new-corpus) below.
+
 ## Commands
 
 ```
@@ -349,6 +352,22 @@ Then it runs any configured `[tangle.<lang>] glue` and `command` against
 the result.
 
 <!-- dankg:depends target=architecture.md#decision-24-tangle-placement quote="Heading containment + document order; `deps` not consulted." -->
+
+### `init` — scaffold a new corpus
+
+```sh
+dankg init notes/   # creates notes/ if needed, plus .dankg/config,
+                     # .dankgignore, and index.md inside it
+```
+
+`init` refuses outright, writing nothing, if `notes/.dankg/` already
+exists. A `.dankg/` somewhere *above* the target is not a reason to
+refuse -- running `init` inside an existing corpus on purpose creates
+a nested one. `index.md` and `.dankgignore` are only ever written
+when not already there; nothing else already in the directory is
+touched.
+
+<!-- dankg:depends target=architecture.md#dankg-init quote="not a mistake to guard against" -->
 
 ## Configuration
 

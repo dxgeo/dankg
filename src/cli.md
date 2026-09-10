@@ -76,6 +76,12 @@ pub enum Command {
     /// walks the corpus (decision 26), the same file-or-directory choice
     /// `--list` already offers.
     Tangle { paths: Vec<String>, lang: String, output: Option<String>, cache: bool },
+    /// `dankg init [<path>]`: scaffolds a brand-new corpus at `path`
+    /// (default `.`), creating it first if it does not exist. Exactly
+    /// one path, never a corpus-wide walk -- unlike every
+    /// `paths: Vec<String>` variant above, `init` never reads an
+    /// existing corpus, only ever writes into one place.
+    Init { path: String },
     Help,
     Version,
 }
@@ -99,6 +105,7 @@ usage:
   dankg eval  [<path>...] --list [--no-cache]
   dankg check [<path>...] [--no-cache]
   dankg tangle <path>... --lang <lang> [-o <dir>] [--no-cache]
+  dankg init  [<path>]
   dankg --help
   dankg --version
 
@@ -219,6 +226,17 @@ for a language with no separate compile step. Never automatic, the same as
 `eval`, but with no confirm prompt: tangle does not run the reader's
 program, only assembles and optionally builds it.
 
+`init` scaffolds a brand-new corpus at `<path>` (default `.`),
+creating the directory itself first if it does not exist: a `.dankg/`
+directory with a commented starter `config`, a `.dankgignore`, and an
+`index.md`. It refuses outright, writing nothing, when `<path>`
+already has its own `.dankg/`. A `.dankg/` somewhere *above* `<path>`
+is not this command's concern, though -- running `init` inside an
+existing corpus on purpose makes a nested one, the same way
+`example/example_1` nests inside DanKG's own repository. `index.md`
+and `.dankgignore` are only ever written when not already there;
+existing content elsewhere in `<path>` is never touched.
+
 Diagnostics go to stderr, so stdout stays pipeable.
 ";
 ```
@@ -246,12 +264,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         "eval" => return eval(args),
         "check" => return check(args),
         "tangle" => return tangle(args),
+        "init" => return init(args),
         other if other.starts_with('-') => {
             return Err(format!("unknown option `{other}`"));
         }
         other => {
             return Err(format!(
-                "unknown command `{other}` (expected `graph`, `index`, `fmt`, `tui`, `eval`, `check`, or `tangle`)"
+                "unknown command `{other}` (expected `graph`, `index`, `fmt`, `tui`, `eval`, `check`, `tangle`, or `init`)"
             ));
         }
     }
@@ -528,6 +547,29 @@ fn check<I: Iterator<Item = String>>(args: I) -> Result<Command, String> {
         paths.push(".".to_string());
     }
     Ok(Command::Check { paths, cache })
+}
+
+/// `init` takes an optional single path, defaulting to `.` -- the
+/// same "the common case is right here" reasoning `index`/`check`
+/// already give. Unlike either, at most one: `init` never walks a
+/// corpus, only ever writes into the one place named.
+fn init<I: Iterator<Item = String>>(args: I) -> Result<Command, String> {
+    let mut path: Option<String> = None;
+
+    for arg in args {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown option `{other}`"));
+            }
+            _ if path.is_some() => {
+                return Err(format!("`init` takes at most one path (already have `{}`)", path.unwrap()));
+            }
+            other => path = Some(other.to_string()),
+        }
+    }
+
+    Ok(Command::Init { path: path.unwrap_or_else(|| ".".to_string()) })
 }
 ```
 
