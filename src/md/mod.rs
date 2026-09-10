@@ -166,7 +166,7 @@ pub struct InfoString {
 
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
 pub const KNOWN_ATTRS: &[&str] =
-    &["db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key"];
+    &["db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key", "protocol"];
 
 impl InfoString {
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -238,6 +238,18 @@ impl InfoString {
     /// whatever was written, the same way `db()`/`path()` do.
     pub fn key(&self) -> Option<&str> {
         self.get("key")
+    }
+
+    /// Whether this block's stdout is `[tui] commands`' own line
+    /// protocol (`select:`/`status:`/`tag:`, eval-custom-plan.md) rather
+    /// than free text. `protocol=lines` is the only recognized value;
+    /// anything else is silently `false`, the same "ignore, don't
+    /// reject" stance `timeout()`'s own `.ok()` already takes on a value
+    /// it cannot use. Opt-in on purpose: without it, a block's own
+    /// ordinary output that happens to start a line with `status: ` or
+    /// `select: ` would be misread as a control line instead of shown.
+    pub fn protocol_lines(&self) -> bool {
+        self.get("protocol") == Some("lines")
     }
 }
 
@@ -352,6 +364,26 @@ mod tests {
 
         let info = InfoString { lang: Some("sh".into()), ..Default::default() };
         assert_eq!(info.key(), None);
+    }
+
+    #[test]
+    fn protocol_lines_is_true_only_for_the_recognized_value() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("protocol".into(), "lines".into())],
+            ..Default::default()
+        };
+        assert!(info.protocol_lines());
+
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("protocol".into(), "other".into())],
+            ..Default::default()
+        };
+        assert!(!info.protocol_lines(), "an unrecognized value is ignored, not rejected");
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert!(!info.protocol_lines());
     }
 
     #[test]

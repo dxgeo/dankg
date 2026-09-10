@@ -103,12 +103,17 @@ Keys:
 - `tab` — toggle focus between the tree and the cross-reference panel (previews the hovered link before you commit to it)
 - `enter` — open the selected node in your configured `[editor] command` (or jump to a focused panel link)
 - `/` — jump to a node by title, anywhere in the corpus; `n`/`N` repeat it forward/backward
-- `f` — open the filter menu (all, blocks, eval-chain, file-artifact); `enter` applies it, `esc` cancels
+- `f` — open the filter menu (all, blocks, eval-chain, file-artifact, plus any `kind=` a `dankg:tag` marker has actually set anywhere in the corpus); `enter` applies it, `esc` cancels
+- `t` — tag the selected node: pick from every declared `[kind.*]`, or press `n` to declare a new one (name, then an optional icon); re-tagging overwrites. Refused for a node marked `∅` (see below) or a relation — neither has a real place to attach a marker
 - `e` then `enter` — cycle and run a node's named code blocks in place
 - `r` — reset
 - `b` — toggle the origin breadcrumb (status line, while the panel has focus)
 - `q` — quit
 - `?` — full keybinding reference, including any `[tui] commands` below; both this and the filter menu draw as a small box over the tree, not a full-screen replacement
+
+A node marked `∅` is a dangling link's own placeholder, not real
+content — the same thing `dankg check` counts as unresolved. `t`
+refuses to tag one: there's no real line to attach a marker to.
 
 Give a block `key=` and name its file in `[tui] commands` (see
 Configuration below) to bind a key directly to it, skipping the
@@ -129,6 +134,58 @@ too. `key=` accepts a single character, `ctrl+<char>`, or one of
 that collides with a built-in key, or with another command in the
 same file, is refused with a warning rather than silently shadowing
 one.
+
+Add `protocol=lines` to a `key=` block to give it a richer output
+protocol instead of plain text on the status line:
+
+````markdown
+```sh name=classify key=g protocol=lines
+echo "select: notes/index.md#some-heading"
+echo "status: jumped and tagged"
+echo "tag: notes/index.md#some-heading kind=task"
+```
+````
+
+`select: file#heading` moves the tree cursor there, and `status: message` replaces the status line. `tag: file#heading kind=value`
+writes that node's own classification into its file, as a
+`<!-- dankg:tag -->` comment right above it — a real edit, not
+something only this session remembers, so it's still there the next
+time you open `dankg tui`, or open the file itself. All three are
+opt-in: a `key=` block without `protocol=lines` always shows its raw
+output verbatim, exactly as before, so nothing a command already
+prints by coincidence (a tool's own `status: ...` line, say) is ever
+misread as one of these.
+
+Give `kind=task` an icon, and every node tagged that way shows it —
+once, in config, not on every `tag:` line:
+
+```
+[kind.task]
+icon = ☐
+```
+
+`kind=` becomes a selectable entry in the `f` filter menu once
+something is actually tagged with it. A `kind=` with no matching
+`[kind.*]` section still classifies the node — it just has no icon to
+show — but `dankg check` reports it and fails, the same severity as a
+dangling link: there's no reading under which a name nothing declares
+is fine. `dankg check` also warns, advisory only, about a configured
+icon likely to render wider than one terminal column or in color —
+the same bug this project's own TUI badges have already hit once by
+hand (see `architecture.md`'s *Eval in the TUI* for the story).
+
+The marker itself also records which node it's for
+(`target=#some-heading`), not just its position. Insert a new heading
+between the marker and the node it was meant for — an ordinary edit —
+and pure position would silently reattach it to the wrong one.
+`dankg check` catches that too: a `target=` that no longer points
+back at the node the marker actually sits on fails the build, the
+same way an unknown `kind=` does.
+
+None of this needs a command at all: `t` (see *Keys* above) does the
+same thing directly — pick a declared kind, or declare a new one on
+the spot, name and optional icon, without writing a single line of
+`[tui] commands`.
 
 ### `eval` — run and record literate code blocks
 
@@ -254,6 +311,17 @@ sections (see architecture.md, *Title collisions*).
 <!-- dankg:depends target=architecture.md#title-collisions quote="That slug is order-dependent, though." -->
 <!-- dankg:depends target=architecture.md#title-collisions quote="A collision with a reference prints as a live risk." -->
 <!-- dankg:depends target=architecture.md#title-collisions quote="A sibling pair looks identical to a reader scanning the one section they are both under." -->
+
+`check` also gates on every `<!-- dankg:tag kind=value target=... -->`
+marker (see *`tui`* above): a `kind=` naming no configured `[kind.*]`
+section fails the build, the same severity as `produces=`/`reads=`
+above — there's no fuzzy reading under which a name nothing declares
+is fine. So does a `target=` that no longer resolves back to the node
+the marker actually sits on — the same drift a heading inserted
+between a marker and its intended node would otherwise cause
+silently. Separately, and only advisory, it warns about a configured
+`[kind.*]` icon likely to render wider than one terminal column or in
+color.
 
 ### `fmt` — normalize markdown
 

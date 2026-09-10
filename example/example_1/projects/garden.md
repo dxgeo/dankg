@@ -8,6 +8,8 @@ A second, smaller project note, mostly here to demonstrate that a link
 edge goes both ways. It reciprocates the index's mention of this heading:
 [index](../index.md#about-this-graph).
 
+<!-- dankg:tag kind=done target=#todo -->
+
 ## Todo
 
 - \[ \] write more notes

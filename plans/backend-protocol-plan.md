@@ -67,6 +67,7 @@ the bar for someone else to write the client side.
 
 **Requests** — read/query operations mirroring capability DanKG's CLI
 already has, not new functionality:
+
 - `node`: `NodeId -> Node`
 - `links`: `NodeId -> NodeLinks` (outgoing / backlinks / produces / reads)
 - `view`: entry files + depth -> induced subgraph, mirroring `dankg graph`'s

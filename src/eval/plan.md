@@ -112,6 +112,12 @@ pub struct BlockRef<'a> {
     /// keyed_commands` is the one reader, the same way `path` is read
     /// only by `tangle` and otherwise carried along for free.
     pub key: Option<&'a str>,
+    /// `protocol=lines` (`[tui] commands`' own `select:`/`status:`/
+    /// `tag:` convention, eval-custom-plan.md): whether this block's
+    /// stdout is that wire format rather than free text. Ignored by
+    /// planning and evaluation entirely, the same way `key` is --
+    /// `tui::eval::keyed_commands` is the one reader.
+    pub protocol_lines: bool,
 }
 ```
 
@@ -243,6 +249,7 @@ fn block_ref<'a>(
         reads: info.reads(),
         db: info.db(),
         key: info.key(),
+        protocol_lines: info.protocol_lines(),
     })
 }
 ```
@@ -908,6 +915,14 @@ mod tests {
         let blocks = top_level_blocks(&d, FILE);
         assert_eq!(blocks[0].key, Some("g"));
         assert_eq!(blocks[1].key, None);
+    }
+
+    #[test]
+    fn top_level_blocks_carries_protocol_lines() {
+        let d = doc("```sh name=a key=g protocol=lines\n:\n```\n\n```sh name=b key=h\n:\n```\n");
+        let blocks = top_level_blocks(&d, FILE);
+        assert!(blocks[0].protocol_lines);
+        assert!(!blocks[1].protocol_lines);
     }
 
     #[test]

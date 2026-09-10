@@ -35,7 +35,7 @@ const KNOWN: &[(&str, &[&str])] = &[
     ("graph", &["depth"]),
     ("tui", &["depth", "breadcrumb", "commands"]),
     ("editor", &["command"]),
-    ("keys", &["up", "down", "left", "right", "quit", "reset", "eval", "breadcrumb"]),
+    ("keys", &["up", "down", "left", "right", "quit", "reset", "eval", "breadcrumb", "tag"]),
 ];
 
 /// Section families, named `<prefix><name>`. `db.`'s `list` (decision 37)
@@ -53,6 +53,7 @@ const FAMILIES: &[(&str, &[&str])] = &[
     ("lang.", &["command", "ext"]),
     ("db.", &["command", "path", "list"]),
     ("tangle.", &["command", "ext", "glue"]),
+    ("kind.", &["icon"]),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,16 +89,20 @@ pub struct Keymap {
     /// Toggles the origin breadcrumb (`[tui] breadcrumb`'s own runtime
     /// counterpart) on the status line while the panel has focus.
     pub breadcrumb: char,
+    /// Opens the tag-picker overlay (`App::open_tag_menu`) for the
+    /// selected node: a list of every declared `[kind.*]`, plus `n` to
+    /// declare a new one.
+    pub tag: char,
 }
 
 impl Default for Keymap {
     fn default() -> Keymap {
-        Keymap { up: 'k', down: 'j', left: 'h', right: 'l', quit: 'q', reset: 'r', eval: 'e', breadcrumb: 'b' }
+        Keymap { up: 'k', down: 'j', left: 'h', right: 'l', quit: 'q', reset: 'r', eval: 'e', breadcrumb: 'b', tag: 't' }
     }
 }
 
 impl Keymap {
-    fn fields(&self) -> [(&'static str, char); 8] {
+    fn fields(&self) -> [(&'static str, char); 9] {
         [
             ("up", self.up),
             ("down", self.down),
@@ -107,6 +112,7 @@ impl Keymap {
             ("reset", self.reset),
             ("eval", self.eval),
             ("breadcrumb", self.breadcrumb),
+            ("tag", self.tag),
         ]
     }
 }
@@ -132,6 +138,22 @@ pub struct Db {
     pub command: String,
     pub path: Option<String>,
     pub list: Option<String>,
+}
+
+/// One `[kind.*]` section: a name a `tag:` line's own `kind=` may
+/// declare, and the icon that classification shows in the tree
+/// (`tui::app::badge_for`). `icon` is optional -- a `[kind.task]`
+/// section with nothing in it still declares the name "task" as a
+/// real, checkable vocabulary word, just with nothing to draw for it
+/// yet. Centralizing icons here, rather than on the `tag:` line
+/// itself (the first cut's own shape), is what lets a reader tag a
+/// node with just `kind=task` and never repeat the icon -- and what
+/// gives `dankg check` something fixed to check a `kind=` value
+/// against at all (eval-custom-plan.md's own design decision).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Kind {
+    pub name: String,
+    pub icon: Option<String>,
 }
 
 /// One `[tangle.*]` section (decision 25). `command` is optional. Take a
@@ -368,6 +390,27 @@ impl Config {
         self.dbs().into_iter().find(|d| d.name == name)
     }
 
+    /// Every configured `[kind.*]` section, in config order -- the
+    /// declared vocabulary `dankg check` validates a `tag:`'s own
+    /// `kind=` against, and `tui::app::compute_tags` reads an icon out
+    /// of. Unlike `langs()`/`dbs()`, a missing `command` never excludes
+    /// a section here: `icon` is the only thing a `[kind.*]` section
+    /// can even declare, so a section with none is still a real,
+    /// checkable name, just an iconless one.
+    pub fn kinds(&self) -> Vec<Kind> {
+        self.sections
+            .iter()
+            .filter_map(|s| {
+                let name = s.name.strip_prefix("kind.")?;
+                Some(Kind { name: name.to_string(), icon: s.get("icon").map(str::to_string) })
+            })
+            .collect()
+    }
+
+    pub fn kind(&self, name: &str) -> Option<Kind> {
+        self.kinds().into_iter().find(|k| k.name == name)
+    }
+
     /// `[tangle.<name>]`, if configured. Unlike `[lang.*]`, its absence
     /// does not refuse anything by itself. `tangle` still needs a section
     /// to know `--lang`'s fence tag is real. A section with no `command`
@@ -405,7 +448,7 @@ impl Config {
         let where_ = || self.source.clone().unwrap_or_else(|| DIR.to_string());
 
         let mut map = default;
-        let mut slots: [(&str, &mut char); 8] = [
+        let mut slots: [(&str, &mut char); 9] = [
             ("up", &mut map.up),
             ("down", &mut map.down),
             ("left", &mut map.left),
@@ -414,6 +457,7 @@ impl Config {
             ("reset", &mut map.reset),
             ("eval", &mut map.eval),
             ("breadcrumb", &mut map.breadcrumb),
+            ("tag", &mut map.tag),
         ];
         for (name, slot) in &mut slots {
             let Some(raw) = section.get(name) else { continue };
@@ -637,6 +681,28 @@ mod tests {
         let (c, d) = parse("[db.a]\ncommand = x\n\n[db.b]\ncommand = y\n");
         assert!(d.is_empty(), "{:?}", d.items());
         assert_eq!(c.dbs().iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn kind_returns_the_named_section() {
+        let (c, d) = parse("[kind.task]\nicon = X\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.kind("task"), Some(Kind { name: "task".into(), icon: Some("X".into()) }));
+        assert_eq!(c.kind("nope"), None);
+    }
+
+    #[test]
+    fn a_kind_section_with_no_icon_is_still_a_real_declared_name() {
+        let (c, d) = parse("[kind.task]\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.kind("task"), Some(Kind { name: "task".into(), icon: None }));
+    }
+
+    #[test]
+    fn kinds_lists_every_section_in_config_order() {
+        let (c, d) = parse("[kind.a]\nicon = 1\n\n[kind.b]\nicon = 2\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.kinds().iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
     }
 
     #[test]

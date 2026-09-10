@@ -15,5 +15,6 @@ pub mod hash;
 pub mod layout;
 pub mod md;
 pub mod render;
+pub mod tag;
 pub mod tangle;
 pub mod tui;

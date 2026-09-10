@@ -27,3 +27,11 @@ command = nvim +{line} {file}
 # each becoming its own keybinding. See commands.md itself.
 [tui]
 commands = commands.md
+
+# The icon a `tag: ... kind=task` line's classification shows, once,
+# instead of on every `tag:` line that ever sets it. See commands.md.
+[kind.task]
+icon = ☐
+
+[kind.done]
+icon = ☒

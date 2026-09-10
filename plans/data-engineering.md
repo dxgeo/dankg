@@ -16,7 +16,7 @@ then `run.rs` concatenates those sources in order ahead of the target,
 writes one temporary file, and spawns the configured command once,
 every time.
 
-<!-- dankg:depends target=architecture.md#decision-11-execution-model quote="Deps prepended into one process." -->
+<!-- dankg:depends target=../architecture.md#decision-11-execution-model quote="Deps prepended into one process." -->
 
 Dependency side effects re-run on every eval. There is no persistent
 state between separate `dankg eval` invocations, and no notion of
@@ -46,13 +46,13 @@ inheriting the gap, because its own hash-tagged results already tell a
 human when a block's *source* changed and the existence-check's
 assumption ("nothing upstream moved") is no longer safe to trust.
 
-<!-- dankg:depends target=architecture.md#decision-12-results quote="Written back into the markdown, hash-tagged." -->
+<!-- dankg:depends target=../architecture.md#decision-12-results quote="Written back into the markdown, hash-tagged." -->
 
 **Incremental logic inside the SQL, dbt's whole model.** A `sql` block
 spawns DuckDB as a configured external command, so nothing stops its
 own text from reading
 
-<!-- dankg:depends target=architecture.md#decision-16-database-engine quote="DuckDB, spawned as a configured command." -->
+<!-- dankg:depends target=../architecture.md#decision-16-database-engine quote="DuckDB, spawned as a configured command." -->
 
 `INSERT INTO agg SELECT ... WHERE ds > (SELECT max(ds) FROM agg)`
 instead of a full rebuild. `dankg` still re-runs the whole chain's
@@ -69,7 +69,7 @@ declare the shared artifact path both sides believe in; nothing stops
 `PATH` from naming a partitioned directory, and nothing about `dankg`
 understands partitions one way or the other.
 
-<!-- dankg:depends target=architecture.md#file-dependencies quote="declare the artifact both sides believe they share" -->
+<!-- dankg:depends target=../architecture.md#file-dependencies quote="declare the artifact both sides believe they share" -->
 
 The incrementality lives entirely in the storage layout and the
 reading tool's own pruning, orthogonal to anything `dankg` tracks.
@@ -84,7 +84,7 @@ contract. That is real staleness detection, not a guess, and it is
 already exposed: one line per stale block, in a fixed, greppable
 shape.
 
-<!-- dankg:depends target=src/main.md#check_cmd quote="stale: {rel_path} `{}`" -->
+<!-- dankg:depends target=../src/main.md#check_cmd quote="stale: {rel_path} `{}`" -->
 
 A wrapper -- a Makefile, a `just` recipe, a shell loop -- can run
 `dankg check .`, collect the `stale:` lines it prints, one per stale
@@ -115,7 +115,7 @@ puts it inside the tool. `dankg eval` is deliberately never automatic
 \-- it prints a plan and asks before running anything specifically so
 a human is the one deciding what executes.
 
-<!-- dankg:depends target=architecture.md#decision-9-eval-trigger quote="`dankg eval` only; serve mode deferred." -->
+<!-- dankg:depends target=../architecture.md#decision-9-eval-trigger quote="`dankg eval` only; serve mode deferred." -->
 
 A silent, automatic "decided not to run this" is a materially
 different trust surface than a wrong plan a reader can see and
@@ -179,7 +179,7 @@ script -- a Makefile, a `just` recipe, plain shell -- runs
 No topological logic is needed in the wrapper, for a reason worth
 being precise about: a block's own recorded hash already
 
-<!-- dankg:depends target=architecture.md#results quote="covers the concatenated source of the target's whole chain" -->
+<!-- dankg:depends target=../architecture.md#results quote="covers the concatenated source of the target's whole chain" -->
 
 covers its entire chain, not just its own text. If `map` does not show
 up in the stale list, that already means nothing anywhere in its
@@ -200,7 +200,7 @@ inside `check_cmd`, the four staleness/failure branches that today
 just call `eprintln!` collected into a `Vec` of structured entries
 instead, serialized as JSON when the flag is set.
 
-<!-- dankg:depends target=architecture.md#decision-13-cli-shape quote="JSON is a first-class, testable surface from day one." -->
+<!-- dankg:depends target=../architecture.md#decision-13-cli-shape quote="JSON is a first-class, testable surface from day one." -->
 
 The bigger cost is everything around that one change: a new
 output-format abstraction for a command that has never needed one,

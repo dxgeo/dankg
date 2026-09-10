@@ -20,10 +20,13 @@
 //! it -- so there is exactly one implementation of it.
 
 use super::{draw, editor, eval, input, term};
-use crate::config::{Config, Keymap};
+use crate::config::{Config, Keymap, Kind};
+use crate::depends;
 use crate::diag::Diags;
 use crate::eval::{files::Files, plan, result};
 use crate::graph::{index, query, resolve, view, Graph, NodeId, NodeKind};
+use crate::md::Document;
+use crate::tag;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -44,6 +47,33 @@ struct BlockSelect {
     cursor: usize,
 }
 
+/// State for `keys.tag`'s own overlay: pick an already-declared
+/// `[kind.*]` for the selected node, or press `n` to declare a new
+/// one. `Pick` is a picker, the same shape `Filter`'s own menu already
+/// is; `NewName`/`NewIcon` are a tiny two-step text prompt, the same
+/// shape `search` already is -- one type covers both because the
+/// picker and the prompt are really one flow, not two features
+/// glued together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TagMenu {
+    /// `cursor` indexes into `Config::kinds()`, read fresh each time
+    /// rather than snapshotted, since nothing stops another read of
+    /// config from changing between opening the menu and confirming
+    /// it -- there is no meaningful state to keep in sync here beyond
+    /// the cursor position itself.
+    Pick { cursor: usize },
+    /// Typing a new kind's own name. Confirming with a name that
+    /// already matches a declared `[kind.*]` skips straight to using
+    /// that one -- `n` for an existing name is just a slower way to
+    /// pick it, not an error.
+    NewName { input: String },
+    /// `name` already confirmed; now typing its optional icon.
+    /// Confirming with nothing at all declares the kind with no icon,
+    /// exactly as valid as one with an icon -- `Kind.icon` is already
+    /// `Option` for precisely this.
+    NewIcon { name: String, input: String },
+}
+
 /// Which pane owns the direction keys, enter, and esc right now. `tab`
 /// toggles it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,46 +86,30 @@ enum Focus {
 /// (dependency-surfacing.md, §3). `All` prunes nothing. Every other
 /// variant hides a non-matching row while keeping its ancestors
 /// visible, the same "hide, not dim" mental model `/`-search's own
-/// ancestor-reveal already trained. `Hash` is for `App::filter_history`,
-/// keyed by variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// ancestor-reveal already trained. `Tag` is the one variant not fixed
+/// at compile time (eval-custom-plan.md's node-classification design):
+/// it names a `kind=` some `tag:` line has actually set this session,
+/// so `Filter` can no longer be `Copy` -- `App::filter_options` is
+/// where its full, current option list actually lives now, not a
+/// constant here. `Hash` is still for `App::filter_history`, keyed by
+/// variant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Filter {
     All,
     Blocks,
     EvalChain,
     FileArtifact,
+    Tag(String),
 }
 
 impl Filter {
-    /// The four variants, in menu order -- `next`/`prev` (below) both
-    /// wrap through this same list, so the menu's own up/down never
-    /// needs a second copy of the ordering.
-    const ALL: [Filter; 4] = [Filter::All, Filter::Blocks, Filter::EvalChain, Filter::FileArtifact];
-
-    fn next(self) -> Filter {
+    fn label(&self) -> String {
         match self {
-            Filter::All => Filter::Blocks,
-            Filter::Blocks => Filter::EvalChain,
-            Filter::EvalChain => Filter::FileArtifact,
-            Filter::FileArtifact => Filter::All,
-        }
-    }
-
-    fn prev(self) -> Filter {
-        match self {
-            Filter::All => Filter::FileArtifact,
-            Filter::Blocks => Filter::All,
-            Filter::EvalChain => Filter::Blocks,
-            Filter::FileArtifact => Filter::EvalChain,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Filter::All => "all",
-            Filter::Blocks => "blocks",
-            Filter::EvalChain => "eval-chain",
-            Filter::FileArtifact => "file-artifact",
+            Filter::All => "all".to_string(),
+            Filter::Blocks => "blocks".to_string(),
+            Filter::EvalChain => "eval-chain".to_string(),
+            Filter::FileArtifact => "file-artifact".to_string(),
+            Filter::Tag(kind) => format!("tag:{kind}"),
         }
     }
 }
@@ -219,6 +233,11 @@ struct App {
     /// disagrees with what `filter_history` remembers; a reader who
     /// has not moved gets that remembered position back instead.
     moved_since_filter_change: bool,
+    /// `Some` while `keys.tag`'s own overlay is open, operating on
+    /// whatever `selected` was when it opened -- fully modal, like
+    /// `filter_menu`/`search`, so `selected` cannot change out from
+    /// under it while it's up.
+    tag_menu: Option<TagMenu>,
     selected: NodeId,
     /// Which pane owns the direction keys/enter/esc right now.
     focus: Focus,
@@ -291,8 +310,19 @@ struct App {
     /// `[tui] commands`'s own keybinding table (`load_commands`): every
     /// `key=` block in `commands_file` that parsed and did not collide
     /// with a built-in or an earlier command, keyed by the `Key` that
-    /// runs it.
-    commands: HashMap<input::Key, (usize, String)>,
+    /// runs it. The `bool` is the block's own `protocol=lines`: whether
+    /// `run_command` scans its output for `select:`/`status:`/`tag:`
+    /// lines at all (eval-custom-plan.md).
+    commands: HashMap<input::Key, (usize, String, bool)>,
+    /// Every node's own `tag:`-line classification, set by a
+    /// `protocol=lines` command and read by `badge_for` and
+    /// `matches_filter`'s `Filter::Tag` arm. Unlike `deps`, this is not
+    /// recomputed by `reload()` -- it is the reader's own standing
+    /// classification data, the same "not tree-shape state a reload
+    /// could invalidate" reasoning `filter`/`filter_history` already
+    /// follow, so it only ever grows or changes by a command's own
+    /// explicit `tag:` line.
+    annotations: HashMap<NodeId, Annotation>,
     diags: Diags,
 }
 
@@ -381,6 +411,39 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
             continue;
         }
 
+        // Fully modal, the same way the others above are -- but not one
+        // shape throughout: `Pick` is a picker (up/down/enter, plus `n`
+        // to switch into naming), `NewName`/`NewIcon` are free text
+        // (every character is input, so no navigation shortcut can
+        // steal one). Dispatched separately rather than folded into one
+        // `match` so a tag literally named "junk" is still typeable --
+        // `j`/`k`/`n` are only shortcuts while there is a list to move
+        // a cursor through, never while there is text to type.
+        if app.tag_menu.is_some() {
+            if matches!(app.tag_menu, Some(TagMenu::Pick { .. })) {
+                match key {
+                    input::Key::Enter => app.confirm_tag_menu(),
+                    input::Key::Esc => app.cancel_tag_menu(),
+                    input::Key::Up => app.move_tag_menu_cursor(-1),
+                    input::Key::Down => app.move_tag_menu_cursor(1),
+                    input::Key::Char(c) if c == app.keys.up => app.move_tag_menu_cursor(-1),
+                    input::Key::Char(c) if c == app.keys.down => app.move_tag_menu_cursor(1),
+                    input::Key::Char('n') => app.start_new_tag(),
+                    _ => {}
+                }
+            } else {
+                match key {
+                    input::Key::Enter => app.confirm_tag_menu(),
+                    input::Key::Esc => app.cancel_tag_menu(),
+                    input::Key::Backspace => app.tag_menu_backspace(),
+                    input::Key::Char(c) => app.tag_menu_push(c),
+                    _ => {}
+                }
+            }
+            render(app, out)?;
+            continue;
+        }
+
         // Panel-focused: up/down move its own cursor, enter jumps, left
         // or esc return focus to the tree without acting. keys.breadcrumb
         // still works here too -- this is exactly the state it exists for.
@@ -407,6 +470,7 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
             input::Key::Char('?') => app.toggle_help(),
             input::Key::Char('/') => app.start_search(),
             input::Key::Char('f') => app.open_filter_menu(),
+            input::Key::Char(c) if c == app.keys.tag => app.open_tag_menu(),
             input::Key::Char('n') => {
                 app.cancel_cycle();
                 app.search_next();
@@ -557,7 +621,7 @@ fn match_ranges(title: &str, needle: &str) -> Vec<std::ops::Range<usize>> {
 /// command's key here is what makes it safe to add one without also
 /// having to remember it separately, and what warns a reader off
 /// reusing a key some other command (or a built-in) already claimed.
-fn help_lines(keys: &Keymap, commands: &HashMap<input::Key, (usize, String)>) -> Vec<String> {
+fn help_lines(keys: &Keymap, commands: &HashMap<input::Key, (usize, String, bool)>) -> Vec<String> {
     let mut lines = vec![
         "DanKG -- keybindings".to_string(),
         String::new(),
@@ -578,6 +642,7 @@ fn help_lines(keys: &Keymap, commands: &HashMap<input::Key, (usize, String)>) ->
         format!("  {}                  collapse back to the entry view", keys.reset),
         format!("  {}                  quit", keys.quit),
         format!("  {}                  toggle the origin breadcrumb (status line, panel focus only)", keys.breadcrumb),
+        format!("  {}                  tag the selected node; n in that menu declares a new one", keys.tag),
     ];
     if !commands.is_empty() {
         // Sorted by name, not by key or table order: a `HashMap`'s own
@@ -585,7 +650,7 @@ fn help_lines(keys: &Keymap, commands: &HashMap<input::Key, (usize, String)>) ->
         // command they wrote wants it alphabetical, not wherever the
         // hash happened to land it.
         let mut entries: Vec<(&input::Key, &str)> =
-            commands.iter().map(|(key, (_, name))| (key, name.as_str())).collect();
+            commands.iter().map(|(key, (_, name, _))| (key, name.as_str())).collect();
         entries.sort_by_key(|(_, name)| *name);
         lines.push(String::new());
         lines.push("  -- [tui] commands --".to_string());
@@ -604,17 +669,50 @@ fn help_lines(keys: &Keymap, commands: &HashMap<input::Key, (usize, String)>) ->
 /// marked `RowStyle::Current` so its highlight survives
 /// `draw::overlay`'s own paste onto the real frame (`draw::overlay`'s
 /// own doc comment). Row 0 of the box is its top border, row 1 is the
-/// title, and the four options start at row 2 in `Filter::ALL`'s own
-/// order -- the same order the menu's up/down cursor (`Filter::next`/
-/// `prev`) already walks.
-fn filter_menu_box(cursor: Filter) -> draw::Drawing {
+/// title, and `options` start at row 2, in `App::filter_options`'s own
+/// order -- the same order the menu's up/down cursor
+/// (`move_filter_menu_cursor`) already walks. `options` is a snapshot,
+/// not a live reference to `App`: the box is built once per frame,
+/// same as everything else `render` draws.
+fn filter_menu_box(cursor: &Filter, options: &[Filter]) -> draw::Drawing {
     let mut lines = vec!["Filter".to_string()];
-    lines.extend(Filter::ALL.iter().map(|f| format!("  {}", f.label())));
+    lines.extend(options.iter().map(|f| format!("  {}", f.label())));
     let mut menu = draw::box_grid(&lines);
-    let cursor_index = Filter::ALL.iter().position(|&f| f == cursor).unwrap_or(0);
+    let cursor_index = options.iter().position(|f| f == cursor).unwrap_or(0);
     let width = menu.grid.first().map_or(0, Vec::len);
     draw::mark_row(&mut menu, 2 + cursor_index, 0, width, draw::RowStyle::Current);
     menu
+}
+
+/// `keys.tag`'s own overlay content -- three different shapes for
+/// `TagMenu`'s own three stages. `Pick` is drawn exactly like
+/// `filter_menu_box` above (a title, one row per option, the cursor's
+/// row marked `RowStyle::Current`), just over `kinds` instead of
+/// `Filter`'s own options. `NewName`/`NewIcon` are a single typed
+/// line each, the same "show the buffer as-is, no fake cursor glyph"
+/// convention `render`'s own status-line search prompt already uses.
+fn tag_menu_box(tag_menu: &TagMenu, kinds: &[Kind]) -> draw::Drawing {
+    match tag_menu {
+        TagMenu::Pick { cursor } => {
+            let mut lines = vec!["Tag (n: new)".to_string()];
+            if kinds.is_empty() {
+                lines.push("  (none configured -- press n)".to_string());
+            } else {
+                lines.extend(kinds.iter().map(|k| format!("  {}", k.name)));
+            }
+            let mut menu = draw::box_grid(&lines);
+            if !kinds.is_empty() {
+                let width = menu.grid.first().map_or(0, Vec::len);
+                let row = (*cursor).min(kinds.len() - 1);
+                draw::mark_row(&mut menu, 2 + row, 0, width, draw::RowStyle::Current);
+            }
+            menu
+        }
+        TagMenu::NewName { input } => draw::box_grid(&["New tag".to_string(), format!("  name: {input}")]),
+        TagMenu::NewIcon { name, input } => {
+            draw::box_grid(&[format!("New tag: {name}"), format!("  icon (optional): {input}")])
+        }
+    }
 }
 
 /// Writes `lines`, taking at most `term_rows` of them, with no trailing
@@ -759,9 +857,10 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         }
     }
 
-    // `help`/`filter_menu` each draw as a small box floating over the
-    // tree and panel already composed above, rather than replacing
-    // either -- `frame` still shows real content around the box.
+    // `help`/`filter_menu`/`tag_menu` each draw as a small box floating
+    // over the tree and panel already composed above, rather than
+    // replacing either -- `frame` still shows real content around the
+    // box.
     let overlay_box = if app.help {
         // Some help lines are long enough to make an unclipped box
         // wider than the terminal itself, pushing its own right border
@@ -771,8 +870,10 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         let lines: Vec<String> =
             help_lines(&app.keys, &app.commands).iter().map(|l| draw::clip_with_ellipsis(l, max_line)).collect();
         Some(draw::box_grid(&lines))
+    } else if let Some(f) = app.filter_menu.as_ref() {
+        Some(filter_menu_box(f, &app.filter_options()))
     } else {
-        app.filter_menu.map(filter_menu_box)
+        app.tag_menu.as_ref().map(|t| tag_menu_box(t, &app.config.kinds()))
     };
     if let Some(b) = &overlay_box {
         let box_rows = b.grid.len();
@@ -849,14 +950,76 @@ fn kind_marker(kind: NodeKind) -> &'static str {
     }
 }
 
-/// "⇒1 ⇐1 ✗1 ↻1 ▤ →2 ←1 ⚭": resolved `deps=`/`xdeps=` out and in,
-/// broken and not-yet-run entries, a declared file artifact, then the
-/// existing outgoing/backlink/relation-touch summary, unchanged
-/// (dependency-surfacing.md §B-§E). Zero-valued pieces are omitted,
-/// never printed as `⇒0`. The four dep-glyphs are a first cut, not a
-/// settled choice (§7).
-fn badge_for(id: &NodeId, links: &query::NodeLinks, deps: &DepData) -> String {
+/// One node's own durable classification, read back from its own
+/// `<!-- dankg:tag -->` marker (`tag::markers_in`) rather than tracked
+/// as separate app state -- `compute_tags`, below, is the one reader.
+/// `icon` is not part of the marker at all -- it is `kind`'s own
+/// `[kind.*]` config lookup, resolved once here rather than on every
+/// read, so a config edit takes effect on the next `reload` exactly
+/// like everything else config-driven already does. Purely additive
+/// metadata, kept entirely apart from `graph::model::NodeKind`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Annotation {
+    kind: Option<String>,
+    icon: Option<String>,
+}
+
+/// Every node's own `dankg:tag` marker, corpus-wide -- computed once
+/// per load/reload, alongside `deps`, the same "the file is the
+/// source of truth" policy `dankg:result`/`dankg:depends` already
+/// follow (project.md, decision 12) rather than remembering a `tag:`
+/// line's own effect only for the running session. A marker naming a
+/// node that no longer exists (the heading it tagged was deleted, say)
+/// simply produces no entry here -- nothing goes looking for one, and
+/// `reload`'s own fresh `index` is what a reader actually sees. A
+/// `kind` naming no `[kind.*]` section still gets an entry, just with
+/// `icon: None` -- `dankg check`, not the TUI, is what tells a reader
+/// the name itself is unrecognized (`main.rs`'s own `check_cmd`).
+/// `target`, when a marker carries one, is likewise not re-verified
+/// here -- display is best-effort off whatever node the marker
+/// physically sits on right now, the same way an unrecognized `kind`
+/// still shows up with no icon rather than being hidden; `check_cmd`
+/// is where a `target` that no longer matches gets caught.
+fn compute_tags(root: &Path, corpus_paths: &[String], index: &Graph, config: &Config) -> HashMap<NodeId, Annotation> {
+    let mut out = HashMap::new();
+    for path in corpus_paths {
+        let Ok(source) = std::fs::read_to_string(root.join(path)) else { continue };
+        let mut diags = Diags::new(path);
+        let doc = Document::parse(&source, &mut diags);
+        for (anchor_line, kind, _target) in tag::markers_in(&doc) {
+            let Some(node) = index.nodes.iter().find(|n| n.file == *path && n.line == anchor_line) else { continue };
+            let icon = config.kind(&kind).and_then(|k| k.icon);
+            out.insert(node.id.clone(), Annotation { kind: Some(kind), icon });
+        }
+    }
+    out
+}
+
+/// "∅ ⇒1 ⇐1 ✗1 ↻1 ▤ →2 ←1 ⚭ ☐": whether the node itself is unresolved
+/// (a dangling link's own placeholder, never real content), then
+/// resolved `deps=`/`xdeps=` out and in, broken and not-yet-run
+/// entries, a declared file artifact, then the existing outgoing/
+/// backlink/relation-touch summary, unchanged (dependency-
+/// surfacing.md §B-§E), then this node's own classified `kind`'s
+/// icon, if any -- the one glyph here that is not built in, since its
+/// value comes from `[kind.*]` config, not a fixed table. Zero-valued
+/// pieces are omitted, never printed as `⇒0`. The four dep-glyphs are
+/// a first cut, not a settled choice (§7).
+fn badge_for(
+    id: &NodeId,
+    resolved: bool,
+    links: &query::NodeLinks,
+    deps: &DepData,
+    annotations: &HashMap<NodeId, Annotation>,
+) -> String {
     let mut parts = Vec::new();
+    if !resolved {
+        // Leading, not trailing -- an unresolved node is a placeholder
+        // invented to receive a dangling link (`graph::resolve::
+        // placeholder`), not real content, and that fact outranks
+        // every other one this badge reports.
+        parts.push("∅".to_string());
+    }
     let count = |m: &HashMap<NodeId, Vec<String>>| m.get(id).map_or(0, Vec::len);
     let out = deps.dep_out.get(id).map_or(0, Vec::len);
     let inc = deps.dep_in.get(id).map_or(0, Vec::len);
@@ -885,6 +1048,9 @@ fn badge_for(id: &NodeId, links: &query::NodeLinks, deps: &DepData) -> String {
     }
     if !links.produces.is_empty() || !links.reads.is_empty() {
         parts.push("⚭".to_string());
+    }
+    if let Some(icon) = annotations.get(id).and_then(|a| a.icon.as_deref()) {
+        parts.push(icon.to_string());
     }
     parts.join(" ")
 }
@@ -935,7 +1101,7 @@ impl App {
     }
 
     fn matches_filter(&self, id: &NodeId) -> bool {
-        match self.filter {
+        match &self.filter {
             Filter::All => true,
             Filter::Blocks => self.index.node(id).is_some_and(|n| n.kind == NodeKind::Block),
             // "declares or is targeted" (§3's leaning): a block that
@@ -948,7 +1114,24 @@ impl App {
                     || self.deps.dep_pending.contains_key(id)
             }
             Filter::FileArtifact => self.deps.file_deps.contains_key(id),
+            Filter::Tag(kind) => self.annotations.get(id).is_some_and(|a| a.kind.as_deref() == Some(kind.as_str())),
         }
+    }
+
+    /// `Filter`'s full, current option list: the four built-ins, fixed
+    /// order, then one `Filter::Tag` per distinct `kind=` some `tag:`
+    /// line has actually set this session, alphabetical. Unlike the
+    /// built-ins, this can grow while the TUI runs -- a command emits a
+    /// `tag:` line with a kind never seen before -- which is exactly
+    /// why the filter menu can no longer cycle through a fixed
+    /// constant the way it did before node classification existed.
+    fn filter_options(&self) -> Vec<Filter> {
+        let mut kinds: Vec<&str> = self.annotations.values().filter_map(|a| a.kind.as_deref()).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        let mut options = vec![Filter::All, Filter::Blocks, Filter::EvalChain, Filter::FileArtifact];
+        options.extend(kinds.into_iter().map(|k| Filter::Tag(k.to_string())));
+        options
     }
 
     fn push_row(&self, id: &NodeId, depth: u32, expanded: &HashSet<NodeId>, filter: Option<&HashSet<NodeId>>, out: &mut Vec<TreeRow>) {
@@ -959,7 +1142,7 @@ impl App {
         let kids = self.children.get(id);
         let has_children = kids.is_some_and(|k| !k.is_empty());
         let is_expanded = has_children && expanded.contains(id);
-        let badge = badge_for(id, &query::links_for(&self.index, id), &self.deps);
+        let badge = badge_for(id, node.resolved, &query::links_for(&self.index, id), &self.deps, &self.annotations);
         let title = format!("{}{}", kind_marker(node.kind), node.title);
         out.push(TreeRow { id: id.clone(), title, depth, marker: has_children.then_some(is_expanded), badge });
         if is_expanded {
@@ -1232,8 +1415,8 @@ fn resolve_entry_roots(
 /// first).
 fn reserved_keys(keys: &Keymap) -> HashSet<input::Key> {
     let mut out: HashSet<input::Key> = [
-        keys.up, keys.down, keys.left, keys.right, keys.quit, keys.reset, keys.eval, keys.breadcrumb, '?', '/', 'f',
-        'n', 'N',
+        keys.up, keys.down, keys.left, keys.right, keys.quit, keys.reset, keys.eval, keys.breadcrumb, keys.tag, '?',
+        '/', 'f', 'n', 'N',
     ]
     .into_iter()
     .map(input::Key::Char)
@@ -1251,12 +1434,12 @@ fn reserved_keys(keys: &Keymap) -> HashSet<input::Key> {
 /// table of commands is parsed atomically the way `[keys]` is, so
 /// reverting all of them over one bad entry would punish every other
 /// command for a mistake in one.
-fn load_commands(root: &Path, config: &Config, keys: &Keymap, diags: &mut Diags) -> (Option<String>, HashMap<input::Key, (usize, String)>) {
+fn load_commands(root: &Path, config: &Config, keys: &Keymap, diags: &mut Diags) -> (Option<String>, HashMap<input::Key, (usize, String, bool)>) {
     let Some(configured) = config.tui_commands() else { return (None, HashMap::new()) };
     let file = root.join(configured).to_string_lossy().into_owned();
     let reserved = reserved_keys(keys);
     let mut commands = HashMap::new();
-    for (position, key, name) in eval::keyed_commands(&file) {
+    for (position, key, name, protocol_lines) in eval::keyed_commands(&file) {
         if reserved.contains(&key) {
             diags.warn_in(file.clone(), 0, format!("`{name}` binds `{key}`, already a built-in key; ignored"));
             continue;
@@ -1265,7 +1448,7 @@ fn load_commands(root: &Path, config: &Config, keys: &Keymap, diags: &mut Diags)
             diags.warn_in(file.clone(), 0, format!("`{name}` binds `{key}`, already used by another command in this file; ignored"));
             continue;
         }
-        commands.insert(key, (position, name));
+        commands.insert(key, (position, name, protocol_lines));
     }
     (Some(file), commands)
 }
@@ -1279,6 +1462,7 @@ impl App {
             return Err("nothing to draw: the index is empty".to_string());
         }
         let deps = compute_dep_data(&root, &config, &index, &corpus_paths);
+        let annotations = compute_tags(&root, &corpus_paths, &index, &config);
         let (entry_roots, initial_depth) = resolve_entry_roots(&index, &roots, &entries, depth, all, default_depth);
         let expanded = initial_expansion(&children, &entry_roots, initial_depth);
         let selected = entry_roots.first().cloned().unwrap_or_else(|| roots[0].clone());
@@ -1303,6 +1487,7 @@ impl App {
             filter_menu: None,
             filter_history: HashMap::new(),
             moved_since_filter_change: false,
+            tag_menu: None,
             selected,
             focus: Focus::Tree,
             panel_cursor: 0,
@@ -1317,6 +1502,7 @@ impl App {
             breadcrumb,
             commands_file,
             commands,
+            annotations,
             diags,
         })
     }
@@ -1373,6 +1559,7 @@ impl App {
             return;
         }
         let deps = compute_dep_data(&root, &config, &index, &corpus_paths);
+        let annotations = compute_tags(&root, &corpus_paths, &index, &config);
         let (entry_roots, initial_depth) = resolve_entry_roots(&index, &roots, &entries, self.depth, self.all, default_depth);
         let expanded = initial_expansion(&children, &entry_roots, initial_depth);
         // Existing behind a now-collapsed ancestor is no more useful to
@@ -1390,6 +1577,7 @@ impl App {
         self.index = index;
         self.children = children;
         self.deps = deps;
+        self.annotations = annotations;
         self.roots = roots;
         self.entry_roots = entry_roots;
         self.initial_depth = initial_depth;
@@ -1458,14 +1646,21 @@ impl App {
     /// whichever `Filter` is already active.
     fn open_filter_menu(&mut self) {
         self.cancel_cycle();
-        self.filter_menu = Some(self.filter);
+        self.filter_menu = Some(self.filter.clone());
     }
 
     /// Up/down while the filter menu is open: moves its own cursor,
     /// never `self.filter` itself -- nothing is applied until `enter`.
+    /// Wraps through `filter_options`'s own current list rather than a
+    /// fixed `next`/`prev` pair, since that list's own length can
+    /// change between one keypress and the next.
     fn move_filter_menu_cursor(&mut self, delta: i32) {
-        let Some(current) = self.filter_menu else { return };
-        self.filter_menu = Some(if delta < 0 { current.prev() } else { current.next() });
+        let Some(current) = self.filter_menu.clone() else { return };
+        let options = self.filter_options();
+        let Some(index) = options.iter().position(|f| *f == current) else { return };
+        let len = options.len() as i32;
+        let next = ((index as i32 + delta) % len + len) % len;
+        self.filter_menu = Some(options[next as usize].clone());
     }
 
     /// `esc`, while the filter menu is open: closes it without
@@ -1511,8 +1706,8 @@ impl App {
         let anchor =
             self.visible_rows().iter().position(|r| r.id == self.selected).map(|row| row.saturating_sub(self.scroll_row));
 
-        self.filter_history.insert(self.filter, self.selected.clone());
-        self.filter = new_filter;
+        self.filter_history.insert(self.filter.clone(), self.selected.clone());
+        self.filter = new_filter.clone();
 
         let stay = self.moved_since_filter_change && self.is_valid_under_current_filter(&self.selected);
         if !stay {
@@ -1848,18 +2043,309 @@ impl App {
     /// on the status line. A no-op if `key` is not actually bound --
     /// `event_loop` only ever calls this after checking `commands`
     /// itself, so this only happens if the two disagree.
+    ///
+    /// `reload` runs *before* the outcome is interpreted, not after --
+    /// unlike `run_selected_block`, a `protocol_lines` command's own
+    /// `select:` can move the tree cursor, and that only makes sense
+    /// against the graph the command's own edits actually produced, not
+    /// whatever `self.index` still held from before it ran.
     fn run_command(&mut self, key: input::Key) {
         let Some(file) = self.commands_file.clone() else { return };
-        let Some(&(position, ref name)) = self.commands.get(&key) else { return };
+        let Some(&(position, ref name, protocol_lines)) = self.commands.get(&key) else { return };
         let name = name.clone();
         let outcome = eval::run(&file, &self.config, position);
-        self.status = Some(match outcome {
+        self.reload();
+        let status = match outcome {
+            eval::Outcome::Ok(text) if protocol_lines => self.apply_protocol_output(&name, &text),
             eval::Outcome::Ok(text) => outcome_status(&name, &text, "ok"),
             eval::Outcome::Failed(text) => outcome_status(&name, &text, "failed"),
             eval::Outcome::TimedOut => format!("{name}: timed out"),
             eval::Outcome::Error(e) => format!("{name}: {e}"),
-        });
-        self.reload();
+        };
+        self.status = Some(status);
+    }
+
+    /// A `protocol_lines` command's own successful run: applies
+    /// `scan_protocol_lines`'s (`tui/eval.rs`) own findings against a
+    /// real graph. Every `tag:` line is handed to `write_tag`, which
+    /// writes a durable `<!-- dankg:tag -->` marker into the *target's*
+    /// own file rather than remembering it only on `self` -- `tag.md`'s
+    /// own design decision, mirroring how `eval::result` already
+    /// writes a block's own result back instead of keeping it only in
+    /// the running process. A successful write reloads immediately, not
+    /// batched until the end: a second `tag:` line naming the *same*
+    /// node in one run would otherwise resolve against a graph that no
+    /// longer matches the file `write_tag` just changed, and stamp its
+    /// own marker at a now-stale line.
+    ///
+    /// `select:` then moves the tree cursor, but only when its own
+    /// target actually resolves to a node `self.index` really has --
+    /// a stale or misspelled target is silently skipped rather than
+    /// shown as raw text, since the block already opted into this
+    /// protocol (eval-custom-plan.md's design decision on guarding it
+    /// against accidental collisions).
+    ///
+    /// A target resolves root-relative, exactly like a bare
+    /// `dankg graph --format json` node id -- `depends::resolve_target`
+    /// with an empty declaring file, not `self.commands_file` itself.
+    /// A running command has no "current file" the way a
+    /// `dankg:depends` marker embedded in one specific corpus file
+    /// does, so there is nothing to resolve a bare `#slug` relative
+    /// *to*; a target naming no file at all simply fails to resolve,
+    /// same as any other target `self.index` does not contain.
+    ///
+    /// Returns the status line text: `status:`'s own message when
+    /// present, otherwise `outcome_status`'s existing fallback over
+    /// `text` -- unchanged behavior for a `protocol_lines` command that
+    /// has not gotten around to emitting a `status:` line yet.
+    fn apply_protocol_output(&mut self, name: &str, text: &str) -> String {
+        let parsed = eval::scan_protocol_lines(text);
+        for (target, attrs) in &parsed.tags {
+            if self.write_tag(target, attrs) {
+                self.reload();
+            }
+        }
+        if let Some(target) = &parsed.select {
+            if let Some(id) = depends::resolve_target("", target) {
+                if self.index.contains(&id) {
+                    self.reveal_and_select(id);
+                }
+            }
+        }
+        match parsed.status {
+            Some(status) => format!("{name}: {status}"),
+            None => outcome_status(name, text, "ok"),
+        }
+    }
+
+    /// Resolves `target` and writes its own `<!-- dankg:tag -->`
+    /// marker on disk, immediately before the node itself
+    /// (`tag::write_back`). Returns whether anything was actually
+    /// written, so `apply_protocol_output` knows whether a follow-up
+    /// `reload` is worth its cost.
+    ///
+    /// `kind` is the only attribute a `tag:` line can set now -- icon
+    /// moved to `[kind.*]` config (`tag.md`'s own design decision), so
+    /// there is nothing left to merge with a prior marker the way an
+    /// independent `icon=` once needed. A fresh `kind=` always replaces
+    /// whatever a node's own marker said before. The marker's own
+    /// `target=` is always `id`'s own slug, not copied from `target`
+    /// verbatim -- `resolve_target` already normalized whatever shape
+    /// the `tag:` line wrote (a bare `#slug`, a `file#slug`, an
+    /// unnecessary `.md`) down to the one canonical fragment, and the
+    /// marker should say that, not repeat an author's own spelling of
+    /// it.
+    ///
+    /// Silently does nothing when `target` does not resolve, names a
+    /// `Relation` node (no real file or line for a marker to attach
+    /// to -- decision: *Provenance without a driver*), or carries no
+    /// `kind=` attribute at all -- an unrecognized attribute alone
+    /// leaves an existing marker exactly as it was rather than
+    /// replacing it with an empty one.
+    fn write_tag(&mut self, target: &str, attrs: &[(String, String)]) -> bool {
+        let Some(kind) = attrs.iter().find(|(k, _)| k == "kind").map(|(_, v)| v.as_str()) else { return false };
+        let Some(id) = depends::resolve_target("", target) else { return false };
+        self.write_tag_for(&id, kind)
+    }
+
+    /// `write_tag`'s own mechanics, minus the target-string resolution
+    /// step: `id` is already resolved. Shared by `write_tag` (a `tag:`
+    /// output line's target) and `apply_tag_to_selected` (`keys.tag`'s
+    /// own menu, already holding `self.selected` directly) -- exactly
+    /// one place that ever actually writes a `dankg:tag` marker to
+    /// disk, regardless of what triggered it.
+    ///
+    /// **A crash, found by hand.** Tagging `draft` in
+    /// `example/example_1` -- a dangling link's own placeholder node
+    /// (`index.md` links to `scratch/draft.md`, excluded from the
+    /// corpus by `.dankgignore`) -- used to end the whole `dankg tui`
+    /// session outright, with no error visible on screen: a panic
+    /// mid-raw-mode unwinds, `RawMode`'s own `Drop` restores the
+    /// terminal on the way out, and the result looks identical to
+    /// quitting cleanly. The only reason it was even reachable at all:
+    /// `graph::resolve::placeholder` happened to name a *real* file on
+    /// disk here (`scratch/draft.md` exists; it is only excluded from
+    /// the corpus *walk*), so `read_to_string` below succeeded instead
+    /// of failing fast the way a placeholder naming a nonexistent path
+    /// usually would. Once it did, `node.line` -- always `0` for a
+    /// placeholder, never a real source line -- reached `tag::
+    /// write_back`'s `anchor_line - 1` on a `u32`, underflowed, and
+    /// the resulting near-`u32::MAX` splice index panicked.
+    ///
+    /// The real bug was never the arithmetic. It was that an
+    /// unresolved node -- `!node.resolved`, the same flag `dankg
+    /// check`'s own unresolved-link count already reads -- has no
+    /// real line for a marker to attach to at all, the same way a
+    /// `Relation` node has no real line either. Guarded the same way,
+    /// for the same reason.
+    fn write_tag_for(&mut self, id: &NodeId, kind: &str) -> bool {
+        let Some(node) = self.index.node(id) else { return false };
+        if node.kind == NodeKind::Relation || !node.resolved {
+            return false;
+        }
+        let path = self.root.join(&node.file);
+        let Ok(source) = std::fs::read_to_string(&path) else { return false };
+        let mut diags = Diags::new(&node.file);
+        let doc = Document::parse(&source, &mut diags);
+        let existing_line = tag::locate_existing(&doc, node.line).map(|(line, _, _)| line);
+
+        let updated = tag::write_back(&source, node.line, existing_line, kind, &format!("#{}", id.slug));
+        std::fs::write(&path, updated).is_ok()
+    }
+
+    /// `keys.tag`'s own overlay: opens on the selected node, its
+    /// cursor on `Config::kinds()`'s first entry. Refuses outright for
+    /// a `Relation` node (nowhere for a marker to attach -- decision:
+    /// *Provenance without a driver*) or an unresolved one (a dangling
+    /// link's own placeholder, `write_tag_for`'s own doc comment) --
+    /// opening a menu that can only ever fail to apply would just be
+    /// confusing.
+    fn open_tag_menu(&mut self) {
+        let Some(node) = self.index.node(&self.selected) else { return };
+        if node.kind == NodeKind::Relation {
+            self.status = Some("a relation node can't be tagged".to_string());
+            return;
+        }
+        if !node.resolved {
+            self.status = Some("an unresolved node can't be tagged".to_string());
+            return;
+        }
+        self.cancel_cycle();
+        self.tag_menu = Some(TagMenu::Pick { cursor: 0 });
+    }
+
+    fn cancel_tag_menu(&mut self) {
+        self.tag_menu = None;
+    }
+
+    /// Up/down while picking: wraps through `Config::kinds()`'s own
+    /// current length, read fresh rather than cached -- the same
+    /// "just rebuild it" tolerance `filter_options` already has, and
+    /// necessary here specifically: `n` can grow that list mid-menu
+    /// by declaring a new kind, so a cached length would go stale the
+    /// moment it did. A no-op with nothing configured yet -- there is
+    /// nowhere for the cursor to go, and `n` is the only useful key
+    /// left in that state.
+    fn move_tag_menu_cursor(&mut self, delta: i32) {
+        let len = self.config.kinds().len() as i32;
+        if len == 0 {
+            return;
+        }
+        let Some(TagMenu::Pick { cursor }) = &mut self.tag_menu else { return };
+        let next = ((*cursor as i32 + delta) % len + len) % len;
+        *cursor = next as usize;
+    }
+
+    /// `n`, while picking: switches to typing a new kind's own name.
+    /// A no-op outside `Pick` -- `event_loop` already only reaches
+    /// this from there, since `n` types a literal `n` in either text
+    /// stage instead.
+    fn start_new_tag(&mut self) {
+        if matches!(self.tag_menu, Some(TagMenu::Pick { .. })) {
+            self.tag_menu = Some(TagMenu::NewName { input: String::new() });
+        }
+    }
+
+    fn tag_menu_push(&mut self, c: char) {
+        match &mut self.tag_menu {
+            Some(TagMenu::NewName { input }) | Some(TagMenu::NewIcon { input, .. }) => input.push(c),
+            _ => {}
+        }
+    }
+
+    fn tag_menu_backspace(&mut self) {
+        match &mut self.tag_menu {
+            Some(TagMenu::NewName { input }) | Some(TagMenu::NewIcon { input, .. }) => {
+                input.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// `enter`, in any of `TagMenu`'s three stages. `Pick` applies the
+    /// highlighted kind directly. `NewName` validates the typed name --
+    /// non-empty, no whitespace or `=` (the same shape `tag:`'s own
+    /// `kind=` attribute already requires to parse at all) -- and
+    /// either advances to `NewIcon` or, when the name already names a
+    /// declared kind, applies that one directly rather than trying to
+    /// declare it a second time. `NewIcon` declares the new kind
+    /// (`create_kind`) and applies it in the same step; a wide or
+    /// colored icon (`tag::icon_may_break_alignment`) still gets
+    /// declared -- advisory, same as `dankg check`'s own severity for
+    /// it -- but the status line says so immediately rather than
+    /// waiting for the next check.
+    fn confirm_tag_menu(&mut self) {
+        match self.tag_menu.take() {
+            Some(TagMenu::Pick { cursor }) => {
+                let Some(kind) = self.config.kinds().get(cursor).map(|k| k.name.clone()) else { return };
+                self.status = Some(self.tag_result(&kind));
+            }
+            Some(TagMenu::NewName { input }) => {
+                let name = input.trim().to_string();
+                if name.is_empty() || name.chars().any(char::is_whitespace) || name.contains('=') {
+                    self.status = Some("a tag name can't be empty or contain whitespace or `=`".to_string());
+                    self.tag_menu = Some(TagMenu::NewName { input });
+                } else if self.config.kind(&name).is_some() {
+                    self.status = Some(self.tag_result(&name));
+                } else {
+                    self.tag_menu = Some(TagMenu::NewIcon { name, input: String::new() });
+                }
+            }
+            Some(TagMenu::NewIcon { name, input }) => {
+                let typed = input.trim();
+                let icon = (!typed.is_empty()).then_some(typed);
+                let wide = icon.is_some_and(tag::icon_may_break_alignment);
+                self.status = Some(if !self.create_kind(&name, icon) {
+                    format!("could not write [kind.{name}] to .dankg/config")
+                } else if wide {
+                    format!("{} (icon may render wider than one column, or in color)", self.tag_result(&name))
+                } else {
+                    self.tag_result(&name)
+                });
+            }
+            None => {}
+        }
+    }
+
+    /// Writes `kind` onto `self.selected` and reloads so the badge and
+    /// filter-menu entry show up immediately, returning the status
+    /// line text either way.
+    fn tag_result(&mut self, kind: &str) -> String {
+        let id = self.selected.clone();
+        if self.write_tag_for(&id, kind) {
+            self.reload();
+            format!("tagged: kind={kind}")
+        } else {
+            "could not write the tag marker".to_string()
+        }
+    }
+
+    /// Declares a new `[kind.<name>]` section by appending to
+    /// `.dankg/config`, creating the `.dankg` directory too if this is
+    /// the very first thing to ever write into it. An append, not a
+    /// full round-trip re-serialization of the parsed config -- the
+    /// same "a targeted edit, not a re-emit" preference `tag::
+    /// write_back` already has over reconstructing a whole document.
+    /// Returns whether the write actually succeeded, so
+    /// `confirm_tag_menu` never applies a kind that failed to declare.
+    fn create_kind(&mut self, name: &str, icon: Option<&str>) -> bool {
+        let dir = self.root.join(".dankg");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return false;
+        }
+        let path = dir.join("config");
+        let mut out = std::fs::read_to_string(&path).unwrap_or_default();
+        if !out.is_empty() {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        out.push_str(&format!("[kind.{name}]\n"));
+        if let Some(icon) = icon {
+            out.push_str(&format!("icon = {icon}\n"));
+        }
+        std::fs::write(&path, out).is_ok()
     }
 
     fn toggle_help(&mut self) {
@@ -1902,6 +2388,7 @@ impl App {
             filter_menu: None,
             filter_history: HashMap::new(),
             moved_since_filter_change: false,
+            tag_menu: None,
             selected,
             focus: Focus::Tree,
             panel_cursor: 0,
@@ -1916,6 +2403,7 @@ impl App {
             breadcrumb: true,
             commands_file: None,
             commands: HashMap::new(),
+            annotations: HashMap::new(),
             diags: Diags::new("test"),
         }
     }
@@ -2536,13 +3024,32 @@ mod tests {
     }
 
     #[test]
-    fn filter_next_and_prev_cycle_through_every_variant_and_wrap() {
-        assert_eq!(Filter::All.next(), Filter::Blocks);
-        assert_eq!(Filter::Blocks.next(), Filter::EvalChain);
-        assert_eq!(Filter::EvalChain.next(), Filter::FileArtifact);
-        assert_eq!(Filter::FileArtifact.next(), Filter::All, "wraps forward");
-        assert_eq!(Filter::All.prev(), Filter::FileArtifact, "wraps backward");
-        assert_eq!(Filter::FileArtifact.prev(), Filter::EvalChain);
+    fn filter_options_is_just_the_four_built_ins_with_no_tags_set() {
+        let a = app(&[("a.md", "# One\n")]);
+        assert_eq!(a.filter_options(), vec![Filter::All, Filter::Blocks, Filter::EvalChain, Filter::FileArtifact]);
+    }
+
+    #[test]
+    fn filter_options_gains_one_tag_variant_per_distinct_kind_alphabetically() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        let id = a.selected.clone();
+        a.annotations.insert(id, Annotation { kind: Some("zeta".to_string()), icon: None });
+        // A second node sharing "zeta" must not duplicate the option.
+        a.annotations.insert(
+            NodeId::new("a", "extra"),
+            Annotation { kind: Some("alpha".to_string()), icon: None },
+        );
+        assert_eq!(
+            a.filter_options(),
+            vec![
+                Filter::All,
+                Filter::Blocks,
+                Filter::EvalChain,
+                Filter::FileArtifact,
+                Filter::Tag("alpha".to_string()),
+                Filter::Tag("zeta".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -2788,7 +3295,20 @@ mod tests {
         let path = dir.join("a.md").to_string_lossy().into_owned();
         let a = App::load(&[path], false, None, false).unwrap();
         assert_eq!(a.commands_file.as_deref(), Some(dir.join("cmds.md").to_string_lossy().as_ref()));
-        assert_eq!(a.commands.get(&input::Key::Char('g')), Some(&(0, "reindex".to_string())));
+        assert_eq!(a.commands.get(&input::Key::Char('g')), Some(&(0, "reindex".to_string(), false)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_commands_own_protocol_lines_attribute_carries_through_to_the_table() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n"),
+            ("cmds.md", "```sh name=live key=g protocol=lines\necho hi\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let a = App::load(&[path], false, None, false).unwrap();
+        assert_eq!(a.commands.get(&input::Key::Char('g')), Some(&(0, "live".to_string(), true)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2820,7 +3340,7 @@ mod tests {
         ]);
         let path = dir.join("a.md").to_string_lossy().into_owned();
         let a = App::load(&[path], false, None, false).unwrap();
-        assert_eq!(a.commands.get(&input::Key::Char('g')), Some(&(0, "first".to_string())));
+        assert_eq!(a.commands.get(&input::Key::Char('g')), Some(&(0, "first".to_string(), false)));
         assert!(
             a.diags.items().iter().any(|d| d.message.contains("second") && d.message.contains("already used by another command")),
             "{:?}",
@@ -2848,6 +3368,558 @@ mod tests {
         let mut a = app(&[("a.md", "# One\n")]);
         a.run_command(input::Key::Char('z'));
         assert_eq!(a.status, None);
+    }
+
+    // -- `protocol=lines` -------------------------------------------
+
+    #[test]
+    fn without_protocol_lines_a_line_that_looks_like_the_control_syntax_is_shown_raw() {
+        // The collision this attribute exists to guard against
+        // (eval-custom-plan.md): a command with no `protocol=lines`
+        // prints something that happens to start with `status: `, and
+        // it must show up verbatim, not get reinterpreted.
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n"),
+            ("cmds.md", "```sh name=oops key=g\necho 'status: fooled you'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+        assert_eq!(a.status.as_deref(), Some("oops: status: fooled you"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_protocol_lines_a_status_line_is_shown_with_its_prefix_stripped() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n"),
+            ("cmds.md", "```sh name=live key=g protocol=lines\necho 'status: real message'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+        assert_eq!(a.status.as_deref(), Some("live: real message"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_protocol_lines_a_select_line_moves_the_selection() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n## Two\n"),
+            ("cmds.md", "```sh name=jump key=g protocol=lines\necho 'select: a.md#two'\necho 'status: jumped'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+        assert_eq!(a.selected.slug, "two");
+        assert_eq!(a.status.as_deref(), Some("jump: jumped"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_protocol_lines_an_unresolvable_select_target_is_skipped_not_shown_raw() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n## Two\n"),
+            ("cmds.md", "```sh name=jump key=g protocol=lines\necho 'select: a.md#nope'\necho 'status: still ok'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        let before = a.selected.clone();
+        a.run_command(input::Key::Char('g'));
+        assert_eq!(a.selected, before, "a stale target never moves the cursor");
+        assert_eq!(a.status.as_deref(), Some("jump: still ok"), "status: still applies on its own");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_protocol_lines_a_tag_line_writes_a_durable_kind_only_marker() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n[kind.task]\nicon = X\n"),
+            ("a.md", "# One\n\n## Two\n"),
+            ("cmds.md", "```sh name=classify key=g protocol=lines\necho 'tag: a.md#two kind=task'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+
+        // The icon comes from `[kind.task]`, not from the `tag:` line
+        // or the marker -- neither carries one anymore.
+        let id = NodeId::new("a", "two");
+        assert_eq!(a.annotations.get(&id), Some(&Annotation { kind: Some("task".to_string()), icon: Some("X".to_string()) }));
+
+        // The marker itself is real content in `a.md`, not just
+        // something this running process remembers. No `icon=`, but
+        // `target=` is there, resolved to the node's own slug rather
+        // than the `tag:` line's own spelling of it.
+        let on_disk = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        assert_eq!(on_disk, "# One\n\n<!-- dankg:tag kind=task target=#two -->\n\n## Two\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_kind_with_no_configured_icon_still_classifies_with_no_badge_glyph() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n## Two\n"),
+            ("cmds.md", "```sh name=classify key=g protocol=lines\necho 'tag: a.md#two kind=task'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+
+        let id = NodeId::new("a", "two");
+        assert_eq!(a.annotations.get(&id), Some(&Annotation { kind: Some("task".to_string()), icon: None }));
+        let row = a.visible_rows().into_iter().find(|r| r.id == id).unwrap();
+        assert!(row.badge.is_empty(), "{:?}", row.badge);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tags_marker_survives_a_fresh_load_with_the_command_never_run_again() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n## Two\n"),
+            ("cmds.md", "```sh name=classify key=g protocol=lines\necho 'tag: a.md#two kind=task'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path.clone()], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+
+        // A brand new `App::load` -- the same thing quitting and
+        // reopening `dankg tui` does -- reads it straight back out of
+        // `a.md`, with no command run in this second session at all.
+        let reopened = App::load(&[path], false, None, false).unwrap();
+        assert_eq!(
+            reopened.annotations.get(&NodeId::new("a", "two")),
+            Some(&Annotation { kind: Some("task".to_string()), icon: None })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retagging_a_node_replaces_its_marker_instead_of_duplicating_it() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n## Two\n"),
+            (
+                "cmds.md",
+                "```sh name=set_task key=g protocol=lines\necho 'tag: a.md#two kind=task'\n```\n\n```sh name=set_done key=i protocol=lines\necho 'tag: a.md#two kind=done'\n```\n",
+            ),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+        a.run_command(input::Key::Char('i'));
+
+        let id = NodeId::new("a", "two");
+        assert_eq!(a.annotations.get(&id), Some(&Annotation { kind: Some("done".to_string()), icon: None }));
+
+        // Exactly one marker, not the first one still sitting there
+        // followed by a second.
+        let on_disk = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        assert_eq!(on_disk, "# One\n\n<!-- dankg:tag kind=done target=#two -->\n\n## Two\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_tag_lines_for_the_same_target_in_one_run_do_not_corrupt_the_file() {
+        // The bug found while implementing: the second `tag:` line's
+        // own target has to resolve against a graph that already
+        // reflects the first write's two inserted lines, or it stamps
+        // its own marker at a now-stale line. `apply_protocol_output`
+        // reloads after every successful write, not just once at the
+        // end, specifically to prevent this.
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n## Two\n"),
+            (
+                "cmds.md",
+                "```sh name=classify key=g protocol=lines\necho 'tag: a.md#two kind=task'\necho 'tag: a.md#two kind=done'\n```\n",
+            ),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+
+        let id = NodeId::new("a", "two");
+        assert_eq!(a.annotations.get(&id), Some(&Annotation { kind: Some("done".to_string()), icon: None }));
+        let on_disk = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        assert_eq!(on_disk, "# One\n\n<!-- dankg:tag kind=done target=#two -->\n\n## Two\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tag_line_can_target_a_block_not_just_a_heading() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n```sh name=x\n:\n```\n"),
+            ("cmds.md", "```sh name=classify key=g protocol=lines\necho 'tag: a.md#x kind=job'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+
+        let on_disk = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        assert_eq!(on_disk, "# One\n\n<!-- dankg:tag kind=job target=#x -->\n\n```sh name=x\n:\n```\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tag_line_naming_an_unresolvable_target_writes_nothing() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n"),
+            ("cmds.md", "```sh name=classify key=g protocol=lines\necho 'tag: a.md#nope kind=task'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let before = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+
+        let after = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        assert_eq!(before, after, "nothing to attach the marker to, so nothing was written");
+        assert!(a.annotations.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- `keys.tag` -----------------------------------------------------
+
+    #[test]
+    fn open_tag_menu_opens_a_pick_menu_at_cursor_zero() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.open_tag_menu();
+        assert!(matches!(a.tag_menu, Some(TagMenu::Pick { cursor: 0 })));
+    }
+
+    #[test]
+    fn open_tag_menu_clears_an_in_progress_eval_cycle() {
+        let (mut a, _path) = app_with_real_file("a.md", "# One\n\n```sh name=x\n:\n```\n");
+        a.eval_key();
+        assert!(a.block_select.is_some());
+        a.open_tag_menu();
+        assert!(a.block_select.is_none());
+    }
+
+    #[test]
+    fn open_tag_menu_refuses_an_unresolved_node() {
+        // The crash found by hand: a dangling link's own placeholder
+        // node has `line: 0` (`graph::resolve::placeholder`), never a
+        // real source line. Opening the menu for one used to succeed
+        // anyway, only to panic once `write_tag_for` reached
+        // `tag::write_back`'s own line arithmetic underflowing on it.
+        let mut a = app(&[("a.md", "# One\n\n[gone](nope.md)\n")]);
+        let unresolved = a.index.nodes.iter().find(|n| !n.resolved).unwrap().id.clone();
+        a.selected = unresolved;
+        a.open_tag_menu();
+        assert_eq!(a.tag_menu, None, "the menu never opens for a node with nowhere to attach a marker");
+        assert_eq!(a.status.as_deref(), Some("an unresolved node can't be tagged"));
+    }
+
+    #[test]
+    fn write_tag_for_an_unresolved_node_writes_nothing_and_does_not_panic() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[kind.task]\n"),
+            ("a.md", "# One\n\n[gone](nope.md)\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        let unresolved = a.index.nodes.iter().find(|n| !n.resolved).unwrap().id.clone();
+
+        // Exercised through the same shared entry point `keys.tag` and
+        // `tag:` output lines both call -- the fix belongs at the one
+        // choke point both go through, not in either caller alone.
+        assert!(!a.write_tag_for(&unresolved, "task"));
+        assert!(a.annotations.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tag_lines_target_being_unresolved_writes_nothing_and_does_not_panic() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[tui]\ncommands = cmds.md\n[lang.sh]\ncommand = sh {file}\n[kind.task]\n"),
+            ("a.md", "# One\n\n[gone](nope.md)\n"),
+            ("cmds.md", "```sh name=classify key=g protocol=lines\necho 'tag: nope.md#nope kind=task'\n```\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.run_command(input::Key::Char('g'));
+
+        assert!(a.annotations.is_empty(), "nowhere real to attach the marker to");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unresolved_nodes_own_badge_carries_the_empty_set_glyph() {
+        let mut a = app(&[("a.md", "# One\n\n[gone](nope.md)\n")]);
+        let unresolved = a.index.nodes.iter().find(|n| !n.resolved).unwrap().id.clone();
+        let row = a.visible_rows().into_iter().find(|r| r.id == unresolved).unwrap();
+        assert!(row.badge.contains('∅'), "{:?}", row.badge);
+    }
+
+    #[test]
+    fn a_resolved_nodes_own_badge_never_carries_the_empty_set_glyph() {
+        let a = app(&[("a.md", "# One\n\n## Two\n")]);
+        let row = a.visible_rows().into_iter().find(|r| r.id.slug == "two").unwrap();
+        assert!(!row.badge.contains('∅'), "{:?}", row.badge);
+    }
+
+    #[test]
+    fn start_new_tag_switches_from_pick_to_new_name() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.open_tag_menu();
+        a.start_new_tag();
+        assert!(matches!(a.tag_menu, Some(TagMenu::NewName { .. })));
+    }
+
+    #[test]
+    fn start_new_tag_is_a_no_op_outside_pick() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.tag_menu = Some(TagMenu::NewName { input: "x".to_string() });
+        a.start_new_tag();
+        assert_eq!(a.tag_menu, Some(TagMenu::NewName { input: "x".to_string() }));
+    }
+
+    #[test]
+    fn tag_menu_push_and_backspace_edit_the_new_name_input() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.open_tag_menu();
+        a.start_new_tag();
+        a.tag_menu_push('t');
+        a.tag_menu_push('a');
+        a.tag_menu_push('g');
+        assert!(matches!(&a.tag_menu, Some(TagMenu::NewName { input }) if input == "tag"));
+        a.tag_menu_backspace();
+        assert!(matches!(&a.tag_menu, Some(TagMenu::NewName { input }) if input == "ta"));
+    }
+
+    #[test]
+    fn tag_menu_push_is_a_no_op_while_picking() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.open_tag_menu();
+        a.tag_menu_push('x');
+        assert!(matches!(a.tag_menu, Some(TagMenu::Pick { cursor: 0 })));
+    }
+
+    #[test]
+    fn move_tag_menu_cursor_is_a_no_op_with_nothing_configured() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.open_tag_menu();
+        a.move_tag_menu_cursor(1);
+        assert!(matches!(a.tag_menu, Some(TagMenu::Pick { cursor: 0 })));
+    }
+
+    #[test]
+    fn cancel_tag_menu_clears_it_from_any_stage() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.tag_menu = Some(TagMenu::NewIcon { name: "task".to_string(), input: "X".to_string() });
+        a.cancel_tag_menu();
+        assert_eq!(a.tag_menu, None);
+    }
+
+    #[test]
+    fn confirming_a_new_name_with_whitespace_or_equals_is_rejected_and_kept_open() {
+        let mut a = app(&[("a.md", "# One\n")]);
+        a.open_tag_menu();
+        a.start_new_tag();
+        a.tag_menu_push('a');
+        a.tag_menu_push(' ');
+        a.tag_menu_push('b');
+        a.confirm_tag_menu();
+        assert!(matches!(&a.tag_menu, Some(TagMenu::NewName { input }) if input == "a b"), "{:?}", a.tag_menu);
+        assert!(a.status.as_deref().unwrap_or("").contains("whitespace"));
+    }
+
+    #[test]
+    fn move_tag_menu_cursor_wraps_through_configured_kinds() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n[kind.a]\n\n[kind.b]\n\n[kind.c]\n"),
+            ("a.md", "# One\n\n## Two\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.open_tag_menu();
+        a.move_tag_menu_cursor(1);
+        assert!(matches!(a.tag_menu, Some(TagMenu::Pick { cursor: 1 })));
+        a.move_tag_menu_cursor(-1);
+        a.move_tag_menu_cursor(-1);
+        assert!(matches!(a.tag_menu, Some(TagMenu::Pick { cursor: 2 })), "wraps backward past the start");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confirm_from_pick_applies_the_highlighted_kind() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n[kind.task]\nicon = X\n"),
+            ("a.md", "# One\n\n## Two\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.selected = NodeId::new("a", "two");
+        a.open_tag_menu();
+        a.confirm_tag_menu();
+
+        assert_eq!(a.status.as_deref(), Some("tagged: kind=task"));
+        assert_eq!(
+            a.annotations.get(&NodeId::new("a", "two")),
+            Some(&Annotation { kind: Some("task".to_string()), icon: Some("X".to_string()) })
+        );
+        let on_disk = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        assert_eq!(on_disk, "# One\n\n<!-- dankg:tag kind=task target=#two -->\n\n## Two\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confirm_new_name_matching_an_existing_kind_applies_it_without_touching_config() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n[kind.task]\nicon = X\n"),
+            ("a.md", "# One\n\n## Two\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let config_before = std::fs::read_to_string(dir.join(".dankg/config")).unwrap();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.selected = NodeId::new("a", "two");
+        a.open_tag_menu();
+        a.start_new_tag();
+        for c in "task".chars() {
+            a.tag_menu_push(c);
+        }
+        a.confirm_tag_menu();
+
+        assert_eq!(a.tag_menu, None, "applied directly, no icon step for an already-declared name");
+        assert_eq!(a.status.as_deref(), Some("tagged: kind=task"));
+        let config_after = std::fs::read_to_string(dir.join(".dankg/config")).unwrap();
+        assert_eq!(config_before, config_after, "task was already declared; nothing new should be written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confirm_new_name_then_empty_icon_creates_an_iconless_kind() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n## Two\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.selected = NodeId::new("a", "two");
+        a.open_tag_menu();
+        a.start_new_tag();
+        for c in "task".chars() {
+            a.tag_menu_push(c);
+        }
+        a.confirm_tag_menu(); // name confirmed, now in NewIcon
+        assert!(matches!(&a.tag_menu, Some(TagMenu::NewIcon { name, input }) if name == "task" && input.is_empty()));
+        a.confirm_tag_menu(); // icon left empty
+
+        assert_eq!(a.status.as_deref(), Some("tagged: kind=task"));
+        let config_after = std::fs::read_to_string(dir.join(".dankg/config")).unwrap();
+        assert!(config_after.contains("[kind.task]\n"), "{config_after:?}");
+        assert!(!config_after.contains("icon ="), "{config_after:?}");
+        assert_eq!(
+            a.annotations.get(&NodeId::new("a", "two")),
+            Some(&Annotation { kind: Some("task".to_string()), icon: None })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confirm_new_name_then_an_icon_creates_a_kind_with_that_icon() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n## Two\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.selected = NodeId::new("a", "two");
+        a.open_tag_menu();
+        a.start_new_tag();
+        for c in "task".chars() {
+            a.tag_menu_push(c);
+        }
+        a.confirm_tag_menu();
+        a.tag_menu_push('X');
+        a.confirm_tag_menu();
+
+        assert_eq!(a.status.as_deref(), Some("tagged: kind=task"));
+        let config_after = std::fs::read_to_string(dir.join(".dankg/config")).unwrap();
+        assert!(config_after.contains("[kind.task]\nicon = X\n"), "{config_after:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confirm_new_name_then_a_wide_icon_still_creates_it_but_warns() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "# One\n\n## Two\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.selected = NodeId::new("a", "two");
+        a.open_tag_menu();
+        a.start_new_tag();
+        for c in "task".chars() {
+            a.tag_menu_push(c);
+        }
+        a.confirm_tag_menu();
+        a.tag_menu_push('⌛'); // U+231B, the exact known incident
+        a.confirm_tag_menu();
+
+        let status = a.status.clone().unwrap_or_default();
+        assert!(status.contains("tagged: kind=task"), "{status:?}");
+        assert!(status.contains("wider than one column"), "{status:?}");
+        let config_after = std::fs::read_to_string(dir.join(".dankg/config")).unwrap();
+        assert!(config_after.contains("icon = ⌛"), "{config_after:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retagging_via_the_menu_overwrites_rather_than_duplicating() {
+        let dir = write_corpus(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n[kind.task]\n\n[kind.done]\n"),
+            ("a.md", "# One\n\n## Two\n"),
+        ]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, None, false).unwrap();
+        a.selected = NodeId::new("a", "two");
+        a.open_tag_menu();
+        a.confirm_tag_menu(); // applies "task" (cursor starts at 0)
+
+        a.selected = NodeId::new("a", "two");
+        a.open_tag_menu();
+        a.move_tag_menu_cursor(1); // "done"
+        a.confirm_tag_menu();
+
+        assert_eq!(a.annotations.get(&NodeId::new("a", "two")), Some(&Annotation { kind: Some("done".to_string()), icon: None }));
+        let on_disk = std::fs::read_to_string(dir.join("a.md")).unwrap();
+        assert_eq!(
+            on_disk.matches("dankg:tag").count(),
+            1,
+            "exactly one marker, the second tag replaced the first rather than adding a second: {on_disk:?}"
+        );
+        assert!(on_disk.contains("kind=done"), "{on_disk:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tag_lines_icon_shows_up_in_the_nodes_own_badge() {
+        let mut a = app(&[("a.md", "# One\n\n## Two\n")]);
+        let id = NodeId::new("a", "two");
+        a.annotations.insert(id.clone(), Annotation { kind: Some("task".to_string()), icon: Some("☐".to_string()) });
+        let row = a.visible_rows().into_iter().find(|r| r.id == id).unwrap();
+        assert!(row.badge.contains('☐'), "{:?}", row.badge);
+    }
+
+    #[test]
+    fn a_tag_filter_matches_only_nodes_carrying_that_kind() {
+        let mut a = app(&[("a.md", "# One\n\n## Two\n\n## Three\n")]);
+        a.annotations.insert(NodeId::new("a", "two"), Annotation { kind: Some("task".to_string()), icon: None });
+        a.apply_filter(Filter::Tag("task".to_string()));
+        let visible: Vec<String> = a.visible_rows().iter().map(|r| r.id.slug.clone()).collect();
+        assert!(visible.contains(&"two".to_string()), "{visible:?}");
+        assert!(!visible.contains(&"three".to_string()), "{visible:?}");
     }
 
     #[test]
@@ -3062,8 +4134,8 @@ mod tests {
     #[test]
     fn help_lines_list_configured_commands_by_name_and_key() {
         let mut commands = HashMap::new();
-        commands.insert(input::Key::Char('g'), (0, "reindex".to_string()));
-        commands.insert(input::Key::Ctrl('g'), (1, "go-to-graph".to_string()));
+        commands.insert(input::Key::Char('g'), (0, "reindex".to_string(), false));
+        commands.insert(input::Key::Ctrl('g'), (1, "go-to-graph".to_string(), false));
         let lines = help_lines(&Keymap::default(), &commands);
         assert!(lines.iter().any(|l| l.contains("reindex") && l.trim_start().starts_with("g ")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("go-to-graph") && l.trim_start().starts_with("ctrl+g")), "{lines:?}");

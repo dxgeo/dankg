@@ -13,6 +13,7 @@ use dankg::graph::{query, resolve, view, EdgeKind, Graph, NodeId};
 use dankg::layout;
 use dankg::md::{fmt, Document};
 use dankg::render::{dot, html, json, mermaid};
+use dankg::tag;
 use dankg::tangle;
 use dankg::tui;
 use std::fmt::Write as _;
@@ -186,6 +187,21 @@ fn format_files(paths: &[String], check: bool) -> Result<bool, String> {
 /// of the two slugs) from a cosmetic one (nothing does), and separately
 /// reports whether the pair is `sibling` (same immediate parent) or
 /// differently-nested (`TitleCollision::sibling`, `graph/build.rs`).
+///
+/// A sixth pass, over every `dankg:tag` marker in the corpus
+/// (`tag::markers_in`), *does* gate the returned `bool`, on either of two
+/// findings: a `kind=` naming no `[kind.*]` section, or a `target=`
+/// (`tag.md`'s own design decision -- the tie to a node made explicit
+/// rather than merely positional) that no longer resolves back to the
+/// node the marker actually sits on. Both are unambiguously wrong, the
+/// same "two declared things failing to agree" severity the fourth pass
+/// already fails a build on, not a substring's weaker "go look."
+///
+/// A seventh pass, over every configured `[kind.*]`'s own `icon`
+/// (`tag::icon_may_break_alignment`), never gates the returned `bool`:
+/// getting an icon choice wrong costs a reader a misaligned column, not
+/// a broken reference, the same advisory severity the third and fifth
+/// passes already use.
 fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
@@ -348,6 +364,54 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
         }
     }
 
+    // Unlike the prose loop above, either problem here gates the returned
+    // `bool` (this function's own doc comment, sixth pass): there is no
+    // fuzzy interpretation under which a name nothing declares is fine, or
+    // under which a marker whose own `target=` no longer points back at it
+    // is fine -- the same "two declared things disagree" severity the
+    // file-dependency pass above already fails a build on.
+    let mut tag_checked = 0usize;
+    let mut tag_bad = 0usize;
+    for rel_path in &corpus.paths {
+        let Some((_, doc)) = files.get(rel_path) else { continue };
+        for (anchor_line, kind, target) in tag::markers_in(doc) {
+            tag_checked += 1;
+            if corpus.config.kind(&kind).is_none() {
+                tag_bad += 1;
+                eprintln!("bad-tag: {rel_path}:{anchor_line} kind={kind} -- not declared in any [kind.*] section");
+            }
+            // `target`, when present, is the tie back to the node this
+            // marker was actually written for (tag.md's own design
+            // decision) -- an edit that inserted something between them
+            // since, moving the marker onto a different node than it
+            // claims, is exactly what this catches that pure position
+            // alone cannot.
+            if let Some(target) = &target {
+                let still_matches = depends::resolve_target(rel_path, target)
+                    .and_then(|id| index_graph.node(&id))
+                    .is_some_and(|n| n.file == *rel_path && n.line == anchor_line);
+                if !still_matches {
+                    tag_bad += 1;
+                    eprintln!("bad-tag: {rel_path}:{anchor_line} target={target} -- no longer points back at this marker's own node");
+                }
+            }
+        }
+    }
+
+    // Advisory only (seventh pass, this function's own doc comment): a
+    // wide or colored icon costs a reader a misaligned column, not a
+    // broken reference.
+    let mut icons_checked = 0usize;
+    let mut icons_wide = 0usize;
+    for kind in corpus.config.kinds() {
+        let Some(icon) = &kind.icon else { continue };
+        icons_checked += 1;
+        if tag::icon_may_break_alignment(icon) {
+            icons_wide += 1;
+            eprintln!("wide-icon: [kind.{}] icon={icon} -- may render wider than one column, or in color", kind.name);
+        }
+    }
+
     diags.sort();
     diags.emit();
     eprintln!("root: {}", corpus.display);
@@ -360,7 +424,9 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     eprintln!(
         "{title_dupes} duplicate-title node(s), advisory ({title_dupes_referenced} referenced, {title_dupes_sibling} sibling)"
     );
-    Ok(unresolved == 0 && stale == 0 && filedep_issues.is_empty())
+    eprintln!("{tag_bad} bad of {tag_checked} dankg:tag marker(s)");
+    eprintln!("{icons_wide} of {icons_checked} configured icon(s) advisory-wide");
+    Ok(unresolved == 0 && stale == 0 && filedep_issues.is_empty() && tag_bad == 0)
 }
 
 fn graph(

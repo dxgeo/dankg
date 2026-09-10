@@ -1,0 +1,9 @@
+# A dedicated root for `dankg:tag`'s two hard-failure cases --
+# unknown.md (kind= names no [kind.*] section) and mismatch.md
+# (target= points at a different node than the marker sits on) --
+# (tests/tags.rs), kept separate from tags-corpus/ so that fixture's
+# own "everything here is valid" assertions never share a root with
+# a deliberately-invalid marker.
+
+[kind.task]
+icon = ☐

@@ -886,12 +886,273 @@ loses and is named in the warning.
 
 Running a command is `App::run_command`: look up the key's recorded
 block position, call `eval::run` (`tui::eval::run`, the identical
-function `run_selected_block` already calls), report the outcome on
-the status line, `reload`. `reload` also re-runs `load_commands`, so
-editing `commands.md` and reloading (any completed run does this
-already) picks up the change without restarting the session.
+function `run_selected_block` already calls), `reload`, then interpret
+the outcome. `reload` also re-runs `load_commands`, so editing
+`commands.md` and reloading (any completed run does this already)
+picks up the change without restarting the session. `reload` runs
+*before* the outcome is interpreted, not after -- a command's own
+`select:` line (below) only makes sense against the graph its own
+edits actually produced, not whatever `self.index` still held from
+before it ran.
 
 <!-- dankg:depends target=#decision-40-tui-custom-commands quote="A binding that collides with a built-in, or with another command in the same file, is refused individually rather than reverting the whole set the way `Keymap` reverts wholesale on a collision" -->
+
+**Added after shipping: a richer output protocol, opt-in per block.**
+A plain `key=` block's stdout is always shown raw, first non-blank
+line on the status line (`outcome_status`). A block that also carries
+`protocol=lines` gets its stdout scanned for three recognized
+prefixes instead (`tui::eval::scan_protocol_lines`): `select: target`
+moves the tree cursor, `status: message` replaces the status line
+outright, and `tag: target key=value ...` is node classification, its
+own paragraph below. Everything else in the same output -- an
+unprefixed line, or any line at all in a block without
+`protocol=lines` -- is not this protocol's concern and reaches the
+status line exactly as it always has.
+
+The attribute exists because the alternative -- scanning every
+`[tui] commands` block's own stdout for these prefixes unconditionally
+\-- would misread ordinary output that happens to start a line the
+same way (`git status`-style tools, a script's own debug `print`) as
+a control line instead of showing it, silently discarding exactly the
+text this feature exists to surface. `protocol=lines` is the same
+"explicit opt-in, not silent scanning" instinct `key=` itself already
+follows (decision 40's own rationale), applied one level deeper: a
+block earns the richer protocol only by asking for it.
+
+`target` resolves root-relative -- `depends::resolve_target` with an
+empty declaring file, reused rather than reimplemented, the same
+target grammar a `dankg:depends` marker already accepts. A running
+command has no "current file" the way a marker embedded in one
+specific corpus file does, so a bare `#slug` with no file at all
+simply fails to resolve, the same as any other target `self.index`
+does not contain. `select:` on an unresolved target is silently
+skipped rather than falling back to raw text: the block already opted
+into the protocol, so a stale or misspelled target is the protocol
+misfiring, not a case worth showing verbatim. `status:` gets no
+equivalent check -- almost any string is a "valid" status message --
+so its only defense is the attribute gate above.
+
+**Added after shipping: node classification via `tag:` lines, then
+revised twice more.** A `tag: target kind=value` line declares one
+node's own classification. The first cut kept it only on a new `App`
+field, `annotations: HashMap<NodeId, Annotation>`, gone the moment the
+TUI quit. That contradicts a principle this codebase already commits
+to: a result is "written back into the markdown, hash-tagged... file
+stays the source of truth" (decision 12, project.md). Revised:
+`tag:`'s target now gets a real `<!-- dankg:tag kind=value -->` marker
+written into its own file (`tag.rs`, new module) -- `eval::result`'s
+own "write it into the file, don't just remember it" policy, reused
+rather than reinvented for a different output-line convention.
+
+<!-- dankg:depends target=#decision-12-results quote="File stays the source of truth." -->
+
+The marker sits immediately *before* the node it classifies, the
+opposite of where `eval::result`'s own marker sits. Two reasons: a
+classification describes a node the way a caption describes a photo,
+with no inherent "after" the way a computed result naturally follows
+the code that produced it; and "before" can never collide with
+`eval::result`'s own claim on the line right after a block's closing
+fence, so a block that is both evaluated and classified never needs a
+rule for which marker wins that spot. `tag::locate_existing` and
+`tag::write_back` find and replace a node's own marker by exactly the
+line `graph::model::Node::line` already reports for it -- a heading's
+single line, or a block's own opening fence -- so heading and block
+targets need no separate logic. A `Relation` node has neither a real
+file nor a real line (its own namespace is a synthetic `db:NAME`,
+*Provenance without a driver*), so nothing here ever tries to attach
+one there.
+
+**Revised once more: the icon moves to config, and `kind=` becomes a
+checked vocabulary.** The marker above still carried its own `icon=`
+when this first shipped. Two problems: a reader tagging fifty nodes
+`kind=task` repeated the same icon fifty times, with nowhere single to
+change it later; and `kind=` was an unchecked free string, so
+`kind=tsak` just silently classified nothing, with no way to catch it.
+Both are fixed by a new `[kind.<name>]` config family
+(`Config::kinds`/`kind`, `config.rs`, the exact `langs()`/`dbs()`
+template), keyed by the same name a `tag:` line's `kind=` already
+names:
+
+```
+[kind.task]
+icon = ☐
+```
+
+The marker itself shrinks to `<!-- dankg:tag kind=value -->` -- with
+nothing else left to write, a fresh `kind=` always replaces whatever
+a node's own marker said before; there is no longer anything to merge.
+A `[kind.*]` section with no `icon` at all is still a real, declared
+name, just an iconless one.
+
+`App::compute_tags` is the read side: once per load/reload, alongside
+`deps`, it scans every corpus file for `dankg:tag` markers
+(`tag::markers_in`), resolves each one back to the `NodeId` at that
+file and line, and resolves its own icon by looking `kind` up in
+`config.kind()` -- purely additive metadata, kept entirely apart from
+`graph::model::NodeKind`, which stays exactly as it is. `badge_for`
+appends a node's own resolved icon, if any, to its badge -- the one
+new read point this needed; `panel_rows` did not turn out to need one.
+
+Centralizing the vocabulary is what makes it checkable: `dankg check`
+gained a sixth pass, over every `dankg:tag` marker in the corpus,
+failing the exit code when a `kind=` names no `[kind.*]` section --
+the same severity a `produces=`/`reads=file:PATH` mismatch (decision
+33\) already gets, not a `dankg:depends` substring miss's weaker
+advisory treatment. A seventh, advisory-only pass checks every
+configured `[kind.*]`'s own `icon` with `tag::icon_may_break_alignment`
+\-- a best-effort guard against exactly the bug this codebase already
+hit once by hand: an hourglass, `⌛`, chosen as the needs-run badge
+glyph before turning out to default to emoji presentation (wide,
+colored), rejected in favor of `↻` (§7's own decisions table).
+Deliberately narrow rather than a real Unicode `Emoji_Presentation`
+table -- a block-range guess is provably wrong even for a glyph
+already shipped here (`✗`, in the same Dingbats block as several
+genuinely emoji-default characters, is itself text-presentation).
+
+**Revised a third time: `target=`, once positional placement's own
+drift problem turned out to matter more than its spacing.** The
+marker's tie to its node was purely positional -- whichever heading or
+block happened to sit right after it. Insert a new heading between an
+existing marker and the node it was meant for, an entirely ordinary
+edit, and the marker silently reattaches to the wrong node; nothing
+had ever recorded what it actually meant, so nothing notices.
+
+Tightening the marker's own adjacency instead was tried first and
+rejected, by actually running it rather than reasoning about it: a
+marker with no blank line *before* the node it describes makes that
+node vanish from the graph entirely (`starts_html_block`'s own
+`gather_passthrough` swallows every following non-blank line as raw
+comment text, heading syntax included, until the next blank line).
+Putting it on the heading's own line instead
+(`## Todo <!-- dankg:tag kind=task -->`) is worse: the comment folds
+into the heading's own inline content, corrupting its title and its
+slug (`## Todo <!-- dankg:tag kind=task -->` slugifies to
+`todo----dankgtag-kindtask---`), and the same move for a block breaks
+its fence's own info-string parsing into four separate warnings.
+
+The fix that actually holds: an explicit `target=`,
+`depends::resolve_target`'s own fragment shape -- `dankg:depends`'s
+own sibling convention, reused rather than reinvented. `write_back`
+always supplies one, from the already-resolved `NodeId`'s own slug;
+parsing tolerates its absence, so a hand-written marker without one
+still works exactly as before, purely positional, unverified. `dankg check`'s sixth pass gained the real verification this enables:
+resolve a marker's own `target=` and confirm it still points back at
+the exact node the marker physically sits on. A mismatch fails the
+build, the same severity an unknown `kind=` already gets -- confirmed
+by hand, tagging a node and then inserting a heading between the
+marker and its target: `dankg check` reports
+`target=#two -- no longer points back at this marker's own node` and
+fails, exactly the drift a purely positional marker would have missed.
+
+`Filter` gained a `Tag(String)` variant naming a `kind=` some marker
+has actually set, and lost `Copy` in the process -- a `String` payload
+made that unavoidable. Its full option list is no longer the fixed
+four-variant constant the filter menu used to cycle through:
+`App::filter_options` rebuilds it from `self.annotations` every time
+the menu opens or moves, the four built-ins first, then one `Tag` per
+distinct kind, alphabetical -- the same "just rebuild it, cheap at
+this corpus's size" reasoning `filter_membership` already uses. A kind
+nothing has tagged yet simply is not a menu option; there is no way to
+select an empty filter ahead of time.
+
+Classification only ever runs on demand, bound to a command's own
+`key=` -- the same cadence `select:`/`status:` already run under.
+Nothing here reclassifies automatically on `reload()`; that would need
+its own config naming which command is "the classifier," and on-demand
+already covers "let me redefine my own node types" without it.
+
+One correctness detail this revision needed that the in-memory version
+never did: a single run emitting two `tag:` lines for the *same*
+target has to see what the first write just did, including the
+node's own anchor line shifting by the two lines that write inserted.
+`App::apply_protocol_output` reloads immediately after *every*
+successful write, not once at the end, so the second write always
+resolves its target against a graph that already reflects the first.
+
+### `keys.tag`: classifying a node without writing a command
+
+Everything above needs a `protocol=lines` command already written and
+bound. `keys.tag` (default `t`) is the direct route to the same
+mechanism: a built-in keybinding, not a config-driven extensibility
+point, the same category `keys.eval`/`keys.reset`/`keys.breadcrumb`
+already are, not another `[tui] commands` binding.
+
+Pressing it opens a picker over `Config::kinds()` -- every declared
+`[kind.*]`, in config order -- for the selected node; `enter` applies
+the highlighted one directly, the exact same `write_tag_for` (below)
+`tag:` output lines already call. `n`, while picking, switches to a
+two-step text prompt instead: a name, then an optional icon. A name
+that already matches a declared kind skips the icon step and applies
+that kind directly -- typing an existing name through `n` is just a
+slower way to pick it, not an error. A genuinely new name declares
+`[kind.<name>]` by appending to `.dankg/config` (`App::create_kind`,
+creating the `.dankg` directory too if this is the first thing ever
+written into it) before applying it. Re-tagging an already-tagged
+node overwrites rather than accumulating, the same "a fresh `kind=`
+always replaces whatever was there" behavior `write_tag_for` already
+has for any other caller.
+
+**The symbol question, decided on purpose by not answering it inside
+the TUI.** An icon has effectively unlimited options -- the entire
+`kind=`-classification is at heart still just Unicode, and no fixed
+list could ever be complete. Building a picker for that (a glyph
+grid, a search box) would multiply the TUI's own limited Unicode
+rendering into a bigger risk than the feature is worth, not shrink
+it -- terminal rendering of arbitrary glyphs is *already* the reason
+`icon_may_break_alignment` exists. So the icon prompt is one line of
+free text, exactly the same bounded buffer `/`-search already uses,
+and nothing more: whatever the reader's own OS or terminal can already
+input (an emoji picker, an IME, paste) is the actual answer to
+"nearly endless options," not a feature DanKG builds. `tag:: icon_may_break_alignment` still runs on whatever they typed, live, the
+moment they confirm it -- the same advisory severity `dankg check`
+already uses, just surfaced immediately on the status line instead of
+waiting for the next run of it. Leaving the icon prompt empty is
+equally valid: a `[kind.*]` section with no `icon` is still a real,
+checkable name, the same as one hand-written directly into config.
+
+`App::create_kind` appends rather than re-serializing the whole parsed
+config -- the same "a targeted edit, not a full re-emit" preference
+`tag::write_back` already has over reconstructing an entire document
+from its own AST.
+
+### A crash disguised as a quit
+
+Tagging `draft` in `example/example_1` -- a dangling link's own
+placeholder node, `index.md` linking to `scratch/draft.md`, which
+`.dankgignore` excludes from the corpus walk -- ended the whole
+`dankg tui` session outright, with nothing on screen to say why. A
+panic mid-raw-mode unwinds the stack; `RawMode`'s own `Drop` restores
+the terminal on the way out regardless of how the unwind started, so
+the result looks identical to pressing `q`. Reported exactly that way:
+"pressing enter on a tag assignment just quits dankg tui."
+
+The path there was almost an accident. `graph::resolve::placeholder`
+gives a dangling node `line: 0` always, never a real source line --
+but `write_tag_for` only refused a `Relation` node, never an
+unresolved one, so it read on. It only got as far as it did because
+`scratch/draft.md` happens to be a real file on disk, just excluded
+from the corpus *walk*, not deleted -- `read_to_string` succeeded
+where a placeholder naming a genuinely nonexistent path would have
+failed immediately and harmlessly. `node.line: 0` then reached
+`tag::write_back`'s own `anchor_line - 1` on a `u32`. That underflowed
+to just under `u32::MAX`, and the resulting splice index -- nowhere
+near any real line in the file -- panicked.
+
+The arithmetic was never the real bug. `write_tag_for` already refused
+a `Relation` node because it has no real file or line to attach a
+marker to; an unresolved node has exactly the same problem, for the
+same underlying reason, and needed the same guard. `open_tag_menu`
+gained the identical check, so the menu never even opens for one
+(the read result, "an unresolved node can't be tagged" on the status
+line) rather than opening onto an action that could only ever fail.
+
+Fixed alongside a second, unrelated gap noticed while looking at the
+same node: an unresolved node looked completely indistinguishable
+from a real one in the tree. `badge_for` gained a leading `∅` for
+`!node.resolved`, ahead of every other glyph it already reports --
+the same `Node.resolved` flag `dankg check`'s own unresolved-link
+count already reads, just surfaced in the tree instead of only at the
+CLI.
 
 ### Discoverability outside the TUI
 
@@ -1079,6 +1340,10 @@ Each tree row's compact badge (`→1 ←2 ⚭`) summarizes the same
 `links_for` result the panel shows in full for the *selected* node --
 at-a-glance scanning for every *other* row, so a reader does not have to
 select something just to learn whether it connects to anything at all.
+A leading `∅`, ahead of every other glyph, marks a row that is not real
+content at all: the same placeholder a dangling link resolves to
+everywhere else in DanKG, the one `Node.resolved: bool` also governs
+and `dankg check`'s own unresolved-link count also reports.
 
 ## Dependency surfacing
 

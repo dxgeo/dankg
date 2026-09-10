@@ -1,0 +1,12 @@
+# A dedicated root for the `[kind.*]`/`dankg:tag` checks
+# (tests/tags.rs), isolated from tests/data/corpus/ for the same
+# reason tests/data/filedeps-corpus/ already is: these fixtures must
+# never perturb the golden dumps built over that one.
+
+[kind.task]
+icon = ☐
+
+[kind.done]
+
+[kind.wide]
+icon = ⌛

@@ -15,6 +15,12 @@ of it.
 //! cancel. Delegates the actual run to `eval::session::run_one`, the same
 //! function the CLI's own multi-target loop uses, so there is exactly one
 //! answer to "what does running one block actually do."
+//!
+//! `scan_protocol_lines`, below, is the other half of `[tui] commands`:
+//! a `protocol=lines` block's own captured stdout is not free text but
+//! `select:`/`status:`/`tag:` control lines (eval-custom-plan.md). This
+//! module only recognizes them; `App` is the one place with a graph to
+//! resolve a target against and a tree cursor to move.
 
 use super::input;
 use crate::config::Config;
@@ -77,23 +83,27 @@ pub enum Outcome {
 
 `keyed_commands` is `[tui] commands`'s own reader: every top-level
 block in the named file carrying a `key=` that `input::parse`
-recognises, as `(position, key, name)`. A `key=` that does not parse --
-more than one character, an unrecognised word -- is skipped here, with
-nothing surfaced: the same best-effort stance `blocks_in_section` above
-already takes for a file it cannot read at all. A key that parses but
-collides with a built-in, or with another command in the same file, is
-a different kind of problem -- `App::load` is the one place that also
-holds `Keymap` and the rest of this file's own bindings to check
-against, so refusing those, loudly, is its job, not this function's.
+recognises, as `(position, key, name, protocol_lines)`. A `key=` that
+does not parse -- more than one character, an unrecognised word -- is
+skipped here, with nothing surfaced: the same best-effort stance
+`blocks_in_section` above already takes for a file it cannot read at
+all. A key that parses but collides with a built-in, or with another
+command in the same file, is a different kind of problem -- `App::load`
+is the one place that also holds `Keymap` and the rest of this file's
+own bindings to check against, so refusing those, loudly, is its job,
+not this function's.
 
 ```rust name=keyed_commands path=tui/eval.rs
 /// Every top-level block in `path` carrying a `key=` `input::parse`
-/// recognises, as `(position, key, name)`, in document order. `position`
-/// counts among *all* of `path`'s named top-level blocks, exactly as
-/// `plan_for_index` expects it -- the same convention
-/// `blocks_in_section` already follows. Read fresh from disk each time,
-/// since the file may have changed since the graph was last loaded.
-pub fn keyed_commands(path: &str) -> Vec<(usize, input::Key, String)> {
+/// recognises, as `(position, key, name, protocol_lines)`, in document
+/// order. `position` counts among *all* of `path`'s named top-level
+/// blocks, exactly as `plan_for_index` expects it -- the same convention
+/// `blocks_in_section` already follows. `protocol_lines` is the block's
+/// own `protocol=lines` attribute, carried straight through so
+/// `App::run_command` knows whether to scan the run's output at all.
+/// Read fresh from disk each time, since the file may have changed
+/// since the graph was last loaded.
+pub fn keyed_commands(path: &str) -> Vec<(usize, input::Key, String, bool)> {
     let Ok(source) = fs::read_to_string(path) else { return Vec::new() };
     let mut diags = Diags::new(path);
     let doc = Document::parse(&source, &mut diags);
@@ -102,7 +112,7 @@ pub fn keyed_commands(path: &str) -> Vec<(usize, input::Key, String)> {
         .enumerate()
         .filter_map(|(position, b)| {
             let key = input::parse(b.key?)?;
-            Some((position, key, b.name.to_string()))
+            Some((position, key, b.name.to_string(), b.protocol_lines))
         })
         .collect()
 }
@@ -129,6 +139,82 @@ pub fn run(path: &str, config: &Config, position: usize) -> Outcome {
         Ok(summary) => Outcome::Ok(summary.stdout),
         Err(e) => Outcome::Error(e),
     }
+}
+```
+
+## The `protocol=lines` output convention
+
+A `protocol=lines` block's own stdout is not free text: it is a small
+set of recognized line prefixes, `select:`/`status:`/`tag:`
+(eval-custom-plan.md's design decision on guarding this against
+accidental collisions -- the block opted in, so a line here is trusted
+to mean what it says). Every other line, and every line in a block
+that never opted in at all, is not this module's concern; the caller's
+own raw-text fallback (`outcome_status`, `tui/app.rs`) already covers
+it.
+
+`select:`/`tag:` carry a *target*, resolved later by the caller
+(`depends::resolve_target`, relative to the command's own file) --
+this module only extracts the raw text, since it has no graph to
+resolve against. `select:` keeps only its *last* occurrence: a script
+emitting more than one is presumably narrowing down to a final answer,
+not asking for two things at once. `status:` keeps only its *first*:
+`outcome_status`'s own existing precedent for "which line wins" when a
+run says more than one thing. `tag:` lines all accumulate, in order,
+since each one can name a different node.
+
+```rust name=protocol_output path=tui/eval.rs
+/// One `target`'s worth of `tag:` attributes, `key=value` pairs in the
+/// order they appeared. `App::apply_protocol_output` is the one reader:
+/// it updates only the attributes named here on that node's own
+/// annotation, leaving any other attribute (set by an earlier `tag:`
+/// line for the same node) untouched.
+pub type TagAttrs = Vec<(String, String)>;
+
+/// What `scan_protocol_lines` found in a `protocol=lines` block's own
+/// stdout. `select`/`status` are raw, unresolved text -- `App` is the
+/// one place with a graph to resolve `select`'s target against.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProtocolOutput {
+    pub select: Option<String>,
+    pub status: Option<String>,
+    pub tags: Vec<(String, TagAttrs)>,
+}
+
+/// `key=value key=value ...`, space-separated, in order. Not
+/// `InfoString`'s own attribute parser: that one also handles a bare
+/// language word and quoting an info string never needs. A token with
+/// no `=` is skipped rather than rejecting the whole line -- consistent
+/// with this convention's own "a block opted in, trust it" stance, but
+/// with nothing crucial riding on one malformed token, there is no
+/// reason to throw away every other one alongside it.
+fn parse_attrs(rest: &str) -> TagAttrs {
+    rest.split_whitespace().filter_map(|tok| tok.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+/// Every `select:`/`status:`/`tag:` line in `text`, in the order they
+/// appeared. A line is only recognized by its own exact prefix,
+/// followed immediately by `:` -- `select:`, not `selects:` or
+/// `select :`. Everything else is not this convention's concern at
+/// all.
+pub fn scan_protocol_lines(text: &str) -> ProtocolOutput {
+    let mut out = ProtocolOutput::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("select:") {
+            out.select = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("status:") {
+            if out.status.is_none() {
+                out.status = Some(rest.trim().to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("tag:") {
+            let rest = rest.trim();
+            if let Some((target, attrs)) = rest.split_once(char::is_whitespace) {
+                out.tags.push((target.to_string(), parse_attrs(attrs)));
+            }
+        }
+    }
+    out
 }
 ```
 
@@ -185,14 +271,21 @@ mod tests {
             "```sh name=reindex key=g\n:\n```\n\n```sh name=bad key=pageup\n:\n```\n\n```sh name=plain\n:\n```\n",
         );
         let found = keyed_commands(&path);
-        assert_eq!(found, vec![(0, input::Key::Char('g'), "reindex".to_string())]);
+        assert_eq!(found, vec![(0, input::Key::Char('g'), "reindex".to_string(), false)]);
     }
 
     #[test]
     fn keyed_commands_recognises_a_ctrl_combination() {
         let path = scratch_file("g.md", "```sh name=go key=ctrl+g\n:\n```\n");
         let found = keyed_commands(&path);
-        assert_eq!(found, vec![(0, input::Key::Ctrl('g'), "go".to_string())]);
+        assert_eq!(found, vec![(0, input::Key::Ctrl('g'), "go".to_string(), false)]);
+    }
+
+    #[test]
+    fn keyed_commands_carries_protocol_lines_through() {
+        let path = scratch_file("p.md", "```sh name=go key=g protocol=lines\n:\n```\n");
+        let found = keyed_commands(&path);
+        assert_eq!(found, vec![(0, input::Key::Char('g'), "go".to_string(), true)]);
     }
 
     #[test]
@@ -227,6 +320,47 @@ mod tests {
         let path = scratch_file("d.md", "```sh name=a\n:\n```\n");
         let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
         assert!(matches!(run(&path, &config, 5), Outcome::Error(_)));
+    }
+
+    #[test]
+    fn scan_protocol_lines_reads_all_three_prefixes() {
+        let out = scan_protocol_lines("select: a.md#one\nstatus: done\ntag: a.md#one kind=task icon=x\nnoise\n");
+        assert_eq!(out.select, Some("a.md#one".to_string()));
+        assert_eq!(out.status, Some("done".to_string()));
+        assert_eq!(out.tags, vec![("a.md#one".to_string(), vec![("kind".to_string(), "task".to_string()), ("icon".to_string(), "x".to_string())])]);
+    }
+
+    #[test]
+    fn scan_protocol_lines_keeps_the_last_select_and_the_first_status() {
+        let out = scan_protocol_lines("select: a.md#one\nstatus: first\nselect: a.md#two\nstatus: second\n");
+        assert_eq!(out.select, Some("a.md#two".to_string()), "last select wins");
+        assert_eq!(out.status, Some("first".to_string()), "first status wins");
+    }
+
+    #[test]
+    fn scan_protocol_lines_ignores_unrecognized_text() {
+        let out = scan_protocol_lines("just some ordinary output\nstatus:\n");
+        assert_eq!(out.select, None);
+        assert_eq!(out.status, Some(String::new()));
+        assert!(out.tags.is_empty());
+    }
+
+    #[test]
+    fn scan_protocol_lines_drops_a_tag_line_with_no_attrs() {
+        let out = scan_protocol_lines("tag: a.md#one\n");
+        assert!(out.tags.is_empty(), "nothing to set, so nothing worth keeping");
+    }
+
+    #[test]
+    fn scan_protocol_lines_accumulates_every_tag_line() {
+        let out = scan_protocol_lines("tag: a.md#one kind=task\ntag: a.md#two kind=doc\n");
+        assert_eq!(
+            out.tags,
+            vec![
+                ("a.md#one".to_string(), vec![("kind".to_string(), "task".to_string())]),
+                ("a.md#two".to_string(), vec![("kind".to_string(), "doc".to_string())]),
+            ]
+        );
     }
 }
 ```
