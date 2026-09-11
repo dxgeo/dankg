@@ -1408,7 +1408,7 @@ that failed to resolve, and `↻N` for one that resolved but has not
 actually run. `xdeps=` alone never triggers a run, so that last case
 is a real, expected state, not a corpus error.
 
-<!-- dankg:depends target=dependency-surfacing.md#e-unresolved-but-correct----needs-to-run-not-broken quote="An `xdeps=` target, block- or `table:`-targeted, never does: it is checked, not run." -->
+<!-- dankg:depends target=plans/dependency-surfacing.md#e-unresolved-but-correct----needs-to-run-not-broken quote="An `xdeps=` target, block- or `table:`-targeted, never does: it is checked, not run." -->
 
 Five matching panel rows (`PanelRow::DepOut`/`DepIn`/`FileDep`/
 `DepBroken`/`DepPending`) carry the same facts in full for the

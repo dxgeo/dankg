@@ -1,6 +1,7 @@
 /target
 .DS_Store
 __pycache__/
+/CLAUDE.md
 
 # Cache entries are derived data, never committed. The leading `**/` matters:
 # a pattern with a slash in the middle anchors to this file's directory, so a
