@@ -226,6 +226,24 @@ pub fn xdep_hashes(
     chain_xdep_hashes(blocks, files, config, graph, chain, &mut visiting, cache)
 }
 
+/// Whether `chain`'s target is stale against `stored_hash`, the value
+/// already read from its `<!-- dankg:result -->` marker. `graph`/`cache`
+/// pass straight through to `xdep_hashes`; see its own doc comment for
+/// what each means.
+pub fn is_stale(
+    files: &Files,
+    config: &Config,
+    blocks: &[BlockRef],
+    graph: Option<&Graph>,
+    chain: &[BlockRef],
+    hash_template: &str,
+    stored_hash: u64,
+    cache: &mut std::collections::HashMap<usize, Result<u64, String>>,
+) -> Result<bool, String> {
+    let xdeps = xdep_hashes(files, config, blocks, graph, chain, cache)?;
+    Ok(expected_hash(chain, hash_template, &xdeps) != stored_hash)
+}
+
 /// `failed` marks a non-zero exit or a timeout. The output is still
 /// stored (architecture.md, Execution: "a non-zero exit stores the
 /// output and marks the result failed"), just flagged rather than
@@ -591,6 +609,66 @@ mod tests {
         let a = blocks.iter().find(|b| b.name == "a").unwrap();
         let err = xdep_hashes(&files, &config, &blocks, None, std::slice::from_ref(a), &mut HashMap::new()).unwrap_err();
         assert!(err.contains("cycle"), "{err:?}");
+    }
+
+    #[test]
+    fn is_stale_is_false_when_a_fresh_recomputation_matches() {
+        let d = doc("```sh name=a\necho hi\n```\n");
+        let blocks = top_level_blocks(&d, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
+        let h = expected_hash(&chain, "sh {file}", &[]);
+        let files = Files::new(std::env::temp_dir());
+        assert!(!is_stale(&files, &Config::none(), &blocks, None, &chain, "sh {file}", h, &mut HashMap::new()).unwrap());
+    }
+
+    #[test]
+    fn is_stale_is_true_when_a_fresh_recomputation_differs() {
+        let d = doc("```sh name=a\necho hi\n```\n");
+        let blocks = top_level_blocks(&d, "t.md");
+        let chain = plan_for(&blocks, "t.md", "a").unwrap();
+        let files = Files::new(std::env::temp_dir());
+        assert!(is_stale(&files, &Config::none(), &blocks, None, &chain, "sh {file}", 0, &mut HashMap::new()).unwrap());
+    }
+
+    #[test]
+    fn is_stale_folds_in_an_xdep_hash() {
+        let dir = scratch_dir("is-stale-xdep", "```sh name=setup\necho hi\n```\n");
+        let setup_doc = Document::parse(&std::fs::read_to_string(dir.join("t.md")).unwrap(), &mut Diags::new("t"));
+        let setup_blocks = top_level_blocks(&setup_doc, "t.md");
+        let setup_chain = plan_for(&setup_blocks, "t.md", "setup").unwrap();
+        let setup_hash = expected_hash(&setup_chain, "sh {file}", &[]);
+        let content = format!(
+            "```sh name=setup\necho hi\n```\n\n<!-- dankg:result name=setup hash={} -->\n\n```\nhi\n```\n\n```sh name=top xdeps=setup\n:\n```\n",
+            hash::hex(setup_hash)
+        );
+        std::fs::write(dir.join("t.md"), content).unwrap();
+
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("t.md", &mut diags).unwrap();
+        let blocks = files.all_blocks();
+        let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        let chain = std::slice::from_ref(top);
+        let correct = expected_hash(chain, "sh {file}", &[setup_hash]);
+
+        assert!(!is_stale(&files, &config, &blocks, None, chain, "sh {file}", correct, &mut HashMap::new()).unwrap());
+        assert!(is_stale(&files, &config, &blocks, None, chain, "sh {file}", correct.wrapping_add(1), &mut HashMap::new()).unwrap());
+    }
+
+    #[test]
+    fn is_stale_propagates_an_xdep_error() {
+        let dir = scratch_dir("is-stale-xdep-err", "```sh name=setup\necho hi\n```\n\n```sh name=top xdeps=setup\n:\n```\n");
+        let mut files = Files::new(dir);
+        let mut diags = Diags::new("t");
+        files.discover("t.md", &mut diags).unwrap();
+        let blocks = files.all_blocks();
+        let config = Config::parse("[lang.sh]\ncommand = sh {file}\n", &mut Diags::new("t"));
+        let top = blocks.iter().find(|b| b.name == "top").unwrap();
+        let chain = std::slice::from_ref(top);
+        let err = is_stale(&files, &config, &blocks, None, chain, "sh {file}", 0, &mut HashMap::new()).unwrap_err();
+        assert!(err.contains("setup"), "{err:?}");
+        assert!(err.contains("run it first"), "{err:?}");
     }
 
     #[test]

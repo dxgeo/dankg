@@ -68,14 +68,15 @@ for you -- see [`init`](#init-scaffold-a-new-corpus) below.
 ## Commands
 
 ```
-dankg graph <path>... [--format <fmt>] [--depth N | --all] [-o <file>]
+dankg graph <path>... [--format <fmt>] [--depth N | --all] [--live] [-o <file>]
 dankg index [<path>]  [--no-cache]
 dankg fmt   <path>... [--check]
 dankg tui   <path>... [--depth N | --all] [--no-cache]
-dankg eval  <path> [--block <name> | --all | --each] [--yes] [--no-write]
+dankg eval  <path> [--block <name> | --all | --each] [--yes] [--no-write] [--if-stale]
 dankg eval  [<path>...] --list [--no-cache]
 dankg check [<path>...] [--no-cache]
 dankg tangle <path>... --lang <lang> [-o <dir>] [--no-cache]
+dankg init  [<path>]
 ```
 
 Run `dankg --help` for the full option reference. It stays in sync with
@@ -203,6 +204,7 @@ print("hello")
 ```sh
 dankg eval notes/index.md --block greet     # prints the plan, asks, runs, writes the result back
 dankg eval notes/index.md --block greet --yes --no-write   # skip the prompt, don't write
+dankg eval notes/index.md --block greet --yes --if-stale   # skip it if it's already up to date
 dankg eval notes/index.md --list            # list every named block without running anything
 ```
 

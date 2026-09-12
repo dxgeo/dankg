@@ -26,6 +26,7 @@ use crate::config::Config;
 use crate::diag::Diags;
 use crate::graph::index::{self, Corpus};
 use crate::graph::resolve;
+use crate::graph::Graph;
 use crate::md::{Document, Inline};
 use std::fmt::Write as _;
 use std::fs;
@@ -58,19 +59,19 @@ pub struct RunSummary {
     pub timed_out: bool,
 }
 
-/// `dankg eval <path> [--block NAME | --all | --list] [--yes] [--no-write]`.
-/// `--list` walks whatever was named as a corpus (`list`, below). The
-/// other two targets need exactly one path in `paths` (the CLI
-/// guarantees this) and run through `run_single`, reading and
+/// `dankg eval <path> [--block NAME | --all | --list] [--yes] [--no-write]
+/// [--if-stale]`. `--list` walks whatever was named as a corpus (`list`,
+/// below). The other two targets need exactly one path in `paths` (the
+/// CLI guarantees this) and run through `run_single`, reading and
 /// re-parsing just that file. This is not the whole corpus the way
 /// `graph`/`index`/`tui` do, since `deps=` only resolves within one
 /// file (decision 19).
-pub fn run(paths: &[String], target: &EvalTarget, yes: bool, no_write: bool, cache: bool) -> Result<(), String> {
+pub fn run(paths: &[String], target: &EvalTarget, yes: bool, no_write: bool, if_stale: bool, cache: bool) -> Result<(), String> {
     if matches!(target, EvalTarget::List) {
         return list(paths, cache);
     }
     let path = paths.first().ok_or("`eval` needs a path")?;
-    run_single(path, target, yes, no_write)
+    run_single(path, target, yes, no_write, if_stale)
 }
 
 /// The root and `path`'s own root-relative form. This is what `Files`
@@ -103,7 +104,7 @@ across every write-back in the loop, since a result marker is never
 itself a named block.
 
 ```rust name=run_single path=eval/session.rs
-fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Result<(), String> {
+fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool, if_stale: bool) -> Result<(), String> {
     let (root, entry_file) = locate(path);
     let mut diags = Diags::new("dankg");
 
@@ -116,6 +117,13 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Res
     diags.sort();
     diags.emit();
 
+    // `--if-stale`'s own precheck (below) needs the whole corpus exactly
+    // when a chain reaches a `table:` xdep, the same condition `run_one`
+    // already tests for. Without `--if-stale`, nothing here ever needs
+    // more than `entry_file`'s own discovery, so the common case pays
+    // nothing extra.
+    let (files, graph) = if if_stale { corpus_graph_if_needed(path, files)? } else { (files, None) };
+
     let blocks = files.all_blocks();
     let chains: Vec<Vec<BlockRef>> = match target {
         EvalTarget::List => unreachable!("dispatched to list() in run()"),
@@ -127,6 +135,39 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool) -> Res
         eprintln!("nothing to run: {path} has no named top-level blocks");
         return Ok(());
     }
+
+    // `--if-stale`: the one gate that runs before the plan is ever
+    // printed (decision 9's "print, then ask" order stays intact for
+    // whatever survives this). A target with no recorded result yet has
+    // nothing to compare against, so it always counts as needing to run;
+    // `is_stale` is the same comparison `check` already makes.
+    let chains = if if_stale {
+        let (_, doc) = files.get(&entry_file).expect("entry_file was just discovered above");
+        let mut xdep_cache = std::collections::HashMap::new();
+        let mut stale_chains = Vec::new();
+        for chain in chains {
+            let t = chain.last().expect("plan_for/plan_all/plan_each never return an empty chain");
+            let up_to_date = match result::recorded_hash(doc, t.index, t.name) {
+                None => false,
+                Some(stored) => {
+                    let hash_template = result::hash_template_for(&config, &chain)?;
+                    !result::is_stale(&files, &config, &blocks, graph.as_ref(), &chain, &hash_template, stored, &mut xdep_cache)?
+                }
+            };
+            if up_to_date {
+                eprintln!("`{}` is already up to date, skipping", t.name);
+            } else {
+                stale_chains.push(chain);
+            }
+        }
+        if stale_chains.is_empty() {
+            eprintln!("nothing to run: every target is already up to date");
+            return Ok(());
+        }
+        stale_chains
+    } else {
+        chains
+    };
 
     // The plan is always printed before anything runs (decision 9), and
     // every chain's interpreter is resolved up front too. Eval either
@@ -333,6 +374,37 @@ fn list_blocks(path: &str, blocks: &[BlockRef], doc: &Document, config: &Config)
 }
 ```
 
+`xdeps=table:NAME` (decision 35) resolves against the whole corpus's
+own `Produces` edges, not just whatever `deps=`/`xdeps=` chains one
+file's own discovery happened to reach -- a relation belongs to a
+database, not to whichever file's chain found it first. Building that
+corpus context costs a full walk (`index::load` + `resolve::resolve`,
+the same pair `main::check_cmd` already pays once per run), so
+`corpus_graph_if_needed` only pays it when a chain actually reaches a
+`table:` entry, shared by `run_one` and `run_single`'s own
+`--if-stale` precheck so the two agree, by construction, about when
+the wider corpus is actually necessary.
+
+```rust name=corpus_graph_if_needed path=eval/session.rs
+/// `files` unchanged and `None` when nothing it already holds reaches a
+/// `table:` xdep -- the common case stays exactly as file-scoped and
+/// cheap as it always was (decision 19). Otherwise, a fresh whole-corpus
+/// `Files` plus its resolved `Graph`, for `xdep_hashes` to resolve a
+/// `table:` entry against.
+fn corpus_graph_if_needed(path: &str, files: Files) -> Result<(Files, Option<Graph>), String> {
+    let needs_corpus = files.all_blocks().iter().any(|b| !plan::table_xdeps(b).is_empty());
+    if !needs_corpus {
+        return Ok((files, None));
+    }
+    let mut corpus_diags = Diags::new("dankg");
+    let corpus = index::load(&[path.to_string()], true, &mut corpus_diags)?;
+    let mut files = Files::new(corpus.root.clone());
+    files.load_all(&corpus.paths, &mut corpus_diags);
+    let graph = resolve::resolve(&corpus.files, &mut corpus_diags);
+    Ok((files, Some(graph)))
+}
+```
+
 `run_one` identifies its target purely by *position*, never by name,
 for the same reason `run_single`'s own loop does above. Decision 22
 scoped name uniqueness to a heading, so a caller re-resolving by name
@@ -369,25 +441,7 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
     let mut files = Files::new(root);
     files.discover(&entry_file, &mut diags)?;
 
-    // `xdeps=table:NAME` (decision 35) resolves against the whole
-    // corpus's own `Produces` edges, not just whatever `deps=`/`xdeps=`
-    // chains this one file's own discovery happened to reach -- a
-    // relation belongs to a database, not to whichever file's chain
-    // found it first. Building that corpus context costs a full walk
-    // (`index::load` + `resolve::resolve`, the same pair `main::
-    // check_cmd` already pays once per run), so it only happens when
-    // something here actually needs it, keeping the common case exactly
-    // as file-scoped and cheap as it already was (decision 19).
-    let needs_corpus = files.all_blocks().iter().any(|b| !plan::table_xdeps(b).is_empty());
-    let graph = if needs_corpus {
-        let mut corpus_diags = Diags::new("dankg");
-        let corpus = index::load(&[path.to_string()], true, &mut corpus_diags)?;
-        files = Files::new(corpus.root.clone());
-        files.load_all(&corpus.paths, &mut corpus_diags);
-        Some(resolve::resolve(&corpus.files, &mut corpus_diags))
-    } else {
-        None
-    };
+    let (files, graph) = corpus_graph_if_needed(path, files)?;
 
     let blocks = files.all_blocks();
     let chain = plan::plan_for_index(&blocks, &entry_file, position).map_err(|e| e.to_string())?;
@@ -738,6 +792,71 @@ mod tests {
         let path = scratch_file("c.md", "```python name=a\n:\n```\n");
         let config = Config::none();
         assert!(run_one(path.to_str().unwrap(), &config, 0, false).unwrap_err().contains("no configured language"));
+    }
+
+    /// `run_single` loads `[lang.*]` from `.dankg/config` on disk, unlike
+    /// `run_one` above (which takes an already-loaded `Config`), so these
+    /// two tests need a real scratch root rather than `scratch_file`'s
+    /// single-file shortcut.
+    fn scratch_root(suffix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dankg-session-if-stale-test-{}-{suffix}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".dankg")).unwrap();
+        fs::write(dir.join(".dankg/config"), "[lang.sh]\ncommand = sh {file}\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn run_single_with_if_stale_skips_a_block_already_up_to_date() {
+        let dir = scratch_root("skip");
+        let counter = dir.join("counter.txt");
+        let path = dir.join("a.md");
+        fs::write(&path, format!("```sh name=a\necho x >> {}\n```\n", counter.to_string_lossy())).unwrap();
+
+        run_single(path.to_str().unwrap(), &EvalTarget::Block("a".into()), true, false, false).unwrap();
+        assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
+
+        run_single(path.to_str().unwrap(), &EvalTarget::Block("a".into()), true, false, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(&counter).unwrap().lines().count(),
+            1,
+            "a block already up to date must not run again under --if-stale"
+        );
+    }
+
+    #[test]
+    fn run_single_with_if_stale_still_runs_a_block_whose_source_changed() {
+        let dir = scratch_root("changed");
+        let counter = dir.join("counter.txt");
+        let path = dir.join("a.md");
+        fs::write(&path, format!("```sh name=a\necho 1 >> {}\n```\n", counter.to_string_lossy())).unwrap();
+        run_single(path.to_str().unwrap(), &EvalTarget::Block("a".into()), true, false, false).unwrap();
+
+        // Editing the block's own source is exactly what should un-skip it.
+        let edited = fs::read_to_string(&path).unwrap().replacen("echo 1", "echo 2", 1);
+        fs::write(&path, edited).unwrap();
+
+        run_single(path.to_str().unwrap(), &EvalTarget::Block("a".into()), true, false, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(&counter).unwrap().lines().count(),
+            2,
+            "a changed block must still run under --if-stale"
+        );
+    }
+
+    #[test]
+    fn run_single_with_if_stale_runs_a_block_never_run_before() {
+        let dir = scratch_root("never-run");
+        let counter = dir.join("counter.txt");
+        let path = dir.join("a.md");
+        fs::write(&path, format!("```sh name=a\necho x >> {}\n```\n", counter.to_string_lossy())).unwrap();
+
+        run_single(path.to_str().unwrap(), &EvalTarget::Block("a".into()), true, false, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(&counter).unwrap().lines().count(),
+            1,
+            "a target with no recorded result yet has nothing to compare against, so it must run"
+        );
     }
 }
 ```

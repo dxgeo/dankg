@@ -1,5 +1,13 @@
 # Data engineering with DanKG: the incrementality question
 
+Status: implemented, Option B (`--if-stale`). See architecture.md's
+own *Code evaluation*. Touched `eval/result.md` (the new `is_stale`,
+shared with `check_cmd`), `eval/session.md` (`run_single`'s own
+precheck, and `corpus_graph_if_needed`, factored out of `run_one`),
+`cli.md`, and `main.md`'s `check_cmd` call site. The breadth of
+"which existing approach solves this" survey below is unaffected;
+only *Implementing the recommended approach*'s own gap is closed.
+
 This came out of a conversation about using `dankg` to manage a data
 pipeline (census ingestion, national rollups, maps) rather than a
 literate codebase. The single weakness worth taking seriously is that

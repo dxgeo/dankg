@@ -1662,6 +1662,21 @@ part of what the reader approved and silently skipping the rest.
 default. `--no-write` runs everything but prints the captured output
 instead of writing it back: a preview of what would change.
 
+`--if-stale` skips a target whose recorded result already matches a
+fresh recomputation -- the same comparison `dankg check` makes,
+factored into one shared function (`eval::result::is_stale`) so the
+two can never silently disagree about what counts as stale. Already
+fresh, it prints as much and exits `0` before the plan is printed,
+before the prompt, before anything spawns: a target never run before
+has no recorded result to compare against, so it always counts as
+needing to run. `--each`/`--all` filter this way per target, running
+whichever survive; every target already fresh prints as much and
+exits `0` with nothing run at all. This is decision 9's "print, then
+ask" order applied one gate earlier, not a second execution trigger
+\-- the wrapper `plans/data-engineering.md` sketched (`dankg check`,
+grepped for `stale:` lines, driving conditional `dankg eval` calls by
+hand) collapses to this one flag.
+
 `deps` resolves within the file named on the command line by default
 (decision 19): `plan.rs` walks `doc.blocks` directly, rather than the
 recursive walk `Document::named_blocks` uses for the graph, so a named
@@ -3105,7 +3120,7 @@ config written ahead of the code does not warn.
 
 ```
 dankg graph <path> [--format html|json|dot|mermaid] [--depth N] [--all] [-o FILE]
-dankg eval  <path> [--block NAME | --all | --each] [--yes] [--no-write]
+dankg eval  <path> [--block NAME | --all | --each] [--yes] [--no-write] [--if-stale]
 dankg eval  [<path>...] --list [--no-cache]
 dankg tangle <path>... --lang LANG [-o DIR] [--no-cache]   assemble named blocks into a source tree
 dankg fmt   <path>... [--check]   rewrite to normal form; --check only reports

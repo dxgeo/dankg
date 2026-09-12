@@ -59,8 +59,9 @@ pub enum Command {
     /// `paths` holds exactly one entry for `Block`/`All`/`Each`. `deps=`
     /// only resolves within one file (decision 19). `List` takes any
     /// number of paths instead. It walks a corpus the way
-    /// `graph`/`index`/`check` do, with no execution to scope.
-    Eval { paths: Vec<String>, target: EvalTarget, yes: bool, no_write: bool, cache: bool },
+    /// `graph`/`index`/`check` do, with no execution to scope. `if_stale`
+    /// refuses to pair with `List`, which has no execution to skip.
+    Eval { paths: Vec<String>, target: EvalTarget, yes: bool, no_write: bool, if_stale: bool, cache: bool },
     Check { paths: Vec<String>, cache: bool },
     /// `dankg tangle <path>... --lang LANG [-o DIR]`: assemble named blocks
     /// into a source tree (decisions 23-28). One file tangles just it,
@@ -86,7 +87,7 @@ usage:
   dankg index [<path>]  [--no-cache]
   dankg fmt   <path>... [--check]
   dankg tui   <path>... [--depth N | --all] [--no-cache]
-  dankg eval  <path> [--block <name> | --all | --each] [--yes] [--no-write]
+  dankg eval  <path> [--block <name> | --all | --each] [--yes] [--no-write] [--if-stale]
   dankg eval  [<path>...] --list [--no-cache]
   dankg check [<path>...] [--no-cache]
   dankg tangle <path>... --lang <lang> [-o <dir>] [--no-cache]
@@ -111,6 +112,8 @@ options:
                    default being \".\") walks the whole corpus
   --yes            skip eval's \"proceed?\" prompt
   --no-write       run and print output, but do not write results back
+  --if-stale       skip a target already up to date; exits 0 before any
+                   plan is printed or anything is asked or run
   --lang <lang>    which fence language tangle assembles
 
 `tui` needs a real terminal and draws the whole corpus as a collapsible
@@ -168,7 +171,14 @@ destroy a note.
 named block plus its transitive `deps=`, in order) and asks before running,
 unless `--yes`. A block's language must have a configured `[lang.*] command`
 or nothing runs. Results are written back into the source, hash-tagged;
-`--no-write` prints the captured output instead of writing it. A block's
+`--no-write` prints the captured output instead of writing it.
+`--if-stale` checks a target's recorded hash against a fresh recomputation
+first, the same comparison `check` already makes; already fresh, it prints as
+much and exits 0, before the plan is printed, before the prompt, before
+anything spawns. A target never run before has nothing recorded to compare
+against, so it always counts as needing to run. `--each`/`--all` filter this
+way per target, running whichever ones are left; naming every one fresh prints
+as much and exits 0 too, with nothing left to run. A block's
 name is unique across its whole file, and `deps=` resolves flat against
 that same file -- any block, under any heading, can depend on any other.
 `deps=other.md#name` reaches a block in another file, resolved relative to
@@ -395,6 +405,7 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     let mut list = false;
     let mut yes = false;
     let mut no_write = false;
+    let mut if_stale = false;
     let mut cache = true;
 
     while let Some(arg) = args.next() {
@@ -407,6 +418,7 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
             "--list" | "-l" => list = true,
             "--yes" | "-y" => yes = true,
             "--no-write" => no_write = true,
+            "--if-stale" => if_stale = true,
             "--no-cache" => cache = false,
             "-h" | "--help" => return Ok(Command::Help),
             other if other.starts_with("--block=") => {
@@ -434,6 +446,9 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
         if paths.is_empty() {
             paths.push(".".to_string());
         }
+        if if_stale {
+            return Err("`--if-stale` and `--list` ask for different things".to_string());
+        }
     } else {
         if paths.is_empty() {
             return Err("`eval` needs a path".to_string());
@@ -442,7 +457,7 @@ fn eval<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
             return Err("`eval` takes exactly one path; `deps=` only resolves within one file".to_string());
         }
     }
-    Ok(Command::Eval { paths, target, yes, no_write, cache })
+    Ok(Command::Eval { paths, target, yes, no_write, if_stale, cache })
 }
 
 /// One file tangles just it. A directory (or several paths) walks the
@@ -700,6 +715,7 @@ mod tests {
                 target: EvalTarget::Block("index".into()),
                 yes: false,
                 no_write: false,
+                if_stale: false,
                 cache: true,
             }
         );
@@ -710,6 +726,7 @@ mod tests {
                 target: EvalTarget::Block("index".into()),
                 yes: false,
                 no_write: false,
+                if_stale: false,
                 cache: true,
             }
         );
@@ -724,6 +741,7 @@ mod tests {
                 target: EvalTarget::All,
                 yes: true,
                 no_write: true,
+                if_stale: false,
                 cache: true,
             }
         );
@@ -745,6 +763,7 @@ mod tests {
                 target: EvalTarget::List,
                 yes: false,
                 no_write: false,
+                if_stale: false,
                 cache: true,
             }
         );
@@ -754,7 +773,14 @@ mod tests {
     fn eval_list_defaults_to_the_working_directory() {
         assert_eq!(
             parse(args(&["eval", "--list"])).unwrap(),
-            Command::Eval { paths: vec![".".into()], target: EvalTarget::List, yes: false, no_write: false, cache: true }
+            Command::Eval {
+                paths: vec![".".into()],
+                target: EvalTarget::List,
+                yes: false,
+                no_write: false,
+                if_stale: false,
+                cache: true,
+            }
         );
     }
 
@@ -767,6 +793,7 @@ mod tests {
                 target: EvalTarget::List,
                 yes: false,
                 no_write: false,
+                if_stale: false,
                 cache: true,
             }
         );
@@ -777,6 +804,7 @@ mod tests {
                 target: EvalTarget::List,
                 yes: false,
                 no_write: false,
+                if_stale: false,
                 cache: false,
             }
         );
@@ -820,6 +848,7 @@ mod tests {
                 target: EvalTarget::Each,
                 yes: false,
                 no_write: false,
+                if_stale: false,
                 cache: true,
             }
         );
@@ -834,6 +863,31 @@ mod tests {
             .unwrap_err()
             .contains("different things"));
         assert!(parse(args(&["eval", "a.md", "--each", "--list"]))
+            .unwrap_err()
+            .contains("different things"));
+    }
+
+    #[test]
+    fn eval_collects_if_stale() {
+        assert_eq!(
+            parse(args(&["eval", "a.md", "--block", "index", "--if-stale"])).unwrap(),
+            Command::Eval {
+                paths: vec!["a.md".into()],
+                target: EvalTarget::Block("index".into()),
+                yes: false,
+                no_write: false,
+                if_stale: true,
+                cache: true,
+            }
+        );
+    }
+
+    #[test]
+    fn eval_if_stale_conflicts_with_list() {
+        assert!(parse(args(&["eval", "a.md", "--list", "--if-stale"]))
+            .unwrap_err()
+            .contains("different things"));
+        assert!(parse(args(&["eval", "--if-stale", "--list"]))
             .unwrap_err()
             .contains("different things"));
     }

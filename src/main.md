@@ -69,8 +69,8 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::Eval { paths, target, yes, no_write, cache } => {
-            report(session::run(&paths, &target, yes, no_write, cache))
+        Command::Eval { paths, target, yes, no_write, if_stale, cache } => {
+            report(session::run(&paths, &target, yes, no_write, if_stale, cache))
         }
         Command::Check { paths, cache } => match check_cmd(&paths, cache) {
             Ok(true) => ExitCode::SUCCESS,
@@ -345,18 +345,21 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
             // The whole corpus is already loaded (this function's own
             // opening paragraph), so every `xdeps` target this block
             // could possibly name is already resolvable here, exactly as
-            // it would be during a real `dankg eval`.
-            let xdep_hashes = match result::xdep_hashes(&files, &corpus.config, &all_blocks, Some(&index_graph), &chain, &mut xdep_cache) {
-                Ok(hashes) => hashes,
+            // it would be during a real `dankg eval`. `is_stale` is the
+            // same comparison `dankg eval --if-stale` makes before ever
+            // printing a plan (`eval::session::run_single`) -- one
+            // function, so the two can never silently disagree about
+            // what counts as stale.
+            match result::is_stale(&files, &corpus.config, &all_blocks, Some(&index_graph), &chain, &hash_template, stored_hash, &mut xdep_cache) {
+                Ok(true) => {
+                    stale += 1;
+                    eprintln!("stale: {rel_path} `{}`", b.name);
+                }
+                Ok(false) => {}
                 Err(msg) => {
                     stale += 1;
                     eprintln!("stale: {rel_path} `{}` ({msg})", b.name);
-                    continue;
                 }
-            };
-            if result::expected_hash(&chain, &hash_template, &xdep_hashes) != stored_hash {
-                stale += 1;
-                eprintln!("stale: {rel_path} `{}`", b.name);
             }
         }
     }
