@@ -3737,6 +3737,15 @@ in the act again.
     reaches a `glue` command through an optional sidecar manifest
     (decision 28) rather than DanKG's own code ever branching on it.
     See *Tangle*.
+12. Live reload in the TUI, planned, not yet built: notice a file
+    changed on disk without the reader leaving `dankg tui`, and keep
+    `self.expanded` intact for everything the change didn't touch,
+    rather than `reload`'s current unconditional reset. No new
+    dependency and no per-platform file-watching FFI -- reuses the
+    existing `graph::cache` keying and the event loop's own resize
+    poll. See `plans/tui-live-reload-plan.md`.
+
+<!-- dankg:depends target=plans/tui-live-reload-plan.md#tui-live-reload-no-watcher-no-lost-expansion quote="Gate the sweep to run every Nth tick of the loop that already exists" -->
 
 ## `dankg init`
 

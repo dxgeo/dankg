@@ -354,6 +354,14 @@ struct App {
     /// explicit `tag:` line.
     annotations: HashMap<NodeId, Annotation>,
     diags: Diags,
+    /// How many `event_loop` ticks since the last live-reload sweep.
+    /// Reset to `0` every time `sweep_for_changes` actually runs one,
+    /// regardless of whether it found a change.
+    sweep_tick: u32,
+    /// Every indexed file's mtime as of the last sweep (or load).
+    /// `sweep_for_changes` compares a fresh snapshot against this to
+    /// decide whether to `reload()` at all.
+    file_mtimes: HashMap<String, u128>,
 }
 ```
 
@@ -410,6 +418,13 @@ pub fn run(paths: &[String], cache: bool, depth: Option<u32>, all: bool) -> Resu
 /// TUI still costs nothing between ticks.
 const RESIZE_POLL_MS: i32 = 100;
 
+/// How many `RESIZE_POLL_MS` ticks between live-reload sweeps -- a
+/// hardcoded cadence, not new configuration, the same call
+/// `ESC_TIMEOUT_MS` already makes. Roughly 2 seconds at the default
+/// poll rate: prompt enough to feel automatic without stat-ing
+/// thousands of files at frame rate. See *Live-reload sweep* below.
+const SWEEP_EVERY_N_TICKS: u32 = 20;
+
 fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Write) -> io::Result<()> {
     render(app, out)?;
     // Carries a byte `input::read_key` read but could not yet use (only
@@ -422,7 +437,13 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
             if input::decode(&pending).is_some() || term::stdin_ready(RESIZE_POLL_MS) {
                 break input::read_key(io::stdin(), &mut pending, |ms| term::stdin_ready(ms))?;
             }
-            if term::take_resized() {
+            let mut dirty = term::take_resized();
+            app.sweep_tick += 1;
+            if app.sweep_tick >= SWEEP_EVERY_N_TICKS {
+                app.sweep_tick = 0;
+                dirty |= app.sweep_for_changes();
+            }
+            if dirty {
                 render(app, out)?;
             }
         };
@@ -603,6 +624,77 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
             _ => {}
         }
         render(app, out)?;
+    }
+}
+```
+
+## Live-reload sweep
+
+No new file list is needed for detection: every indexed file already
+appears as some node's `Node.file` in `self.index`. `event_loop`'s
+own tick (`app.sweep_tick`, above) gates how often that list actually
+gets stat-ed, rather than adding a second poll loop.
+
+`mtime_of` falls back to `0` on a missing or unreadable file, the
+same convention `graph::index::source_meta` already uses for its own
+cache key. A file that stays unreadable across two sweeps reads as
+unchanged, not a crash. A file that goes from readable to missing (or
+back) still reads as a difference either way.
+
+`snapshot_mtimes` records one mtime per file, stat-ing each file only
+once even when several of its nodes (several headings) appear in the
+index. `App::sweep_for_changes` compares a fresh snapshot against
+`self.file_mtimes` as a whole, not file by file: however many files
+changed within one sweep still collapses into a single `reload()`,
+since `resolve::resolve` walks the whole corpus regardless and a
+second reload for a second change noticed at the same tick would buy
+nothing. `reload()` itself is untouched here -- it still drops every
+expansion, exactly as it already does for `r`, the editor handoff,
+and an eval run. `plans/tui-live-reload-plan.md` covers why that
+changes in a later phase.
+
+<!-- dankg:depends target=../../plans/tui-live-reload-plan.md#tui-live-reload-no-watcher-no-lost-expansion quote="Coalesce every change seen within one sweep into a single `reload` call" -->
+
+```rust name=live_reload_sweep path=tui/app.rs
+/// Length is not needed here, unlike `graph::index::source_meta`'s own
+/// cache key -- this only ever answers "did anything change," which
+/// `reload`'s own cache-backed rebuild re-verifies from scratch anyway.
+/// Falls back to `0` on a missing or unreadable file, the same
+/// convention `source_meta` uses, so a transient stat failure never
+/// panics and a file that appears or disappears still counts as a
+/// change.
+fn mtime_of(path: &Path) -> u128 {
+    let Ok(meta) = std::fs::metadata(path) else { return 0 };
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// One mtime per file named in `index`, keyed by `Node.file`.
+fn snapshot_mtimes(root: &Path, index: &Graph) -> HashMap<String, u128> {
+    let mut mtimes = HashMap::new();
+    for node in &index.nodes {
+        mtimes.entry(node.file.clone()).or_insert_with(|| mtime_of(&root.join(&node.file)));
+    }
+    mtimes
+}
+
+impl App {
+    /// Runs every `SWEEP_EVERY_N_TICKS`th tick of `event_loop`'s own
+    /// wait loop. Any difference from `self.file_mtimes` -- changed,
+    /// added, or removed -- triggers exactly one `reload()`. Returns
+    /// whether a reload actually ran, so `event_loop` knows whether to
+    /// redraw.
+    fn sweep_for_changes(&mut self) -> bool {
+        let current = snapshot_mtimes(&self.root, &self.index);
+        if current == self.file_mtimes {
+            return false;
+        }
+        self.reload();
+        self.file_mtimes = snapshot_mtimes(&self.root, &self.index);
+        true
     }
 }
 ```
@@ -1674,6 +1766,7 @@ impl App {
         let expanded = initial_expansion(&children, &entry_roots, initial_depth);
         let selected = entry_roots.first().cloned().unwrap_or_else(|| roots[0].clone());
         let (commands_file, commands) = load_commands(&root, &config, &keys, &mut diags);
+        let file_mtimes = snapshot_mtimes(&root, &index);
         Ok(App {
             paths: paths.to_vec(),
             cache,
@@ -1711,6 +1804,8 @@ impl App {
             commands,
             annotations,
             diags,
+            sweep_tick: 0,
+            file_mtimes,
         })
     }
 }
@@ -2726,6 +2821,8 @@ impl App {
             commands: HashMap::new(),
             annotations: HashMap::new(),
             diags: Diags::new("test"),
+            sweep_tick: 0,
+            file_mtimes: HashMap::new(),
         }
     }
 
