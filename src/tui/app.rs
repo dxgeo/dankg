@@ -603,7 +603,10 @@ fn snapshot_mtimes(root: &Path, index: &Graph) -> HashMap<String, u128> {
 impl App {
     /// Runs every `SWEEP_EVERY_N_TICKS`th tick of `event_loop`'s own
     /// wait loop. Any difference from `self.file_mtimes` -- changed,
-    /// added, or removed -- triggers exactly one `reload()`. Returns
+    /// added, or removed -- triggers exactly one
+    /// `reload_preserving_expansion()`, not plain `reload`: the reader
+    /// may not be looking anywhere near what changed, so an
+    /// already-expanded subtree elsewhere should survive. Returns
     /// whether a reload actually ran, so `event_loop` knows whether to
     /// redraw.
     fn sweep_for_changes(&mut self) -> bool {
@@ -611,7 +614,7 @@ impl App {
         if current == self.file_mtimes {
             return false;
         }
-        self.reload();
+        self.reload_preserving_expansion();
         self.file_mtimes = snapshot_mtimes(&self.root, &self.index);
         true
     }

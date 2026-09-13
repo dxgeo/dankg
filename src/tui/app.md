@@ -645,13 +645,14 @@ back) still reads as a difference either way.
 once even when several of its nodes (several headings) appear in the
 index. `App::sweep_for_changes` compares a fresh snapshot against
 `self.file_mtimes` as a whole, not file by file: however many files
-changed within one sweep still collapses into a single `reload()`,
-since `resolve::resolve` walks the whole corpus regardless and a
-second reload for a second change noticed at the same tick would buy
-nothing. `reload()` itself is untouched here -- it still drops every
-expansion, exactly as it already does for `r`, the editor handoff,
-and an eval run. `plans/tui-live-reload-plan.md` covers why that
-changes in a later phase.
+changed within one sweep still collapses into a single reload, since
+`resolve::resolve` walks the whole corpus regardless and a second
+reload for a second change noticed at the same tick would buy
+nothing. That one reload calls `reload_preserving_expansion`, not
+plain `reload` -- this is the one caller where the reader may not be
+looking anywhere near what changed, so `diff_expansion` (*Load,
+reload, reset*, above) is what keeps an unrelated, already-expanded
+subtree from collapsing out from under them.
 
 <!-- dankg:depends target=../../plans/tui-live-reload-plan.md#tui-live-reload-no-watcher-no-lost-expansion quote="Coalesce every change seen within one sweep into a single `reload` call" -->
 
@@ -684,7 +685,10 @@ fn snapshot_mtimes(root: &Path, index: &Graph) -> HashMap<String, u128> {
 impl App {
     /// Runs every `SWEEP_EVERY_N_TICKS`th tick of `event_loop`'s own
     /// wait loop. Any difference from `self.file_mtimes` -- changed,
-    /// added, or removed -- triggers exactly one `reload()`. Returns
+    /// added, or removed -- triggers exactly one
+    /// `reload_preserving_expansion()`, not plain `reload`: the reader
+    /// may not be looking anywhere near what changed, so an
+    /// already-expanded subtree elsewhere should survive. Returns
     /// whether a reload actually ran, so `event_loop` knows whether to
     /// redraw.
     fn sweep_for_changes(&mut self) -> bool {
@@ -692,7 +696,7 @@ impl App {
         if current == self.file_mtimes {
             return false;
         }
-        self.reload();
+        self.reload_preserving_expansion();
         self.file_mtimes = snapshot_mtimes(&self.root, &self.index);
         true
     }
