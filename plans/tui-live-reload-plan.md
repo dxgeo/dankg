@@ -9,7 +9,7 @@ case calls the same `App::reload` (*Load, reload, reset*,
 `resolve::resolve`) and then, on purpose, drops every entry in
 `self.expanded` rather than replaying it against the new tree.
 
-<!-- dankg:depends target=../src/tui/app.md#load-reload-reset quote="the edit that triggered it may have changed the shape of the tree the expansion was computed against" -->
+<!-- dankg:depends target=../src/tui/app.md#load-reload-reset quote="may have changed the shape of the tree the expansion was computed against" -->
 
 The ask this plan answers: reflect a file saved from another editor
 while the TUI keeps running, with no keypress needed, on a corpus of

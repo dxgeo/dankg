@@ -1629,19 +1629,56 @@ fn ancestors_of(index: &Graph, id: &NodeId) -> Vec<NodeId> {
     out
 }
 
+/// A previously-expanded node survives a reload only if its own
+/// identity and its `Node.parent` are both unchanged in the new
+/// index. Anything else -- a different parent, a vanished node --
+/// falls back to not-expanded, the same place `initial_expansion`
+/// would have left it. A renamed heading is not covered: a rename
+/// produces a new slug-derived `NodeId`, so this treats it as a
+/// different node entirely, the same limitation `reload` already has
+/// for `self.selected` (*Renamed headings*,
+/// `plans/tui-live-reload-plan.md`).
+fn diff_expansion(old_index: &Graph, new_index: &Graph, old_expanded: &HashSet<NodeId>) -> HashSet<NodeId> {
+    old_expanded
+        .iter()
+        .filter(|id| {
+            let old_parent = old_index.node(id).and_then(|n| n.parent.clone());
+            new_index.node(id).is_some_and(|n| n.parent == old_parent)
+        })
+        .cloned()
+        .collect()
+}
+
 impl App {
-    /// Re-runs `build` after returning from the editor or running a
-    /// block, since the file may have just changed. The cache makes a
-    /// no-op re-index cheap. Best-effort: a load error or an empty
-    /// resulting index leaves the previous state alone rather than
-    /// dropping into a blank or crashed session.
-    ///
-    /// Drops every expansion rather than replaying it against the fresh
-    /// index: the edit that triggered this reload may have changed the
-    /// shape of the tree the expansion was computed against, and a stale
-    /// one risks a confusing placement more than starting clean costs a
-    /// keypress.
+    /// Re-runs `build` after returning from the editor, running a
+    /// block, or `r`. The cache makes a no-op re-index cheap.
+    /// Drops every expansion -- see `reload_impl`.
     fn reload(&mut self) {
+        self.reload_impl(false);
+    }
+
+    /// As `reload`, but replays `self.expanded` against the fresh index
+    /// (`diff_expansion`) instead of dropping it. For the live-reload
+    /// sweep only (`App::sweep_for_changes`): that is the one caller
+    /// where the reader may not be looking anywhere near what changed,
+    /// so resetting everything on every background reload would be
+    /// disruptive rather than merely unsurprising. Every other call
+    /// site keeps calling plain `reload`, unchanged.
+    fn reload_preserving_expansion(&mut self) {
+        self.reload_impl(true);
+    }
+
+    /// Best-effort: a load error or an empty resulting index leaves the
+    /// previous state alone rather than dropping into a blank or
+    /// crashed session.
+    ///
+    /// `preserve_expansion: false` drops every expansion rather than
+    /// replaying it against the fresh index: the edit that triggered a
+    /// reader-initiated reload may have changed the shape of the tree
+    /// the expansion was computed against, and a stale one risks a
+    /// confusing placement more than starting clean costs a keypress.
+    /// `true` replays it instead, per node (`diff_expansion`).
+    fn reload_impl(&mut self, preserve_expansion: bool) {
         let Ok((root, config, keys, index, default_depth, entries, corpus_paths, diags)) = build(&self.paths, self.cache) else {
             return;
         };
@@ -1653,7 +1690,11 @@ impl App {
         let deps = compute_dep_data(&root, &config, &index, &corpus_paths);
         let annotations = compute_tags(&root, &corpus_paths, &index, &config);
         let (entry_roots, initial_depth) = resolve_entry_roots(&index, &roots, &entries, self.depth, self.all, default_depth);
-        let expanded = initial_expansion(&children, &entry_roots, initial_depth);
+        let expanded = if preserve_expansion {
+            diff_expansion(&self.index, &index, &self.expanded)
+        } else {
+            initial_expansion(&children, &entry_roots, initial_depth)
+        };
         // Existing behind a now-collapsed ancestor is no more useful to
         // the reader than not existing at all, so "survives" means
         // actually visible under the fresh expansion, not merely present.
@@ -2607,6 +2648,42 @@ mod tests {
         assert!(expanded.contains(&a_id), "the named entry should start expanded");
         let b_id = roots.iter().find(|r| r.file == "b").unwrap().clone();
         assert!(!expanded.contains(&b_id), "every other root starts collapsed");
+    }
+
+    #[test]
+    fn diff_expansion_keeps_a_node_whose_identity_and_parent_are_unchanged() {
+        let old = graph_of(&[("a.md", "# A\n\n## Child\n")]);
+        let new = graph_of(&[("a.md", "# A\n\n## Child\n"), ("b.md", "# B\n")]);
+        let a_id = old.nodes.iter().find(|n| n.id.slug == "a").unwrap().id.clone();
+        let child_id = old.nodes.iter().find(|n| n.id.slug == "child").unwrap().id.clone();
+        let old_expanded: HashSet<NodeId> = [a_id.clone(), child_id.clone()].into_iter().collect();
+        let diffed = diff_expansion(&old, &new, &old_expanded);
+        assert!(diffed.contains(&a_id), "a's own shape did not change");
+        assert!(diffed.contains(&child_id), "child's own shape did not change");
+    }
+
+    #[test]
+    fn diff_expansion_drops_a_node_whose_parent_changed() {
+        let old = graph_of(&[("a.md", "# A\n\n## Child\n")]);
+        let new = graph_of(&[("a.md", "# A\n\n## Sub\n\n### Child\n")]);
+        let a_id = old.nodes.iter().find(|n| n.id.slug == "a").unwrap().id.clone();
+        let child_id = old.nodes.iter().find(|n| n.id.slug == "child").unwrap().id.clone();
+        let old_expanded: HashSet<NodeId> = [a_id.clone(), child_id.clone()].into_iter().collect();
+        let diffed = diff_expansion(&old, &new, &old_expanded);
+        assert!(diffed.contains(&a_id), "a's own shape did not change");
+        assert!(!diffed.contains(&child_id), "child now nests under Sub instead of A");
+    }
+
+    #[test]
+    fn diff_expansion_drops_a_node_that_no_longer_exists() {
+        let old = graph_of(&[("a.md", "# A\n\n## Child\n")]);
+        let new = graph_of(&[("a.md", "# A\n")]);
+        let a_id = old.nodes.iter().find(|n| n.id.slug == "a").unwrap().id.clone();
+        let child_id = old.nodes.iter().find(|n| n.id.slug == "child").unwrap().id.clone();
+        let old_expanded: HashSet<NodeId> = [a_id.clone(), child_id.clone()].into_iter().collect();
+        let diffed = diff_expansion(&old, &new, &old_expanded);
+        assert!(diffed.contains(&a_id), "a still exists, unchanged");
+        assert!(!diffed.contains(&child_id), "child no longer exists in the new index");
     }
 
     #[test]
