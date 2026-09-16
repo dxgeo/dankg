@@ -1,8 +1,10 @@
 //! CommonMark-style HTML renderer.
 //!
-//! Test-only, and deliberately so: DanKG never renders markdown to HTML at
-//! runtime -- it renders a *graph*. This exists purely as an oracle, so the
-//! parser can be scored against the spec's expected output.
+//! Test-only, and deliberately so: DanKG's own graph renderer never turns
+//! markdown into HTML at runtime -- it renders a *graph*. `dankg weave
+//! --format html` (`render::weave_html`) is the one product exception. This
+//! file exists purely as a conformance oracle. The parser is scored against
+//! the spec's expected output here, not reused as that renderer.
 
 use dankg::md::{Align, Block, Document, Inline, List};
 

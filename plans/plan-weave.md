@@ -86,12 +86,10 @@ after decision 40.
 
 ### GFM tables enter the markdown subset
 
-Today a pipe table is `Block::Passthrough`, kept verbatim, the same as
-a block quote or an indented code block:
+Before this plan, a pipe table was `Block::Passthrough`, kept
+verbatim, the same as a block quote or an indented code block.
 
-<!-- dankg:depends target=../architecture.md#markdown-subset quote="Passed through as literal text: setext headings, HTML blocks, tables, block" -->
-
-That is fine for `dankg graph` -- a table carries no heading, no
+That was fine for `dankg graph` -- a table carries no heading, no
 executable block, nothing the graph needs. It stops being fine the
 moment weave has to typeset the same file: a raw `| a | b |` line
 surviving into a PDF as literal pipes is not a table, it is a
@@ -369,18 +367,19 @@ extended with what a woven page actually needs:
   after `WEAVE_CSS` inside the same `<style>` tag. See "Custom
   templates" above.
 
-This becomes `## Decision 43: Weave HTML rendering`. It also means one
-existing sentence in architecture.md stops being true and needs fixing
-in the same commit: the *Markdown subset* section currently says DanKG
-never renders markdown to HTML at runtime.
+This becomes `## Decision 43: Weave HTML rendering`. It also meant one
+existing sentence in architecture.md stopped being true and needed
+fixing in the same commit: the *Markdown subset* section used to say
+DanKG never renders markdown to HTML at runtime, full stop.
 
-<!-- dankg:depends target=../architecture.md#markdown-subset quote="DanKG itself never renders markdown to HTML." -->
+The fix was a one-line correction, not a reversal -- that was true
+before weave existed. It now reads as below, `render::weave_html`
+named as the one deliberate exception:
 
-The fix is a one-line correction, not a reversal. That was true before
-weave existed. The woven HTML page is the one deliberate exception,
-kept in its own renderer rather than folded into the graph's. The
-`tests/support/html.rs` doc comment gets the matching one-line update.
-Neither gets any functional change.
+<!-- dankg:depends target=../architecture.md#markdown-subset quote="The woven HTML page is the one deliberate exception" -->
+
+The `tests/support/html.rs` doc comment got the matching one-line
+update. Neither got any functional change.
 
 ### Orchestration (`src/weave.md` -> `weave.rs`)
 

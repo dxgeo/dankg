@@ -252,6 +252,40 @@ A `SELECT` result's row count, or any other captured output, never enters the st
 
 **Rationale:** No new execution engine and no new trust model -- this reuses `eval`'s existing spawn/capture/write-back machinery outright, and the same configured-by-the-reader trust boundary `[lang.*] command` already has (decision 9). A binding that collides with a built-in, or with another command in the same file, is refused individually rather than reverting the whole set the way `Keymap` reverts wholesale on a collision (decision 18): commands load one file at a time, independently, with no single moment a whole table is parsed atomically the way `[keys]` has.
 
+## Decision 41: Weave scope
+
+`dankg weave <path> --format html|pdf` turns one markdown file into a readable document. Single-file only -- no corpus-wide walk exists yet. Unlike `tangle`/`eval`, weave walks every `Block` in document order: headings, paragraphs, lists, thematic breaks, tables, passthrough, and code blocks alike, not just named, top-level ones. Code blocks render read-only. Weave never executes anything and never consults `deps=`/`name=`.
+
+**Rationale:** Weave produces something a person reads, not a program. `plan::top_level_blocks`'s own narrowing (decision 23) exists to match what `eval` can run. Nothing here runs. Nothing here needs that scope.
+
+## Decision 42: GFM tables enter the markdown subset
+
+A pipe table is no longer `Block::Passthrough`. A new `Block::Table { aligns, header, rows, line }` is parsed from a header row plus a matching delimiter row -- the same two-line lookahead GFM itself uses -- with `Align` read off each delimiter cell's `:`-flanking. A short or long data row is kept exactly as parsed, never padded or truncated by the parser or by `dankg fmt`. A table interrupts an in-progress paragraph with no blank line required, the same as a heading or a fence. A `|` inside a backtick code span still splits a cell; wrapping it as `\|` is the escape hatch.
+
+**Rationale:** A raw `| a | b |` line surviving into a woven PDF or HTML page as literal pipes is not a table. It is a formatting bug. Tables had to become real structure before either weave backend could render one. This benefits `dankg fmt` too: a table now gets normalized the same way a list or a heading already does. Padding a ragged row at parse time or at format time would make `fmt::verify`'s round-trip check disagree with the original document. Padding is deferred to render time instead, where it has no round-trip obligation to satisfy.
+
+## Decision 43: Weave HTML rendering
+
+`render::weave_html` is a fresh renderer, not a reuse of `render::html` (the graph page) or of `tests/support/html.rs`'s CommonMark conformance oracle. One self-contained page: `WEAVE_CSS` (a new constant in `render/assets.rs`) inlined into a `<style>` tag, heading anchors from `graph::slug::Slugger`, and a table of contents whose expand/collapse toggle is pure CSS -- a hidden checkbox, a `<label>`, a `:checked` sibling selector, no JavaScript. `[weave.html] css` names a stylesheet appended after `WEAVE_CSS` rather than replacing it, so overriding one rule never costs the built-in toggle or table styling.
+
+**Rationale:** A woven HTML page is the one deliberate exception to *Markdown subset*'s own claim that DanKG never renders markdown to HTML at runtime -- true before weave existed, not after. Keeping it in its own renderer, rather than folding it into `render::html`, matches the fact that a prose reading page and a pan/zoom SVG canvas share nothing but the word "HTML."
+
+<!-- dankg:depends target=#markdown-subset quote="The woven HTML page is the one deliberate exception" -->
+
+## Decision 44: Weave PDF via Typst
+
+`render::typst` emits Typst markup only -- a sibling to `render::dot`/`render::mermaid`, never a PDF generator. `weave::run` always writes the result to `.dankg/build/weave/<name>.typ`, then spawns a configured `[weave.pdf] command` (`typst compile {typ} {pdf}`) against it, the same `cmd::build` substitution-then-split every other configured command already goes through. Unconfigured, weave still writes the `.typ` and reports that no PDF was produced, the same graceful degradation an unconfigured `[tangle.*] command` already gets. `[weave.pdf] template` names a Typst file concatenated in front of the emitted body, verbatim, before the `.typ` is written -- a plain-text prepend rather than a Typst `#import`, since an `#import`'s own path resolves relative to the compiled `.typ`, not to the config that named it. Typst's own version is targeted by documentation (0.15.1, confirmed by `tests/typst.rs`'s own real-compile check), never pinned by a runtime `typst --version` check or an optional Cargo dependency.
+
+**Rationale:** Zero crates stays intact the same way it does for `tangle`: DanKG never links a PDF library, only emits text and spawns an external command. A runtime version check has no precedent to justify its own maintenance cost. Pandoc's own Typst writer and Org-mode's LaTeX/`ox-typst` export backends solve the identical "emit markup, shell out to compile it" problem the identical way: document a target version, and let a real incompatibility surface as the compiler's own error. `duckdb` already gets exactly this treatment from `[db.*] command` in this codebase.
+
+<!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
+
+## Decision 45: Data tables from CSV/JSON/TSV fenced blocks
+
+A fenced code block tagged `csv`, `tsv`, or `json` renders as a table too, built by `data::table`'s hand-rolled readers (`from_delimited`, `from_json`) instead of from `Block::Table`. Both readers converge on one `TableData { header, rows }` shape, which both weave renderers consume through one shared table emitter regardless of which source produced it. The language tag is the only signal; content is never sniffed. A `json` block that is not an array of objects or an array of arrays renders as an ordinary code block instead, with a diagnostic.
+
+**Rationale:** DanKG's own eval blocks already produce table-shaped output (`duckdb -csv`). Content-sniffing would make weave's output depend on a heuristic nobody asked for, the same reasoning that already keeps `dankg eval` from inferring a block's language from its output. Tagging an eval result fence with its own output format automatically is deferred: `eval::result::write_back` has no config key today that records what format a command's output is in. Teaching it one is a separate feature.
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -429,10 +463,11 @@ src/
 
 Implemented: ATX headings, fenced code with info strings, inline and reference
 links, wikilinks, unordered and ordered lists including nesting, emphasis and
-strong, code spans, paragraphs, thematic breaks, hard breaks.
+strong, code spans, paragraphs, thematic breaks, hard breaks, GFM pipe tables
+(decision 42).
 
-Passed through as literal text: setext headings, HTML blocks, tables, block
-quotes, indented code blocks, entity references, autolinks, images, and link
+Passed through as literal text: setext headings, HTML blocks, block quotes,
+indented code blocks, entity references, autolinks, images, and link
 reference definitions.
 
 Link titles are parsed and kept even though DanKG has no use for them. An AST
@@ -442,8 +477,10 @@ field costs nothing.
 The vendored CommonMark `spec.json` lives at `tests/data/commonmark/spec.json`.
 It is test *data*, not a dependency. Scoring it requires rendering the AST to
 HTML. So `tests/support/html.rs` implements a CommonMark HTML renderer used
-*only* as a conformance oracle. DanKG itself never renders markdown to HTML.
-It renders a graph.
+*only* as a conformance oracle. DanKG's own graph renderer never turns
+markdown into HTML; it renders a graph. The woven HTML page is the one
+deliberate exception, kept in its own renderer (`render::weave_html`,
+decision 43) rather than folded into the graph's.
 
 The harness is a regression gate. Unimplemented sections never fail a build,
 but a section that loses ground does.
