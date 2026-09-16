@@ -194,6 +194,30 @@ was produced, the same graceful degradation tangle already gives an
 unconfigured build step. No confirm prompt either way -- weave doesn't
 run the reader's program, only compiles a document.
 
+**Typst's own version is targeted by documentation, not pinned by
+code.** Typst is still pre-1.0. Its syntax has changed between
+releases before. Two existing tools already solve exactly this shape
+\-- markup emission plus an external compile step. Neither pins a
+version at runtime.
+
+Pandoc's own Typst writer is pure text emission, no linked library.
+Its `--pdf-engine=typst` just shells out to whatever `typst` binary
+sits on `PATH`. When Typst's syntax changes under it, pandoc documents
+a new minimum version and updates its writer. It never checks the
+installed `typst`'s version first. Org-mode's export backends -- its
+own LaTeX backend, and the third-party `ox-typst` -- take the
+identical shape. A compiler's version compatibility is the reader's
+toolchain to keep current, not something the emitting side negotiates.
+
+`render::typst` follows the same shape. Its module doc states the
+Typst version its syntax was written and tested against: 0.15.1,
+confirmed by `tests/typst.rs`'s own real-compile check. A reader
+running a materially different `typst` gets Typst's own compile
+error, surfaced as-is through `weave::Report` -- the same way a
+`duckdb` syntax mismatch already surfaces as `duckdb`'s own error,
+never something DanKG detects first. No `typst --version` check. No
+compatibility table to maintain.
+
 This becomes `## Decision 44: Weave PDF via Typst`.
 
 ### Data tables from CSV/JSON/TSV fenced blocks
@@ -367,6 +391,11 @@ picks the HTML or PDF renderer, writes the result, and returns a
   before the tag says to.
 - Any functional change to `tests/support/html.rs` -- doc comment
   only.
+- A `typst --version` compatibility check before compiling. Documented
+  target version instead, the same treatment `duckdb` already gets
+  from `[db.*] command` -- and the same shape Pandoc's own Typst
+  writer and Org-mode's export backends both already use for an
+  identical problem.
 
 ## Critical files
 

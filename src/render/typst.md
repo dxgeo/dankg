@@ -17,6 +17,17 @@ outside DanKG's markdown subset -- `Block::Passthrough` -- is emitted
 as escaped literal text, never as raw Typst: an unparsed construct must
 never become unvalidated markup.
 
+Typst is still pre-1.0. Its own syntax has changed between releases
+before. This module has no way to pin one. `weave.rs` spawns whatever
+`typst` binary the reader's own `[weave.pdf] command` configures --
+the same trust boundary `[db.*] command` already gives `duckdb`. Pandoc's own Typst writer and Org-mode's export backends
+solve the identical problem the identical way: emit text, shell out to
+compile it, document a target version, and let a real incompatibility
+surface as the compiler's own error rather than a runtime check this
+module would otherwise have to maintain. The syntax below was written
+and tested against Typst 0.15.1, confirmed by `tests/typst.rs`'s own
+real-compile check.
+
 ```rust name=module_doc path=render/typst.rs
 //! Typst markup emitter for `dankg weave --format pdf`.
 //!
@@ -29,6 +40,11 @@ never become unvalidated markup.
 //! and a `csv`/`tsv`/`json`-tagged code block both become a Typst
 //! `#table()`, converging on one `emit_table` so the two sources share one
 //! code path.
+//!
+//! Targets Typst 0.15.1's syntax (confirmed by `tests/typst.rs`'s own
+//! real-compile check). Typst is still pre-1.0; no `typst --version`
+//! check guards this, the same as `duckdb` gets none from `[db.*]
+//! command` -- see this file's own prose for why.
 
 use crate::data::table::{self, TableData};
 use crate::diag::Diags;
