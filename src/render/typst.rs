@@ -12,6 +12,10 @@
 //! `#table()`, converging on one `emit_table` so the two sources share one
 //! code path.
 //!
+//! The document's own frontmatter renders on a dedicated cover page, not
+//! inline with the outline and body -- see this file's own *Cover page*
+//! prose for why.
+//!
 //! Targets Typst 0.15.1's syntax (confirmed by `tests/typst.rs`'s own
 //! real-compile check). Typst is still pre-1.0; no `typst --version`
 //! check guards this, the same as `duckdb` gets none from `[db.*]
@@ -19,19 +23,58 @@
 
 use crate::data::table::{self, TableData};
 use crate::diag::Diags;
-use crate::md::{Align, Block, Document, InfoString, Inline, List};
+use crate::md::{Align, Block, Document, Frontmatter, InfoString, Inline, List, Value};
+use std::fmt::Write as _;
 
-/// `title` becomes the document's own top-level heading. `#outline()`
-/// (Typst's table of contents) is inserted right after it only when `toc`
-/// is true -- a PDF has no runtime to toggle one, so the choice is made
-/// once, at compile time, unlike the HTML backend's own in-page toggle.
+/// `title` becomes the cover page's own large centered heading, with the
+/// rest of the document's frontmatter printed beneath it. `#outline()`
+/// (Typst's table of contents) is inserted right after the page break
+/// that follows only when `toc` is true -- a PDF has no runtime to
+/// toggle one, so the choice is made once, at compile time, unlike the
+/// HTML backend's own in-page toggle.
 pub fn render(doc: &Document, title: &str, toc: bool, diags: &mut Diags) -> String {
-    let mut out = format!("= {}\n\n", escape_typst(title));
+    let mut out = cover_page(title, &doc.frontmatter);
     if toc {
         out.push_str("#outline()\n\n");
     }
     out.push_str(&blocks(&doc.blocks, diags));
     out
+}
+
+fn cover_page(title: &str, frontmatter: &Frontmatter) -> String {
+    let mut out = String::new();
+    out.push_str("#align(center)[\n");
+    out.push_str("#v(1fr)\n\n");
+    let _ = write!(out, "#text(size: 28pt, weight: \"bold\")[{}]\n\n", escape_typst(title));
+    for line in frontmatter_lines(frontmatter) {
+        let _ = write!(out, "#text(size: 12pt, fill: gray)[{line}]\n\n");
+    }
+    out.push_str("#v(1fr)\n");
+    out.push_str("]\n#pagebreak()\n\n");
+    out
+}
+
+fn frontmatter_lines(frontmatter: &Frontmatter) -> Vec<String> {
+    frontmatter
+        .entries
+        .iter()
+        .filter(|(k, _)| k != "title" && !k.starts_with("dankg."))
+        .map(|(k, v)| {
+            let value = match v {
+                Value::Scalar(s) => escape_typst(s),
+                Value::List(items) => items.iter().map(|s| escape_typst(s)).collect::<Vec<_>>().join(", "),
+            };
+            format!("{}: {value}", humanize_key(k))
+        })
+        .collect()
+}
+
+fn humanize_key(key: &str) -> String {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 fn blocks(items: &[Block], diags: &mut Diags) -> String {
@@ -274,9 +317,12 @@ mod tests {
     }
 
     #[test]
-    fn title_and_outline() {
+    fn title_page_then_outline() {
         let (out, _) = render_doc("# H\n");
-        assert!(out.starts_with("= Title\n\n#outline()\n\n"));
+        assert!(out.starts_with("#align(center)[\n#v(1fr)\n\n#text(size: 28pt, weight: \"bold\")[Title]"));
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let outline_pos = out.find("#outline()").unwrap();
+        assert!(cover_end < outline_pos, "outline should come after the cover page: {out}");
     }
 
     #[test]
@@ -286,6 +332,24 @@ mod tests {
         let mut diags = Diags::new("t.md");
         let out = render(&doc, "Title", false, &mut diags);
         assert!(!out.contains("#outline()"));
+    }
+
+    #[test]
+    fn frontmatter_prints_on_the_cover_page_not_title_or_internal_keys() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse(
+            "---\ntitle: Ignored Here\nauthor: Jane Doe\ntags: [rust, typst]\ndankg.tangle.public: true\n---\n# H\n",
+            &mut d,
+        );
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("Author: Jane Doe"), "{cover}");
+        assert!(cover.contains("Tags: rust, typst"), "{cover}");
+        assert!(!cover.contains("Ignored Here"), "{cover}");
+        assert!(!cover.contains("dankg.tangle.public"), "{cover}");
+        assert!(!cover.contains("Public"), "{cover}");
     }
 
     #[test]

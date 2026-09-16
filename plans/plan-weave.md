@@ -171,8 +171,19 @@ a PDF generator:
 - Passthrough content -- anything outside DanKG's markdown subset --
   is emitted as escaped literal text, never as raw Typst. An unparsed
   construct must never become unvalidated Typst markup.
-- `#outline()` is inserted right after the title only when `toc` is
-  true.
+- **The title and the document's own frontmatter get a dedicated cover
+  page**, not a `= title` heading inline with the outline and body.
+  Added after the first real weave example turned up the reason: a
+  file whose frontmatter `title` matches its own first heading (a
+  pattern several static-site generators expect) rendered that title
+  twice in a row. A separate page, ended with `#pagebreak()`, has no
+  such collision. Every frontmatter entry but `title` itself and any
+  `dankg.*` key (an internal hint, never reader-facing) prints as its
+  own centered line below the title, in frontmatter's own declared
+  order -- DanKG's frontmatter has no fixed schema, so the cover page
+  invents no schema for displaying it either.
+- `#outline()` is inserted right after the cover page's own
+  `#pagebreak()`, only when `toc` is true.
 
 `weave::run` always writes the `.typ` to
 `.dankg/build/weave/<name>.typ` (`<name>` is `graph::build::file_stem`

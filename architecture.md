@@ -274,9 +274,9 @@ A pipe table is no longer `Block::Passthrough`. A new `Block::Table { aligns, he
 
 ## Decision 44: Weave PDF via Typst
 
-`render::typst` emits Typst markup only -- a sibling to `render::dot`/`render::mermaid`, never a PDF generator. `weave::run` always writes the result to `.dankg/build/weave/<name>.typ`, then spawns a configured `[weave.pdf] command` (`typst compile {typ} {pdf}`) against it, the same `cmd::build` substitution-then-split every other configured command already goes through. Unconfigured, weave still writes the `.typ` and reports that no PDF was produced, the same graceful degradation an unconfigured `[tangle.*] command` already gets. `[weave.pdf] template` names a Typst file concatenated in front of the emitted body, verbatim, before the `.typ` is written -- a plain-text prepend rather than a Typst `#import`, since an `#import`'s own path resolves relative to the compiled `.typ`, not to the config that named it. Typst's own version is targeted by documentation (0.15.1, confirmed by `tests/typst.rs`'s own real-compile check), never pinned by a runtime `typst --version` check or an optional Cargo dependency.
+`render::typst` emits Typst markup only -- a sibling to `render::dot`/`render::mermaid`, never a PDF generator. The document's title and its own frontmatter render on a dedicated cover page (title large and centered, every other frontmatter entry beneath it as its own line, `title` itself and any `dankg.*` key excluded), ended with `#pagebreak()`, before the outline and body. `weave::run` always writes the result to `.dankg/build/weave/<name>.typ`, then spawns a configured `[weave.pdf] command` (`typst compile {typ} {pdf}`) against it, the same `cmd::build` substitution-then-split every other configured command already goes through. Unconfigured, weave still writes the `.typ` and reports that no PDF was produced, the same graceful degradation an unconfigured `[tangle.*] command` already gets. `[weave.pdf] template` names a Typst file concatenated in front of the emitted cover page, verbatim, before the `.typ` is written -- a plain-text prepend rather than a Typst `#import`, since an `#import`'s own path resolves relative to the compiled `.typ`, not to the config that named it. Typst's own version is targeted by documentation (0.15.1, confirmed by `tests/typst.rs`'s own real-compile check), never pinned by a runtime `typst --version` check or an optional Cargo dependency.
 
-**Rationale:** Zero crates stays intact the same way it does for `tangle`: DanKG never links a PDF library, only emits text and spawns an external command. A runtime version check has no precedent to justify its own maintenance cost. Pandoc's own Typst writer and Org-mode's LaTeX/`ox-typst` export backends solve the identical "emit markup, shell out to compile it" problem the identical way: document a target version, and let a real incompatibility surface as the compiler's own error. `duckdb` already gets exactly this treatment from `[db.*] command` in this codebase.
+**Rationale:** Zero crates stays intact the same way it does for `tangle`: DanKG never links a PDF library, only emits text and spawns an external command. A runtime version check has no precedent to justify its own maintenance cost. Pandoc's own Typst writer and Org-mode's LaTeX/`ox-typst` export backends solve the identical "emit markup, shell out to compile it" problem the identical way: document a target version, and let a real incompatibility surface as the compiler's own error. `duckdb` already gets exactly this treatment from `[db.*] command` in this codebase. The cover page exists because inlining the title directly in front of the outline and body, the first cut's own shape, visibly duplicated it whenever a file's frontmatter `title` matched its own first heading -- a pattern several static-site generators expect. A separate page has no such collision.
 
 <!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
 
@@ -2652,15 +2652,19 @@ sibling selector. No JavaScript exists on the page for it to misfire.
 ## PDF backend
 
 `render::typst` (decision 44) emits Typst markup only -- a sibling to
-`render::dot`/`render::mermaid`, never a PDF generator. `weave::run`
-always writes `.dankg/build/weave/<name>.typ`, then spawns a
-configured `[weave.pdf] command` (typically
-`typst compile {typ} {pdf}`) against it. Unconfigured, weave still
-writes the `.typ` and reports that no PDF was produced, the same
-graceful degradation an unconfigured `[tangle.*] command` already
-gets. `--toc`/`--no-toc` control Typst's own `#outline()`; HTML's
-table of contents always ships with its in-page toggle instead, so
-combining either flag with `--format html` is a parse error.
+`render::dot`/`render::mermaid`, never a PDF generator. The document's
+title and frontmatter render on a dedicated cover page first --
+title large and centered, every other frontmatter entry beneath it as
+its own line, `title` and any `dankg.*` key excluded -- ended with
+`#pagebreak()` before the outline and body. `weave::run` always
+writes `.dankg/build/weave/<name>.typ`, then spawns a configured
+`[weave.pdf] command` (typically `typst compile {typ} {pdf}`) against
+it. Unconfigured, weave still writes the `.typ` and reports that no
+PDF was produced, the same graceful degradation an unconfigured
+`[tangle.*] command` already gets. `--toc`/`--no-toc` control Typst's
+own `#outline()`, placed right after the cover page; HTML's table of
+contents always ships with its in-page toggle instead, so combining
+either flag with `--format html` is a parse error.
 
 ## Custom templates
 
