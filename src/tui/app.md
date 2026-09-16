@@ -390,7 +390,11 @@ a resize check never delays a keystroke that had already arrived.
 `read_key`'s own `esc_ready` argument is `term::stdin_ready` here too.
 A lone Esc with nothing typed after it must not sit blocked on a
 `read` waiting for a keystroke that may never come (*A standalone Esc
-that never returned*, `architecture.md`).
+that never returned*, `architecture.md`). The ceiling `esc_ready`
+polls up to, `esc_timeout_ms`, is computed once before the loop
+starts rather than read fresh on every key: `$TMUX` does not change
+mid-session, so there is nothing to gain from asking
+`editor::pane_available` again on every keypress.
 
 ```rust name=run_and_event_loop path=tui/app.rs
 /// `dankg tui <path>...`. Needs a real terminal. There is nothing sound
@@ -418,6 +422,24 @@ pub fn run(paths: &[String], cache: bool, depth: Option<u32>, all: bool) -> Resu
 /// TUI still costs nothing between ticks.
 const RESIZE_POLL_MS: i32 = 100;
 
+/// How long `read_key` gives a lone `ESC` to turn into `ESC [
+/// <letter>` (an arrow key) before deciding nothing more is coming, on
+/// a plain terminal. A real terminal sends the rest of an escape
+/// sequence essentially at once, so this only ever adds latency to an
+/// Esc the reader actually pressed alone.
+const ESC_TIMEOUT_MS: i32 = 50;
+
+/// As `ESC_TIMEOUT_MS`, but for a `dankg tui` process that is itself
+/// running inside tmux (`editor::pane_available`). tmux forwards a
+/// pane's input through its own pty layer, which can legitimately
+/// split an escape sequence's leading `ESC` byte from its
+/// continuation bytes by more than `ESC_TIMEOUT_MS` -- see *An escape
+/// sequence tmux delivered in two pieces*, `architecture.md`, for how
+/// this was found. Only a real standalone Esc keypress pays the
+/// difference; an arrow key still resolves the instant its remaining
+/// bytes arrive; see `read_key`'s own doc comment.
+const TMUX_ESC_TIMEOUT_MS: i32 = 600;
+
 /// How many `RESIZE_POLL_MS` ticks between live-reload sweeps -- a
 /// hardcoded cadence, not new configuration, the same call
 /// `ESC_TIMEOUT_MS` already makes. Roughly 2 seconds at the default
@@ -432,10 +454,11 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
     // This way, it is decoded as its own key instead of silently
     // vanishing.
     let mut pending = Vec::new();
+    let esc_timeout_ms = if editor::pane_available() { TMUX_ESC_TIMEOUT_MS } else { ESC_TIMEOUT_MS };
     loop {
         let key = loop {
             if input::decode(&pending).is_some() || term::stdin_ready(RESIZE_POLL_MS) {
-                break input::read_key(io::stdin(), &mut pending, |ms| term::stdin_ready(ms))?;
+                break input::read_key(io::stdin(), &mut pending, esc_timeout_ms, |ms| term::stdin_ready(ms))?;
             }
             let mut dirty = term::take_resized();
             app.sweep_tick += 1;
@@ -607,13 +630,21 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
                 if let Some(node) = app.index.node(&app.selected) {
                     let file = app.root.join(&node.file).to_string_lossy().into_owned();
                     let line = node.line;
-                    raw.take(); // restore the terminal for the editor
-                    let result = editor::open(&app.config, &file, line);
+                    let paned = editor::pane_available();
+                    if !paned {
+                        raw.take(); // restore the terminal for the editor
+                    }
+                    let result = editor::open(&app.config, &file, line, &mut app.diags);
                     if let Some(status) = editor_status(&result) {
                         app.status = Some(status);
                     }
-                    *raw = Some(term::RawMode::enter()?);
-                    app.reload();
+                    if !paned {
+                        // a pane never touched this terminal, so there is
+                        // nothing to resume, and the live-reload sweep
+                        // (not this call site) is what notices the edit
+                        *raw = Some(term::RawMode::enter()?);
+                        app.reload_preserving_expansion();
+                    }
                 }
             }
             // `[tui] commands`: every key here already passed
@@ -1208,19 +1239,25 @@ fn kind_marker(kind: NodeKind) -> &'static str {
 /// given what `editor::open` actually returned. `None` means leave
 /// `self.status` exactly as it was: the editor ran, and whatever the
 /// status line showed before is not necessarily stale just because
-/// the reader came back. `Ok(None)` (neither `[editor] command` nor
-/// `$EDITOR`/`$VISUAL` resolved to anything -- `editor::open`'s own
-/// documented gap) and `Err` (a resolved command that failed to spawn
-/// at all) both used to be swallowed here outright; both now alert,
-/// the same "there is somewhere to report to now" reasoning
-/// `run_command` already applies to a configured command's own
-/// failure. Pure and separately testable from the event loop itself,
-/// the same "thin wrapper, tested decision function" split
-/// `editor::open`/`resolve` already follow.
-fn editor_status(result: &std::io::Result<Option<std::process::ExitStatus>>) -> Option<String> {
+/// the reader came back. `Ok(Handoff::OpenedInPane)` and
+/// `Ok(Handoff::Reused)` each get a message of their own for the
+/// opposite reason -- the reader never left the tree pane at all, so
+/// nothing else marks that `enter` did anything. `Ok(Handoff::Unconfigured)`
+/// (neither `[editor] command` nor `$EDITOR`/`$VISUAL` resolved to
+/// anything -- `editor::open`'s own documented gap) and `Err` (a
+/// resolved command that failed to spawn at all) both used to be
+/// swallowed here outright; both now alert, the same "there is
+/// somewhere to report to now" reasoning `run_command` already
+/// applies to a configured command's own failure. Pure and separately
+/// testable from the event loop itself, the same "thin wrapper,
+/// tested decision function" split `editor::open`/`resolve` already
+/// follow.
+fn editor_status(result: &std::io::Result<editor::Handoff>) -> Option<String> {
     match result {
-        Ok(Some(_)) => None,
-        Ok(None) => {
+        Ok(editor::Handoff::Exited(_)) => None,
+        Ok(editor::Handoff::OpenedInPane) => Some("opened in a new pane".to_string()),
+        Ok(editor::Handoff::Reused) => Some("jumped to the open pane".to_string()),
+        Ok(editor::Handoff::Unconfigured) => {
             Some("no editor configured -- set [editor] command in .dankg/config, or $EDITOR/$VISUAL".to_string())
         }
         Err(e) => Some(format!("could not open editor: {e}")),
@@ -1815,29 +1852,43 @@ impl App {
 }
 ```
 
-`reload` drops every expansion by default, the same reasoning it
-always has: the edit that triggered a reader-initiated reload -- `r`,
-returning from the editor, running a block -- may have changed the
-shape of the tree the expansion was computed against, and replaying a
-stale one risks a confusing placement more than starting clean costs
-a keypress. The selection survives only if it is *actually visible*
-under that freshly-reset expansion, not merely present somewhere in
-the new index -- `is_visible_under` walks its whole ancestor chain,
-since existing behind a now-collapsed ancestor is no more useful to
-the reader than not existing at all. It is also best-effort in the
-other direction: a load error or an empty resulting index leaves the
-previous state alone entirely, rather than dropping into a blank or
-crashed session over a transient problem with the file the reader
-just went and edited.
+`reload` drops every expansion by default. Running a block or writing
+a tag can add or remove nodes under the one the reader is looking at.
+Replaying a stale expansion against that risks a confusing placement
+more than starting clean costs a keypress. The selection
+survives only if it is *actually visible* under that freshly-reset
+expansion, not merely present somewhere in the new index --
+`is_visible_under` walks its whole ancestor chain, since existing
+behind a now-collapsed ancestor is no more useful to the reader than
+not existing at all. It is also best-effort in the other direction: a
+load error or an empty resulting index leaves the previous state
+alone entirely, rather than dropping into a blank or crashed session
+over a transient problem with the file the reader just went and
+edited.
 
-The live-reload sweep is different: the reader may not be looking
-anywhere near what changed, so dropping every expansion on every
-background reload would collapse work they never touched. This is
-what `diff_expansion` is for -- it answers "does this
-previously-expanded node still mean the same thing" per node, rather
-than resetting the whole tree. `reload_impl`'s `preserve_expansion`
-flag (below) picks `diff_expansion` over `initial_expansion` for one
-call site only.
+Returning from the editor and the live-reload sweep both call
+`reload_preserving_expansion` instead. Neither one is the reader
+choosing to restructure the tree. Both are the reader (or a
+background sweep) coming back to *exactly* the node they already had
+open. Collapsing everything back to the entry view on every editor
+round trip threw away the reader's own place in the tree for no
+reason. This is what `diff_expansion` is for -- it answers "does
+this previously-expanded node still mean the same thing" per node,
+rather than resetting the whole tree. `reload_impl`'s
+`preserve_expansion` flag (below) picks `diff_expansion` over
+`initial_expansion` for both call sites. `reload`'s full reset still
+covers every other case.
+
+**Bug, found by hand (2026-09-14):** returning from the editor
+always landed back on the entry view, one keypress away from
+wherever the reader had actually drilled down to. The editor round
+trip called plain `reload`, the same as running a block or writing a
+tag. Unlike those, opening a node in `$EDITOR` and coming straight
+back almost never changes the shape of the tree around it. Dropping
+the expansion on every single round trip was pure loss, not caution
+earning its keep. The fix is the one-line swap to
+`reload_preserving_expansion` above. `diff_expansion` already existed
+for the live-reload sweep and needed no changes of its own.
 
 ```rust name=is_visible_under path=tui/app.rs
 /// Whether `id`'s whole ancestor chain (per `Node.parent`) is present in
@@ -1892,20 +1943,21 @@ fn diff_expansion(old_index: &Graph, new_index: &Graph, old_expanded: &HashSet<N
 
 ```rust name=reload path=tui/app.rs
 impl App {
-    /// Re-runs `build` after returning from the editor, running a
-    /// block, or `r`. The cache makes a no-op re-index cheap.
-    /// Drops every expansion -- see `reload_impl`.
+    /// Re-runs `build` after running a block or writing a tag. The
+    /// cache makes a no-op re-index cheap. Drops every expansion --
+    /// see `reload_impl`.
     fn reload(&mut self) {
         self.reload_impl(false);
     }
 
     /// As `reload`, but replays `self.expanded` against the fresh index
-    /// (`diff_expansion`) instead of dropping it. For the live-reload
-    /// sweep only (`App::sweep_for_changes`): that is the one caller
-    /// where the reader may not be looking anywhere near what changed,
-    /// so resetting everything on every background reload would be
+    /// (`diff_expansion`) instead of dropping it. Used after returning
+    /// from the editor, and by the live-reload sweep
+    /// (`App::sweep_for_changes`): in both cases the reader is coming
+    /// back to the exact node they already had open, not choosing to
+    /// restructure the tree, so resetting everything would be
     /// disruptive rather than merely unsurprising. Every other call
-    /// site keeps calling plain `reload`, unchanged.
+    /// site keeps calling plain `reload`.
     fn reload_preserving_expansion(&mut self) {
         self.reload_impl(true);
     }
@@ -2912,12 +2964,24 @@ mod tests {
     fn editor_status_leaves_the_status_line_alone_when_the_editor_ran() {
         use std::os::unix::process::ExitStatusExt;
         let status = std::process::ExitStatus::from_raw(0);
-        assert_eq!(editor_status(&Ok(Some(status))), None);
+        assert_eq!(editor_status(&Ok(editor::Handoff::Exited(status))), None);
+    }
+
+    #[test]
+    fn editor_status_announces_a_pane_since_the_reader_never_left() {
+        let got = editor_status(&Ok(editor::Handoff::OpenedInPane)).unwrap();
+        assert!(got.contains("pane"), "{got:?}");
+    }
+
+    #[test]
+    fn editor_status_announces_a_reuse_too() {
+        let got = editor_status(&Ok(editor::Handoff::Reused)).unwrap();
+        assert!(got.contains("pane"), "{got:?}");
     }
 
     #[test]
     fn editor_status_names_what_to_configure_when_nothing_resolved() {
-        let got = editor_status(&Ok(None)).unwrap();
+        let got = editor_status(&Ok(editor::Handoff::Unconfigured)).unwrap();
         assert!(got.contains("[editor] command"), "{got:?}");
         assert!(got.contains("$EDITOR"), "{got:?}");
     }
@@ -2984,6 +3048,27 @@ mod tests {
         let diffed = diff_expansion(&old, &new, &old_expanded);
         assert!(diffed.contains(&a_id), "a still exists, unchanged");
         assert!(!diffed.contains(&child_id), "child no longer exists in the new index");
+    }
+
+    #[test]
+    fn returning_from_the_editor_keeps_the_readers_place_when_the_edit_does_not_reshape_the_tree() {
+        let dir = write_corpus(&[("a.md", "# A\n\n## Child\n\n### Grandchild\n")]);
+        let path = dir.join("a.md").to_string_lossy().into_owned();
+        let mut a = App::load(&[path], false, Some(0), false).unwrap();
+        let a_id = a.index.nodes.iter().find(|n| n.id.slug == "a").unwrap().id.clone();
+        let child_id = a.index.nodes.iter().find(|n| n.id.slug == "child").unwrap().id.clone();
+        let grandchild_id = a.index.nodes.iter().find(|n| n.id.slug == "grandchild").unwrap().id.clone();
+        a.selected = a_id.clone();
+        a.right(); // drill down, the way reaching Grandchild requires
+        a.selected = child_id.clone();
+        a.right();
+        a.selected = grandchild_id.clone();
+        // `enter`'s editor round trip: the reader opened Grandchild in
+        // $EDITOR and came straight back, without reshaping the tree.
+        a.reload_preserving_expansion();
+        assert!(a.expanded.contains(&child_id), "Child's expansion must survive the round trip");
+        assert_eq!(a.selected, grandchild_id, "the reader's own place must survive the round trip");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

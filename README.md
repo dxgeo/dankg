@@ -119,6 +119,32 @@ A node marked `∅` is a dangling link's own placeholder, not real
 content — the same thing `dankg check` counts as unresolved. `t`
 refuses to tag one: there's no real line to attach a marker to.
 
+Inside tmux, `enter` does not take over the terminal at all. It opens
+the editor in a new pane, side by side, so the tree stays visible the
+whole time. This needs no configuration; it activates on its own
+whenever `dankg tui` is itself running inside tmux.
+
+Add `reuse` under `[editor]` so repeated `enter` presses retarget one
+pane instead of spawning a new one for every node:
+
+```ini
+[editor]
+command = nvim +{line} {file}
+reuse   = :tab drop {file}<CR>:{line}<CR>
+```
+
+`reuse` is keystrokes typed into that pane, not a program to spawn —
+`<CR>` marks each Enter press. The line above is vim/nvim's own
+`:tab drop`: it switches to a file's tab if one is already open and
+opens a new one otherwise, so the same file jumps in place and a
+different file opens beside it, with nothing for `dankg` itself to
+tell apart. Leave `reuse` unset and every `enter` spawns a fresh pane,
+same as without it. It is the natural way to keep `dankg tui` open in
+one narrow pane, browsing the whole corpus, while an editor pane on
+the other side follows wherever `enter` sends it — even across
+quitting and reopening `dankg tui`, since the pane it remembers lives
+in tmux itself, not in that one process.
+
 Give a block `key=` and name its file in `[tui] commands` (see
 Configuration below) to bind a key directly to it, skipping the
 `e`-then-`enter` cycle:

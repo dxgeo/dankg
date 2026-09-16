@@ -45,7 +45,7 @@ pub const DEFAULT_TUI_DEPTH: u32 = 1;
 const KNOWN: &[(&str, &[&str])] = &[
     ("graph", &["depth"]),
     ("tui", &["depth", "breadcrumb", "commands"]),
-    ("editor", &["command"]),
+    ("editor", &["command", "reuse", "split"]),
     ("keys", &["up", "down", "left", "right", "quit", "reset", "eval", "breadcrumb", "tag"]),
 ];
 
@@ -300,6 +300,23 @@ impl Config {
 }
 ```
 
+`[editor] split` is named after where the pane actually ends up, not
+tmux's own `-h`/`-v` flags: `-h` produces a side-by-side split, the
+opposite of what "horizontal" suggests to most readers, and hiding
+that away is worth doing deliberately.
+
+```rust name=split_side path=config.rs
+/// Where `enter`'s tmux pane opens relative to `dankg tui`'s own pane
+/// (`[editor] split`, `tui/editor.md`'s `split_flags`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitSide {
+    Right,
+    Left,
+    Above,
+    Below,
+}
+```
+
 ```rust name=lookups path=config.rs
 impl Config {
     /// Stamped into every cache entry, because a config change can change what
@@ -481,6 +498,45 @@ impl Config {
     /// this file's, since that is environment rather than config.
     pub fn editor(&self) -> Option<&str> {
         self.get("editor", "command")
+    }
+
+    /// `[editor] reuse`: the `{file}`/`{line}` template `send_keys_argv`
+    /// (`tui/editor.md`) types into an already-open tmux pane instead
+    /// of spawning a new one, `<CR>` marking each `Enter` press. `None`
+    /// -- the default -- means every `enter` spawns a fresh pane, the
+    /// same as before this key existed. This has to stay opt-in: a
+    /// wrong `[editor] command` only fails to launch, but a wrong
+    /// `[editor] reuse` gets typed as literal keystrokes into whatever
+    /// is actually running in that pane.
+    pub fn editor_reuse(&self) -> Option<&str> {
+        self.get("editor", "reuse")
+    }
+
+    /// `[editor] split`, or `SplitSide::Right` (today's original
+    /// behavior) when unset. Warns and falls back to `Right` on an
+    /// unrecognized value, the same "warn, don't refuse to launch the
+    /// editor over one bad key" reasoning `tui_breadcrumb` already
+    /// follows -- unlike `editor`/`editor_reuse`, which are free-form
+    /// templates with nothing to validate.
+    pub fn editor_split(&self, diags: &mut Diags) -> SplitSide {
+        let Some(raw) = self.get("editor", "split") else {
+            return SplitSide::Right;
+        };
+        match raw {
+            "right" => SplitSide::Right,
+            "left" => SplitSide::Left,
+            "above" => SplitSide::Above,
+            "below" => SplitSide::Below,
+            _ => {
+                let where_ = self.source.clone().unwrap_or_else(|| DIR.to_string());
+                diags.warn_in(
+                    where_,
+                    0,
+                    format!("`split = {raw}` in `[editor]` is not one of right/left/above/below; using right"),
+                );
+                SplitSide::Right
+            }
+        }
     }
 }
 ```
@@ -711,6 +767,40 @@ mod tests {
 
         let (c, _) = parse("");
         assert_eq!(c.editor(), None);
+    }
+
+    #[test]
+    fn editor_reuse_reads_back_and_defaults_to_unset() {
+        let (c, d) = parse("[editor]\nreuse = :tab drop {file}<CR>:{line}<CR>\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.editor_reuse(), Some(":tab drop {file}<CR>:{line}<CR>"));
+
+        let (c, _) = parse("[editor]\ncommand = code -g {file}:{line}\n");
+        assert_eq!(c.editor_reuse(), None);
+    }
+
+    #[test]
+    fn editor_split_defaults_to_right_and_reads_back_every_value() {
+        let (c, mut d) = parse("");
+        assert_eq!(c.editor_split(&mut d), SplitSide::Right);
+
+        for (raw, side) in [
+            ("right", SplitSide::Right),
+            ("left", SplitSide::Left),
+            ("above", SplitSide::Above),
+            ("below", SplitSide::Below),
+        ] {
+            let (c, mut d) = parse(&format!("[editor]\nsplit = {raw}\n"));
+            assert_eq!(c.editor_split(&mut d), side, "{raw}");
+            assert!(d.is_empty(), "{:?}", d.items());
+        }
+    }
+
+    #[test]
+    fn editor_split_falls_back_and_warns_on_nonsense() {
+        let (c, mut d) = parse("[editor]\nsplit = sideways\n");
+        assert_eq!(c.editor_split(&mut d), SplitSide::Right);
+        assert!(d.items().iter().any(|i| i.message.contains("is not one of right/left/above/below")));
     }
 
     #[test]

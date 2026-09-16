@@ -26,6 +26,11 @@ glue = python3 glue/rust.py {dir}
 # Used by `dankg tui`: enter on a selected node spawns this at its source
 # line. Unconfigured, enter falls back to $EDITOR/$VISUAL, and reports
 # so on the status line if neither is set either -- a documented gap,
-# not a silent one.
+# not a silent one. Inside tmux, reuse retargets the pane `enter`
+# already opened instead of spawning another one: same file jumps
+# within its existing tab, a different file opens as a new tab, via
+# vim/nvim's own `:tab drop`. Off by default; only takes effect
+# because it's set here.
 [editor]
 command = nvim +{line} {file}
+reuse = :tab drop {file}<CR>:{line}<CR>

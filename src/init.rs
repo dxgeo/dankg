@@ -26,6 +26,20 @@ const CONFIG_TEMPLATE: &str = "\
 
 # [tui]
 # commands = commands.md
+
+# [editor]
+# command = nvim +{line} {file}
+#
+# reuse only matters inside tmux, and only once set: instead of
+# spawning another pane, `enter` retypes these keystrokes into the
+# pane it already opened -- <CR> marks each Enter press. Uncomment
+# the one `reuse` line matching your editor (or write your own);
+# leaving reuse unset spawns a fresh pane every time, same as
+# command alone.
+# vim/nvim:
+# reuse = :tab drop {file}<CR>:{line}<CR>
+# emacs -nw:
+# reuse = C-x C-f{file}<CR>M-g M-g{line}<CR>
 ";
 
 const IGNORE_TEMPLATE: &str = "\

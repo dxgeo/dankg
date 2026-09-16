@@ -8,9 +8,45 @@
 //! it did not set up.
 
 use crate::cmd;
-use crate::config::Config;
+use crate::config::{Config, SplitSide};
+use crate::diag::Diags;
 use std::io;
 use std::process::{Command, ExitStatus};
+
+/// What handing a node's location to the editor produced. `open`
+/// picks the variant; `editor_status` (`app.rs`) turns it into a
+/// status line message.
+pub enum Handoff {
+    /// The editor ran in this process and exited with this status --
+    /// the blocking route, unchanged from before the tmux route
+    /// existed.
+    Exited(ExitStatus),
+    /// Handed to a new tmux pane and left running there (*TUI editor
+    /// handoff: a tmux pane, not a context switch*,
+    /// `plans/tui-tmux-pane-plan.md`). `tmux split-window` returns as
+    /// soon as the pane exists, not when the editor inside it exits,
+    /// so there is no `ExitStatus` for the editor itself to report.
+    /// The pane's own id is not carried here -- `open` already wrote
+    /// it to `TRACKED_PANE_OPTION` before returning, so nothing else
+    /// needs to remember it.
+    OpenedInPane,
+    /// Retargeted an already-open pane via `[editor] reuse` instead
+    /// of spawning a new one.
+    Reused,
+    /// Neither `[editor] command` nor `$EDITOR`/`$VISUAL` named an
+    /// editor.
+    Unconfigured,
+}
+
+/// Whether `open` is about to hand the editor to a new tmux pane
+/// rather than blocking this process on it: `$TMUX` set in the
+/// environment. `app.rs` calls this before `open` to decide whether
+/// to suspend raw mode at all; `open` calls it again to decide how to
+/// wrap the resolved argv. Kept as one function, not two separate
+/// `$TMUX` checks, so the two call sites cannot disagree.
+pub fn pane_available() -> bool {
+    std::env::var("TMUX").is_ok()
+}
 
 /// Spawns the configured `[editor] command` (decision 17) at
 /// `file:line`, inheriting this process's stdio so the editor draws
@@ -19,15 +55,43 @@ use std::process::{Command, ExitStatus};
 /// file with no line number. Flag syntax for "open at a line" is not
 /// standard across editors the way `[editor] command`'s explicit
 /// `{file}`/`{line}` template lets a reader state it, so the fallback
-/// is a documented gap, not a silent one. `None` when neither source
-/// names an editor.
-pub fn open(config: &Config, file: &str, line: u32) -> io::Result<Option<ExitStatus>> {
+/// is a documented gap, not a silent one. When `pane_available`, hands
+/// the same resolved argv to a new pane instead of blocking this
+/// process on it. `tracked_pane` is the pane id a previous `open`
+/// call left behind, in this tmux window, if any -- possibly from an
+/// entirely earlier `dankg tui` process, since it survives in tmux
+/// itself rather than in this one's own memory. Still running the
+/// same editor (`pane_alive`) and `[editor] reuse` configured
+/// retargets it (`Handoff::Reused`) instead of spawning another pane,
+/// switching to it (`select_pane`) the same way a freshly split pane
+/// already becomes active on its own -- reuse should not leave the
+/// reader staring at the tree wondering whether `enter` did anything.
+/// `diags` exists only for `config.editor_split` to warn through on an
+/// unrecognized `[editor] split` value; nothing else here needs it.
+pub fn open(config: &Config, file: &str, line: u32, diags: &mut Diags) -> io::Result<Handoff> {
     let env_editor = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")).ok();
     let Some(argv) = resolve(config.editor(), env_editor.as_deref(), file, line) else {
-        return Ok(None);
+        return Ok(Handoff::Unconfigured);
     };
-    let status = Command::new(&argv[0]).args(&argv[1..]).status()?;
-    Ok(Some(status))
+    if !pane_available() {
+        let status = Command::new(&argv[0]).args(&argv[1..]).status()?;
+        return Ok(Handoff::Exited(status));
+    }
+    if let Some(template) = config.editor_reuse() {
+        if let Some(pane) = tracked_pane().filter(|pane| pane_alive(pane, editor_name(&argv[0]))) {
+            let line = line.to_string();
+            let keys = cmd::substitute(template, &[("file", file), ("line", &line)]);
+            let keys_argv = send_keys_argv(&pane, &keys);
+            Command::new(&keys_argv[0]).args(&keys_argv[1..]).status()?;
+            select_pane(&pane);
+            return Ok(Handoff::Reused);
+        }
+    }
+    let wrapped = tmux_argv(&argv, config.editor_split(diags));
+    let output = Command::new(&wrapped[0]).args(&wrapped[1..]).output()?;
+    let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    remember_pane(&pane_id);
+    Ok(Handoff::OpenedInPane)
 }
 
 /// The argv `open` would spawn, given what `config.editor()` and the
@@ -50,6 +114,135 @@ fn resolve(
     }
     argv.push(file.to_string());
     Some(argv)
+}
+
+/// The `tmux split-window` flags `side` maps to: `right`/`left` split
+/// side by side (`-h`, tmux's own name for a *side-by-side* split,
+/// the reverse of what "horizontal" suggests); `above`/`below` stack
+/// (`-v`). `-b` places the new pane before `target-pane` -- to its
+/// left, or above it -- instead of after; `right`/`below` need no
+/// extra flag since that is `split-window`'s own default placement.
+fn split_flags(side: SplitSide) -> Vec<String> {
+    match side {
+        SplitSide::Right => vec!["-h".to_string()],
+        SplitSide::Left => vec!["-h".to_string(), "-b".to_string()],
+        SplitSide::Below => vec!["-v".to_string()],
+        SplitSide::Above => vec!["-v".to_string(), "-b".to_string()],
+    }
+}
+
+/// Wraps an already-resolved editor argv (`resolve`'s own output) in
+/// a `tmux split-window` invocation, so `open`'s tmux branch hands
+/// `Command` one prepended argv instead of a second resolution path
+/// (*TUI editor handoff: a tmux pane, not a context switch*,
+/// `plans/tui-tmux-pane-plan.md`). `split_flags(side)` decides which
+/// side the pane lands on; `-f` stays unconditional across all four --
+/// it already means "full height with `-h`, full width with `-v`," so
+/// it spans the whole window regardless of whatever other splits the
+/// reader already had, without its own branch per side. `-P -F
+/// '#{pane_id}'` makes `split-window` print the new pane's own id on
+/// its stdout once it exists, rather than reporting only its exit
+/// status -- `open` reads that back so a later `enter` has a pane to
+/// try reusing.
+fn tmux_argv(resolved: &[String], side: SplitSide) -> Vec<String> {
+    let mut argv = vec!["tmux".to_string(), "split-window".to_string()];
+    argv.extend(split_flags(side));
+    argv.push("-f".to_string());
+    argv.push("-P".to_string());
+    argv.push("-F".to_string());
+    argv.push("#{pane_id}".to_string());
+    argv.extend_from_slice(resolved);
+    argv
+}
+
+/// The tmux window-scoped user option `open` remembers a spawned
+/// pane's id in, rather than in `App`'s own memory -- a fresh
+/// `dankg tui` process has no memory of the last one, but the tmux
+/// window itself outlives any single process running inside it.
+const TRACKED_PANE_OPTION: &str = "@dankg_editor_pane";
+
+/// The pane id a previous `open` call left in `TRACKED_PANE_OPTION`,
+/// if tmux still has one recorded for this window. `None` on the
+/// window's first `enter`, or once the window has been recreated and
+/// lost the option along with everything else in it.
+fn tracked_pane() -> Option<String> {
+    let output = Command::new("tmux").args(["show-option", "-wv", TRACKED_PANE_OPTION]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let pane = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pane.is_empty() { None } else { Some(pane) }
+}
+
+/// Records `pane` in `TRACKED_PANE_OPTION` so the next `open` call --
+/// in this process or a later one -- has it to try reusing. Best
+/// effort: a reader without `[editor] reuse` configured never even
+/// looks at this option, and a failure here just means the next
+/// `open` finds nothing to reuse, the same as before this existed.
+fn remember_pane(pane: &str) {
+    let _ = Command::new("tmux").args(["set-option", "-w", TRACKED_PANE_OPTION, pane]).status();
+}
+
+/// Makes `pane` the active one in its tmux window, mirroring what a
+/// freshly split pane already gets for free. Best effort, the same as
+/// `remember_pane`: a reader still sees `[editor] reuse` actually
+/// jump the cursor even if this particular call fails.
+fn select_pane(pane: &str) {
+    let _ = Command::new("tmux").args(["select-pane", "-t", pane]).status();
+}
+
+/// Whether tmux still lists `pane` among its panes right now, running
+/// `expected_command`.
+fn pane_alive(pane: &str, expected_command: &str) -> bool {
+    let Ok(output) =
+        Command::new("tmux").args(["list-panes", "-a", "-F", "#{pane_id} #{pane_current_command}"]).output()
+    else {
+        return false;
+    };
+    pane_is_listed(pane, expected_command, &String::from_utf8_lossy(&output.stdout))
+}
+
+/// Pure half of `pane_alive`: whether `pane` appears in
+/// `tmux list-panes`' own output paired with `expected_command`
+/// exactly, not merely present. A substring check on the id alone
+/// would wrongly match `%1` against `%10`; matching the id without
+/// the command would wrongly reuse a pane whose editor already quit.
+fn pane_is_listed(pane: &str, expected_command: &str, list_output: &str) -> bool {
+    list_output.lines().any(|line| {
+        let mut parts = line.splitn(2, ' ');
+        parts.next() == Some(pane) && parts.next() == Some(expected_command)
+    })
+}
+
+/// The basename `pane_current_command` would report for `argv0` --
+/// `nvim` from `/usr/local/bin/nvim` just as much as from `nvim`
+/// alone.
+fn editor_name(argv0: &str) -> &str {
+    match argv0.rsplit_once('/') {
+        Some((_, name)) => name,
+        None => argv0,
+    }
+}
+
+/// Splits an already-substituted `[editor] reuse` template on its own
+/// `<CR>` markers into the pieces `tmux send-keys` sends as separate
+/// arguments, with an `Enter` keyname interleaved between them --
+/// `send-keys` only sends a whole argument as the Enter key when it
+/// is not typed as literal text, so the two cannot share one
+/// argument. A template ending in `<CR>` sends a final `Enter`; it
+/// does not add an empty extra keystroke on top of it.
+fn send_keys_argv(pane: &str, resolved: &str) -> Vec<String> {
+    let mut argv = vec!["tmux".to_string(), "send-keys".to_string(), "-t".to_string(), pane.to_string()];
+    let mut parts = resolved.split("<CR>").peekable();
+    while let Some(part) = parts.next() {
+        if !part.is_empty() {
+            argv.push(part.to_string());
+        }
+        if parts.peek().is_some() {
+            argv.push("Enter".to_string());
+        }
+    }
+    argv
 }
 
 #[cfg(test)]
@@ -83,5 +276,121 @@ mod tests {
     #[test]
     fn nothing_configured_and_no_environment_editor_resolves_to_nothing() {
         assert_eq!(resolve(None, None, "a.md", 10), None);
+    }
+
+    #[test]
+    fn tmux_argv_prepends_split_window_ahead_of_the_resolved_argv() {
+        let resolved = resolve(Some("code -g {file}:{line}"), None, "a.md", 10).unwrap();
+        assert_eq!(
+            tmux_argv(&resolved, SplitSide::Right),
+            vec![
+                "tmux".to_string(),
+                "split-window".to_string(),
+                "-h".to_string(),
+                "-f".to_string(),
+                "-P".to_string(),
+                "-F".to_string(),
+                "#{pane_id}".to_string(),
+                "code".to_string(),
+                "-g".to_string(),
+                "a.md:10".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tmux_argv_leaves_a_single_word_editor_argv_intact() {
+        let resolved = resolve(None, Some("vim"), "a.md", 10).unwrap();
+        assert_eq!(
+            tmux_argv(&resolved, SplitSide::Right),
+            vec![
+                "tmux".to_string(),
+                "split-window".to_string(),
+                "-h".to_string(),
+                "-f".to_string(),
+                "-P".to_string(),
+                "-F".to_string(),
+                "#{pane_id}".to_string(),
+                "vim".to_string(),
+                "a.md".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tmux_argv_places_f_after_whatever_split_flags_side_needs() {
+        let resolved = resolve(None, Some("vim"), "a.md", 10).unwrap();
+        assert_eq!(
+            tmux_argv(&resolved, SplitSide::Above),
+            vec![
+                "tmux".to_string(),
+                "split-window".to_string(),
+                "-v".to_string(),
+                "-b".to_string(),
+                "-f".to_string(),
+                "-P".to_string(),
+                "-F".to_string(),
+                "#{pane_id}".to_string(),
+                "vim".to_string(),
+                "a.md".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_flags_covers_all_four_sides() {
+        assert_eq!(split_flags(SplitSide::Right), vec!["-h".to_string()]);
+        assert_eq!(split_flags(SplitSide::Left), vec!["-h".to_string(), "-b".to_string()]);
+        assert_eq!(split_flags(SplitSide::Below), vec!["-v".to_string()]);
+        assert_eq!(split_flags(SplitSide::Above), vec!["-v".to_string(), "-b".to_string()]);
+    }
+
+    #[test]
+    fn pane_is_listed_matches_id_and_command_together() {
+        assert!(pane_is_listed("%1", "nvim", "%0 zsh\n%1 nvim\n%2 bash\n"));
+        assert!(!pane_is_listed("%1", "nvim", "%0 zsh\n%10 nvim\n%2 bash\n"));
+    }
+
+    #[test]
+    fn pane_is_listed_is_false_once_the_editor_has_quit() {
+        // the pane is still there, but a bare shell is running in it now
+        assert!(!pane_is_listed("%1", "nvim", "%0 zsh\n%1 zsh\n%2 bash\n"));
+    }
+
+    #[test]
+    fn pane_is_listed_is_false_against_empty_output() {
+        assert!(!pane_is_listed("%1", "nvim", ""));
+    }
+
+    #[test]
+    fn editor_name_strips_a_leading_path() {
+        assert_eq!(editor_name("/usr/local/bin/nvim"), "nvim");
+    }
+
+    #[test]
+    fn editor_name_leaves_a_bare_name_alone() {
+        assert_eq!(editor_name("nvim"), "nvim");
+    }
+
+    #[test]
+    fn send_keys_argv_interleaves_enter_between_cr_separated_pieces() {
+        assert_eq!(
+            send_keys_argv("%3", ":tab drop a.md<CR>:42<CR>"),
+            vec![
+                "tmux".to_string(),
+                "send-keys".to_string(),
+                "-t".to_string(),
+                "%3".to_string(),
+                ":tab drop a.md".to_string(),
+                "Enter".to_string(),
+                ":42".to_string(),
+                "Enter".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn send_keys_argv_sends_no_keys_with_an_empty_template() {
+        assert_eq!(send_keys_argv("%3", ""), vec!["tmux".to_string(), "send-keys".to_string(), "-t".to_string(), "%3".to_string()]);
     }
 }
