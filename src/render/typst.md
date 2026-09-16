@@ -1,0 +1,440 @@
+# Render typst
+
+`dankg weave --format pdf` never links a PDF library (decision 1). It
+emits Typst markup and spawns a configured external `typst compile`,
+the same external-command shape `cmd::build` already gives `tangle`'s
+own build step. This module is only the markup emitter -- a sibling to
+`dot.rs`/`mermaid.rs`, not a PDF generator. `weave.rs` owns writing the
+`.typ` file and spawning the command; this module only turns a
+`Document` into the text that goes in it.
+
+Weave walks the whole document (plan-weave.md, decision 41), not the
+named/top-level blocks `tangle`/`eval` narrow to. A GFM table (decision
+42\) and a `csv`/`tsv`/`json`-tagged code block (decision 45) both
+become a Typst `#table()`, converging on one internal `emit_table` so
+the two sources share one code path and one set of tests. A block
+outside DanKG's markdown subset -- `Block::Passthrough` -- is emitted
+as escaped literal text, never as raw Typst: an unparsed construct must
+never become unvalidated markup.
+
+```rust name=module_doc path=render/typst.rs
+//! Typst markup emitter for `dankg weave --format pdf`.
+//!
+//! Emits Typst source only -- never a PDF, never links a Typst library.
+//! `weave.rs` spawns a configured external `typst compile` against what
+//! this module writes, the same escape hatch `cmd::build` already gives
+//! `tangle`'s own build step.
+//!
+//! Walks the whole document, not just named/top-level blocks. A GFM table
+//! and a `csv`/`tsv`/`json`-tagged code block both become a Typst
+//! `#table()`, converging on one `emit_table` so the two sources share one
+//! code path.
+
+use crate::data::table::{self, TableData};
+use crate::diag::Diags;
+use crate::md::{Align, Block, Document, InfoString, Inline, List};
+
+/// `title` becomes the document's own top-level heading. `#outline()`
+/// (Typst's table of contents) is inserted right after it only when `toc`
+/// is true -- a PDF has no runtime to toggle one, so the choice is made
+/// once, at compile time, unlike the HTML backend's own in-page toggle.
+pub fn render(doc: &Document, title: &str, toc: bool, diags: &mut Diags) -> String {
+    let mut out = format!("= {}\n\n", escape_typst(title));
+    if toc {
+        out.push_str("#outline()\n\n");
+    }
+    out.push_str(&blocks(&doc.blocks, diags));
+    out
+}
+```
+
+## Blocks
+
+Every block in document order, joined by a blank line -- Typst reads a
+blank line as a paragraph break the same way markdown does. A block
+outside the subset is escaped literal text; an unparsed construct must
+never become unvalidated Typst markup.
+
+```rust name=blocks_and_block path=render/typst.rs
+fn blocks(items: &[Block], diags: &mut Diags) -> String {
+    let mut out = String::new();
+    for (i, b) in items.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&block(b, diags));
+    }
+    out
+}
+
+fn block(b: &Block, diags: &mut Diags) -> String {
+    match b {
+        Block::Heading { level, inlines, .. } => {
+            let eq = "=".repeat((*level).clamp(1, 6) as usize);
+            format!("{eq} {}\n", inline_text(inlines))
+        }
+        Block::Paragraph { inlines, .. } => format!("{}\n", inline_text(inlines)),
+        Block::Code { info, text, line, .. } => code_or_data_table(info, text, *line, diags),
+        Block::List(l) => list(l, diags),
+        Block::ThematicBreak { .. } => "#line(length: 100%)\n".to_string(),
+        Block::Passthrough { text, .. } => format!("{}\n", escape_typst(text)),
+        Block::Table { aligns, header, rows, .. } => table_block(aligns, header, rows),
+    }
+}
+
+fn list(l: &List, diags: &mut Diags) -> String {
+    let marker = if l.ordered { "+" } else { "-" };
+    let mut out = String::new();
+    for item in &l.items {
+        let body = blocks(&item.blocks, diags);
+        for (i, line) in body.lines().enumerate() {
+            if i == 0 {
+                out.push_str(marker);
+                out.push(' ');
+            } else {
+                out.push_str("  ");
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+```
+
+## Code: a raw block, or a data table
+
+A block's own language tag decides, never its content (plan-weave.md,
+decision 45: "content is never inspected before the tag says to"). A
+`csv`/`tsv` block always becomes a table -- `data::table::from_delimited`
+cannot fail. A `json` block becomes one when `from_json` recognizes its
+shape; otherwise it falls back to an ordinary raw block, with a
+diagnostic, the same graceful degradation an unconfigured
+`[weave.pdf] command` already gets elsewhere in weave.
+
+```rust name=code_and_data_table path=render/typst.rs
+fn code_or_data_table(info: &InfoString, text: &str, line: u32, diags: &mut Diags) -> String {
+    match info.lang.as_deref() {
+        Some("csv") => data_table_block(&table::from_delimited(text, ',')),
+        Some("tsv") => data_table_block(&table::from_delimited(text, '\t')),
+        Some("json") => match table::from_json(text) {
+            Some(data) => data_table_block(&data),
+            None => {
+                diags.warn(
+                    line,
+                    "`json` block is not an array of objects or an array of arrays; rendered as code",
+                );
+                code_block(info, text)
+            }
+        },
+        _ => code_block(info, text),
+    }
+}
+
+fn code_block(info: &InfoString, text: &str) -> String {
+    let lang = info.lang.as_deref().unwrap_or("");
+    let len = longest_run(text, '`').max(2) + 1;
+    let bar: String = "`".repeat(len);
+    let mut out = format!("{bar}{lang}\n{text}");
+    if !text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&bar);
+    out.push('\n');
+    out
+}
+
+fn data_table_block(data: &TableData) -> String {
+    let columns = data.header.len();
+    let header: Vec<String> = data.header.iter().map(|c| escape_typst(c)).collect();
+    let rows: Vec<Vec<String>> = data
+        .rows
+        .iter()
+        .map(|r| {
+            let mut cells: Vec<String> = r.iter().map(|c| escape_typst(c)).collect();
+            cells.resize(columns, String::new());
+            cells
+        })
+        .collect();
+    emit_table(columns, Some(&header), &rows, None)
+}
+```
+
+## Tables
+
+`table_block` is the GFM path (decision 42): a ragged data row --
+never padded by the parser or by `fmt`, decision 42's own round-trip
+requirement -- is rectangled here, the one place padding has no
+round-trip obligation to satisfy. `emit_table` is the shared tail both
+this and `data_table_block` above call into. A GFM table and a
+`csv`-tagged block emit through one code path.
+
+```rust name=table path=render/typst.rs
+fn table_block(aligns: &[Align], header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
+    let columns = header.len();
+    let header_cells: Vec<String> = header.iter().map(|c| inline_text(c)).collect();
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| {
+            let mut cells: Vec<String> = r.iter().map(|c| inline_text(c)).collect();
+            cells.resize(columns, String::new());
+            cells
+        })
+        .collect();
+    emit_table(columns, Some(&header_cells), &rows, Some(aligns))
+}
+
+/// `header`/`rows` cells are already-rendered Typst markup, one `[cell]`
+/// content block apiece. `aligns` is `None` for a CSV/JSON-sourced table --
+/// it carries no alignment of its own, so every column takes Typst's own
+/// `auto`, never an invented one.
+fn emit_table(columns: usize, header: Option<&[String]>, rows: &[Vec<String>], aligns: Option<&[Align]>) -> String {
+    if columns == 0 {
+        return String::new();
+    }
+    let mut out = format!("#table(\n  columns: {columns},\n");
+    if let Some(aligns) = aligns {
+        let list: Vec<&str> =
+            (0..columns).map(|i| typst_align(aligns.get(i).copied().unwrap_or(Align::None))).collect();
+        out.push_str(&format!("  align: ({}),\n", list.join(", ")));
+    }
+    if let Some(header) = header {
+        out.push_str("  table.header(");
+        out.push_str(&bracketed(header));
+        out.push_str("),\n");
+    }
+    for row in rows {
+        out.push_str("  ");
+        out.push_str(&bracketed(row));
+        out.push_str(",\n");
+    }
+    out.push_str(")\n");
+    out
+}
+
+fn bracketed(cells: &[String]) -> String {
+    cells.iter().map(|c| format!("[{c}]")).collect::<Vec<_>>().join(", ")
+}
+
+fn typst_align(a: Align) -> &'static str {
+    match a {
+        Align::Left => "left",
+        Align::Right => "right",
+        Align::Center => "center",
+        Align::None => "auto",
+    }
+}
+```
+
+## Inline text
+
+One escaper for markup content (`#`, `*`, `_`, `` ` ``, `<`, `@`, `$`,
+`\`) and a second, narrower one for a Typst string literal (`"`, `\`
+only). A link's own destination sits inside `#link("...")`'s quotes,
+not in markup position. It needs the string escaper, not the markup
+one.
+
+```rust name=inline_text path=render/typst.rs
+fn inline_text(inlines: &[Inline]) -> String {
+    let mut out = String::new();
+    for i in inlines {
+        match i {
+            Inline::Text(t) => out.push_str(&escape_typst(t)),
+            Inline::Code(t) => out.push_str(&code_span(t)),
+            Inline::Emph { inner, .. } => {
+                out.push('_');
+                out.push_str(&inline_text(inner));
+                out.push('_');
+            }
+            Inline::Strong { inner, .. } => {
+                out.push('*');
+                out.push_str(&inline_text(inner));
+                out.push('*');
+            }
+            Inline::Link { dest, text, .. } => {
+                out.push_str("#link(\"");
+                out.push_str(&escape_typst_string(dest));
+                out.push_str("\")[");
+                out.push_str(&inline_text(text));
+                out.push(']');
+            }
+            // Weave is single-file (decision 41): there is no corpus to
+            // resolve a wikilink's target against, so it renders as its
+            // own label, plain text, never a link.
+            Inline::WikiLink { target, label } => {
+                out.push_str(&escape_typst(label.as_deref().unwrap_or(target)));
+            }
+            Inline::SoftBreak => out.push(' '),
+            Inline::HardBreak => out.push_str("#linebreak()\n"),
+        }
+    }
+    out
+}
+
+/// A code span needs a backtick run longer than any inside it, the same
+/// `md/fmt.rs`'s own inline code escaper needs and for the same reason.
+fn code_span(content: &str) -> String {
+    let len = longest_run(content, '`') + 1;
+    let bar: String = "`".repeat(len);
+    format!("{bar}{content}{bar}")
+}
+
+fn escape_typst(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '#' | '*' | '_' | '`' | '<' | '@' | '$' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn escape_typst_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn longest_run(s: &str, ch: char) -> usize {
+    let mut best = 0;
+    let mut run = 0;
+    for c in s.chars() {
+        if c == ch {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+```
+
+## Tests
+
+```rust name=tests path=render/typst.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::md::Document;
+
+    fn render_doc(source: &str) -> (String, Diags) {
+        let mut parse_diags = Diags::new("t.md");
+        let doc = Document::parse(source, &mut parse_diags);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &mut diags);
+        (out, diags)
+    }
+
+    #[test]
+    fn title_and_outline() {
+        let (out, _) = render_doc("# H\n");
+        assert!(out.starts_with("= Title\n\n#outline()\n\n"));
+    }
+
+    #[test]
+    fn no_toc_omits_outline() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", false, &mut diags);
+        assert!(!out.contains("#outline()"));
+    }
+
+    #[test]
+    fn headings_by_level() {
+        let (out, _) = render_doc("# One\n\n### Three\n");
+        assert!(out.contains("= One\n"));
+        assert!(out.contains("=== Three\n"));
+    }
+
+    #[test]
+    fn emphasis_and_strong_and_code_span() {
+        let (out, _) = render_doc("_a_ and **b** and `c`\n");
+        assert!(out.contains("_a_"));
+        assert!(out.contains("*b*"));
+        assert!(out.contains("`c`"));
+    }
+
+    #[test]
+    fn special_characters_are_escaped() {
+        let (out, _) = render_doc("cost is \\$5 and a # sign\n");
+        assert!(out.contains("\\$5"));
+        assert!(out.contains("\\# sign"));
+    }
+
+    #[test]
+    fn link_renders_as_a_link_call() {
+        let (out, _) = render_doc("[text](https://example.com/a\"b)\n");
+        assert!(out.contains("#link(\"https://example.com/a\\\"b\")[text]"));
+    }
+
+    #[test]
+    fn unordered_and_ordered_lists() {
+        let (out, _) = render_doc("- a\n- b\n");
+        assert!(out.contains("- a\n- b\n"));
+        let (out, _) = render_doc("1. a\n2. b\n");
+        assert!(out.contains("+ a\n+ b\n"));
+    }
+
+    #[test]
+    fn thematic_break_becomes_a_line() {
+        let (out, _) = render_doc("---\n");
+        assert!(out.contains("#line(length: 100%)\n"));
+    }
+
+    #[test]
+    fn passthrough_is_escaped_not_raw() {
+        let (out, _) = render_doc("> a # b\n");
+        assert!(out.contains("\\# b"));
+    }
+
+    #[test]
+    fn gfm_table_with_alignment_and_a_ragged_row() {
+        let (out, diags) = render_doc("| A | B |\n|:--|--:|\n| a |\n");
+        assert!(diags.is_empty());
+        assert!(out.contains("columns: 2"));
+        assert!(out.contains("align: (left, right)"));
+        assert!(out.contains("table.header([A], [B])"));
+        assert!(out.contains("[a], [],"));
+    }
+
+    #[test]
+    fn csv_block_becomes_a_table_with_no_alignment() {
+        let (out, _) = render_doc("```csv\na,b\n1,2\n```\n");
+        assert!(out.contains("columns: 2"));
+        assert!(!out.contains("align:"));
+        assert!(out.contains("table.header([a], [b])"));
+        assert!(out.contains("[1], [2],"));
+    }
+
+    #[test]
+    fn json_array_of_objects_becomes_a_table() {
+        let (out, diags) = render_doc("```json\n[{\"a\":1},{\"a\":2}]\n```\n");
+        assert!(diags.is_empty());
+        assert!(out.contains("table.header([a])"));
+        assert!(out.contains("[1],"));
+        assert!(out.contains("[2],"));
+    }
+
+    #[test]
+    fn malformed_json_block_falls_back_to_code_with_a_warning() {
+        let (out, diags) = render_doc("```json\n{\"a\":1}\n```\n");
+        assert!(!diags.is_empty());
+        assert!(out.contains("```json"));
+        assert!(out.contains("{\"a\":1}"));
+    }
+
+    #[test]
+    fn ordinary_code_block_is_a_raw_block() {
+        let (out, _) = render_doc("```rust\nfn f() {}\n```\n");
+        assert!(out.contains("```rust\nfn f() {}\n```\n"));
+    }
+}
+```
