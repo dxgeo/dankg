@@ -37,11 +37,13 @@ warning (`config.md`). An *empty* `.dankg/config` would do exactly
 the same job as no file at all. The one thing that actually changes
 behavior is the `.dankg/` directory's own existence -- the root
 marker `discover_root` looks for -- not anything inside the file. So
-the generated file carries a short explanation of that, plus a couple
-of commented-out example sections (`[lang.sh]`, `[tui] commands`) for
-a reader to uncomment. Real content is never guessed: `init` has no
-way to know what language a fresh corpus's blocks will even be
-written in.
+the generated file carries a short explanation of that, plus a few
+commented-out example sections (`[lang.sh]`, `[tui] commands`,
+`[editor]`) for a reader to uncomment. `[editor]`'s own `reuse` key
+gets one suggested line per editor, vim/nvim and Emacs, rather than
+picking one as the default. Real content is never guessed: `init`
+has no more way to know a reader's editor than it does what language
+a fresh corpus's blocks will even be written in.
 
 ```rust name=module_doc path=init.rs
 //! `dankg init`: scaffolds a brand-new corpus -- `.dankg/config`,
@@ -84,6 +86,20 @@ const CONFIG_TEMPLATE: &str = "\
 
 # [tui]
 # commands = commands.md
+
+# [editor]
+# command = nvim +{line} {file}
+#
+# reuse only matters inside tmux, and only once set: instead of
+# spawning another pane, `enter` retypes these keystrokes into the
+# pane it already opened -- <CR> marks each Enter press. Uncomment
+# the one `reuse` line matching your editor (or write your own);
+# leaving reuse unset spawns a fresh pane every time, same as
+# command alone.
+# vim/nvim:
+# reuse = :tab drop {file}<CR>:{line}<CR>
+# emacs -nw:
+# reuse = C-x C-f{file}<CR>M-g M-g{line}<CR>
 ";
 
 const IGNORE_TEMPLATE: &str = "\

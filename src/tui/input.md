@@ -172,12 +172,6 @@ fn utf8_width(first: u8) -> usize {
 ```
 
 ```rust name=read_key path=tui/input.rs
-/// How long `read_key` gives a lone `ESC` to turn into `ESC [
-/// <letter>` before deciding nothing more is coming. A real terminal
-/// sends the rest of an escape sequence essentially at once. This
-/// only ever adds latency to an Esc the reader actually pressed alone.
-const ESC_TIMEOUT_MS: i32 = 50;
-
 /// Blocks until one key event is available on `r`, threading
 /// `pending` across calls for exactly one reason: a standalone Esc is
 /// only disambiguated from the start of `ESC [ <letter>` by reading
@@ -194,19 +188,28 @@ const ESC_TIMEOUT_MS: i32 = 50;
 ///
 /// `esc_ready` is asked exactly one question, only when `buf` is a
 /// lone, unresolved `0x1b`: "is a second byte likely within
-/// `ESC_TIMEOUT_MS`?" A `false` answer means the reader pressed Esc by
+/// `esc_timeout_ms`?" A `false` answer means the reader pressed Esc by
 /// itself. `read_key` then reports it immediately, rather than
 /// blocking on `r` for a follow-up byte that a plain keypress was
-/// never going to send. In production this is `term::stdin_ready`.
-/// Tests pass a fixed answer instead of polling a real terminal.
-pub fn read_key<R: Read>(mut r: R, pending: &mut Vec<u8>, esc_ready: impl Fn(i32) -> bool) -> io::Result<Key> {
+/// never going to send. In production `esc_ready` is
+/// `term::stdin_ready`. Tests pass a fixed answer instead of polling a
+/// real terminal. `esc_timeout_ms` itself is the caller's call, not a
+/// constant this function bakes in -- a real terminal delivers the
+/// rest of an escape sequence essentially at once, but `dankg tui`
+/// running inside tmux cannot assume that (`event_loop`,
+/// `TMUX_ESC_TIMEOUT_MS`). Whatever the value, it only ever adds
+/// latency to an Esc the reader actually pressed alone -- a real
+/// escape sequence still resolves the instant its remaining bytes
+/// arrive, however long that takes, since `esc_ready` only polls up
+/// to this ceiling rather than always waiting it out.
+pub fn read_key<R: Read>(mut r: R, pending: &mut Vec<u8>, esc_timeout_ms: i32, esc_ready: impl Fn(i32) -> bool) -> io::Result<Key> {
     let mut buf = std::mem::take(pending);
     loop {
         if let Some((key, used)) = decode(&buf) {
             *pending = buf.split_off(used);
             return Ok(key);
         }
-        if buf == [0x1b] && !esc_ready(ESC_TIMEOUT_MS) {
+        if buf == [0x1b] && !esc_ready(esc_timeout_ms) {
             return Ok(Key::Esc);
         }
         let mut byte = [0u8; 1];
@@ -270,7 +273,7 @@ mod tests {
         let mut pending = Vec::new();
         // `esc_ready` says "yes, more is coming" -- there really is.
         // This reads straight through to the full sequence.
-        assert_eq!(read_key(&mut src, &mut pending, |_| true).unwrap(), Key::Up);
+        assert_eq!(read_key(&mut src, &mut pending, 50, |_| true).unwrap(), Key::Up);
         assert!(pending.is_empty(), "a fully-used sequence leaves nothing pending");
     }
 
@@ -283,9 +286,9 @@ mod tests {
         // read_key call, rather than being silently dropped.
         let mut src: &[u8] = b"\x1bq";
         let mut pending = Vec::new();
-        assert_eq!(read_key(&mut src, &mut pending, |_| true).unwrap(), Key::Esc);
+        assert_eq!(read_key(&mut src, &mut pending, 50, |_| true).unwrap(), Key::Esc);
         assert_eq!(pending, vec![b'q'], "'q' was read but not yet consumed by decode");
-        assert_eq!(read_key(&mut src, &mut pending, |_| true).unwrap(), Key::Char('q'));
+        assert_eq!(read_key(&mut src, &mut pending, 50, |_| true).unwrap(), Key::Char('q'));
         assert!(pending.is_empty());
     }
 
@@ -297,8 +300,24 @@ mod tests {
         // instead of `Key::Esc` -- this is what proves it did not try.
         let mut src: &[u8] = b"\x1b";
         let mut pending = Vec::new();
-        assert_eq!(read_key(&mut src, &mut pending, |_| false).unwrap(), Key::Esc);
+        assert_eq!(read_key(&mut src, &mut pending, 50, |_| false).unwrap(), Key::Esc);
         assert!(pending.is_empty(), "a standalone Esc used its one byte outright");
+    }
+
+    #[test]
+    fn read_key_passes_its_own_esc_timeout_through_to_esc_ready() {
+        // The caller's `esc_timeout_ms` is not a fixed constant read_key
+        // bakes in -- it has to reach `esc_ready` exactly as given, since
+        // `event_loop` picks a much larger one inside tmux.
+        let mut src: &[u8] = b"\x1b";
+        let mut pending = Vec::new();
+        let seen = std::cell::Cell::new(0);
+        let result = read_key(&mut src, &mut pending, 12345, |ms| {
+            seen.set(ms);
+            false
+        });
+        assert_eq!(result.unwrap(), Key::Esc);
+        assert_eq!(seen.get(), 12345);
     }
 
     #[test]
@@ -308,7 +327,7 @@ mod tests {
         // resolves it, exactly as it always has.
         let mut src: &[u8] = b"\x1b[D";
         let mut pending = Vec::new();
-        assert_eq!(read_key(&mut src, &mut pending, |_| true).unwrap(), Key::Left);
+        assert_eq!(read_key(&mut src, &mut pending, 50, |_| true).unwrap(), Key::Left);
     }
 
     #[test]
@@ -371,7 +390,7 @@ mod tests {
         // here would hang forever if it did.
         let mut empty: &[u8] = b"";
         let mut pending = vec![b'q'];
-        assert_eq!(read_key(&mut empty, &mut pending, |_| true).unwrap(), Key::Char('q'));
+        assert_eq!(read_key(&mut empty, &mut pending, 50, |_| true).unwrap(), Key::Char('q'));
     }
 }
 ```

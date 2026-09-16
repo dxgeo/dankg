@@ -1321,6 +1321,42 @@ time. It still just reports `None` for an unresolved prefix, exactly
 as before. Disambiguating that `None` by waiting, or not, stays
 entirely `read_key`'s job.
 
+### An escape sequence tmux delivered in two pieces
+
+`ESC_TIMEOUT_MS` (50ms) above was tuned against a bare terminal's own
+delivery, essentially instantaneous. A reader running `dankg tui`
+inside tmux reported that arrow keys had stopped moving the tree
+selection at all. Worse, pressing one while the filter-picker overlay
+was open closed the overlay outright -- the exact behavior `esc`
+triggers. `decode` still cannot tell a standalone Esc from the first
+byte of `ESC [ <letter>` without a second byte, exactly as before.
+What changed was where that second byte came from. tmux forwards a
+pane's input through its own pty layer, and that layer can legitimately
+split an arrow key's three bytes into two separate reads: the `ESC`
+byte first, a real gap, then `[` and the letter. 50ms did not always
+outlast that gap. `read_key` gave up on the lone `ESC`, reported a
+standalone Esc, and then decoded `[` and the letter as two more,
+unrelated keystrokes -- both unbound on the tree, so silently
+swallowed there, but inside the filter-picker overlay the `Esc` alone
+was already enough to close it before either of those bytes had any
+say.
+
+The fix keeps `ESC_TIMEOUT_MS` as the plain-terminal default but
+stops baking it into `read_key` itself: `read_key` now takes the
+ceiling as an explicit `esc_timeout_ms` argument, the caller's call
+entirely. `event_loop` (`tui/app.md`) picks a second, much larger
+constant, `TMUX_ESC_TIMEOUT_MS` (600ms), whenever `editor::pane_available`
+says `dankg tui` is itself running inside tmux, computed once before
+the loop starts since `$TMUX` cannot change mid-session. Raising the
+ceiling only slows down the path that was already the slow one: a
+real standalone Esc keypress, where nothing else was ever coming and
+the wait has to run out in full. Every other keypress, arrow keys
+included, still resolves the instant its remaining bytes actually
+arrive, however long that takes, since `esc_ready` only polls up to
+the ceiling rather than always waiting it out.
+
+<!-- dankg:depends target=src/tui/app.md#run_and_event_loop quote="split an escape sequence's leading `ESC` byte from its" -->
+
 ## The tree and the cross-reference panel
 
 `dankg tui` rendered a Sugiyama graph layout, boxes and polylines on a
@@ -3737,6 +3773,72 @@ in the act again.
     reaches a `glue` command through an optional sidecar manifest
     (decision 28) rather than DanKG's own code ever branching on it.
     See *Tangle*.
+12. \[DONE\] Live reload in the TUI (`src/tui/app.md`). Every
+    `event_loop` tick counts toward `App::sweep_tick`. Every
+    `SWEEP_EVERY_N_TICKS`th one stats every file already named on
+    some node in `self.index` (`snapshot_mtimes`) and compares
+    against the last snapshot. Any difference collapses into one
+    `reload_preserving_expansion` call rather than one per changed
+    file. `resolve::resolve` walks the whole corpus regardless.
+    Splitting them buys nothing. `diff_expansion` is what makes a
+    background reload survivable. A previously-expanded node stays
+    expanded only if its own identity and `Node.parent` are both
+    unchanged in the fresh index. That way an edit collapses only the
+    subtree it actually invalidated, not whatever else the reader had
+    open. No new dependency and no per-platform file-watching FFI --
+    detection reuses the existing `graph::cache` keying and the event
+    loop's own resize-poll tick. `enter`'s editor round trip
+    (`event_loop`) now calls `reload_preserving_expansion` too, not
+    plain `reload`. Returning from the editor is not the reader
+    restructuring the tree. Collapsing their place on every round
+    trip was pure loss, not caution earning its keep. See
+    `plans/tui-live-reload-plan.md`.
+13. \[DONE\] TUI editor handoff over tmux (`src/tui/editor.md`,
+    `src/tui/app.md`). `editor::pane_available` is the one place
+    `$TMUX` gets checked; `app.rs`'s `enter` calls it before deciding
+    whether to touch raw mode at all, and `editor::open` calls it
+    again to decide which argv to spawn, so the two call sites cannot
+    disagree. Inside tmux, `open` wraps the already-resolved argv in
+    `tmux split-window -h -f` (`tmux_argv`) -- `-f` spans the new pane
+    across the whole window height regardless of whatever else the
+    reader already had split there, rather than only matching
+    `dankg tui`'s own, possibly partial, pane height -- and returns
+    `Handoff::OpenedInPane` rather than blocking on an `ExitStatus`
+    that would never come, since `tmux split-window` itself returns as
+    soon as the pane exists, not when the editor inside it exits.
+    `enter` skips `raw.take`/re-enter and the reload call entirely for
+    that case: the tree pane never lost the screen, so there is
+    nothing to resume, and the live-reload sweep (item 12, above)
+    picks up the edit once the reader saves, same as any other file
+    changed from outside the TUI. A tmux window-scoped user option
+    (`@dankg_editor_pane`, `tracked_pane`/`remember_pane`) remembers
+    the last pane `open` handed back -- not an `App` field, since a
+    fresh `dankg tui` process has no memory of the one before it, but
+    the tmux window outlives any single process running inside it. A
+    reader who has explicitly configured `[editor] reuse` gets that
+    pane retargeted (`tmux send-keys`, `Handoff::Reused`) on the next
+    `enter`, in this process or an entirely later one, instead of
+    another pane spawned outright -- `pane_alive` checks both the pane
+    id and its current foreground command before trusting it, not the
+    id alone, so a pane the reader closed, or repurposed for something
+    else entirely, falls back to spawning fresh rather than typing
+    literal keystrokes into whatever is actually running there.
+    `select_pane` then switches tmux's own focus to that pane, mirroring
+    what a freshly split pane already gets for free -- `send-keys`
+    alone would leave the reader looking at the tree with no visible
+    sign `enter` did anything. Unconfigured, nothing about this reuse
+    path is ever consulted. No new dependency; one new
+    `.dankg/config` key, `[editor] reuse`, off by default. A
+    prerequisite fix, not part of the pane route itself but found by
+    testing it inside tmux: `event_loop`'s own Esc-disambiguation
+    timeout was too short for tmux's own added latency, breaking arrow
+    keys entirely (*An escape sequence tmux delivered in two pieces*,
+    under *Help screen*). See `plans/tui-tmux-pane-plan.md`.
+
+<!-- dankg:depends target=plans/tui-live-reload-plan.md#tui-live-reload-no-watcher-no-lost-expansion quote="Gate the sweep to run every Nth tick of the loop that already exists" -->
+
+<!-- dankg:depends target=plans/tui-tmux-pane-plan.md#tui-editor-handoff-a-tmux-pane-not-a-context-switch quote="hand the same resolved editor command to a new,
+side-by-side pane instead" -->
 
 ## `dankg init`
 
