@@ -70,7 +70,7 @@ layers across repeated builds of the same graph.
 # Results
 
 | Task | Arm | Correct | Tool calls | Notes |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | A: decision citation | raw | yes | 5 | Found decision 6 by grepping `architecture.md`'s decision list directly and matching the rationale by hand. |
 | A: decision citation | literate | yes | 6 | Grepped the `.md` files the same way the raw arm grepped `.rs`. Never ran `dankg` itself. One more call than the raw arm, not fewer. |
 | B: reciprocal references | raw | no | 12 | Grepped for any filename or `crate::` mention of another module, in either direction, and reported 10 "pairs." Only one (`assets`/`html`) is a real reciprocated link. `dot`/`mermaid` was missed. The other ~9 are ordinary one-way doc comments that name a collaborating module, misread as mutual. |

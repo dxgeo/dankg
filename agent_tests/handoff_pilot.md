@@ -89,8 +89,8 @@ claims directly, with no git archaeology at all.
 
 # Results
 
-| | raw | raw-prompted | literate-unprompted |
-|---|---|---|---|
+|  | raw | raw-prompted | literate-unprompted |
+| --- | --- | --- | --- |
 | Checked git history | yes, unprompted | yes, as instructed | n/a -- no git in this copy |
 | Ran `dankg check` | n/a -- no `dankg` here | n/a | yes, unprompted |
 | `stats`/`list` divergence | documented as intentional | unified (extended the fix) | unified (extended the fix) |

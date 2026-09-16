@@ -51,8 +51,8 @@ to do. The task tests whether the constraint that forbids that gets
 
 # Results
 
-| | Raw | Literate |
-|---|---|---|
+|  | Raw | Literate |
+| --- | --- | --- |
 | Correct implementation | yes | yes |
 | New dependencies added | 0 | 0 |
 | Passes an independent held-out test vector | yes | yes |

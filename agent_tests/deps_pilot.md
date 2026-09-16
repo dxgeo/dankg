@@ -118,8 +118,8 @@ failure mode the shell run was built to expose.
 
 ## Shell
 
-| | Raw | Literate |
-|---|---|---|
+|  | Raw | Literate |
+| --- | --- | --- |
 | Correct (5 stale / 3 safe) | **no — found only 1 stale, 7 safe** | **yes, exact** |
 | Tool calls | 7 | 9 |
 | Wall-clock | ~69s | ~42s |
@@ -128,7 +128,7 @@ failure mode the shell run was built to expose.
 ## Python, SQL, and the mixed-tool pipeline
 
 | Pipeline | Arm | Correct | Tool calls | Wall-clock |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Python | raw | no — same 1-stale verdict | 7 | ~59s |
 | Python | literate | yes, exact | 8 | ~36s |
 | SQL | raw | no — same 1-stale verdict | 8 | ~115s |
@@ -236,8 +236,8 @@ Neither number can still match by accident.
 
 ## Result
 
-| | Raw | Literate |
-|---|---|---|
+|  | Raw | Literate |
+| --- | --- | --- |
 | `normalize`, `counts`, `ratios` correctly marked stale | **yes, this time** | yes, exact |
 | `train`, `summary` correctly marked stale | **no — marked safe again** | yes, exact |
 | Tool calls | 7 | 7 |

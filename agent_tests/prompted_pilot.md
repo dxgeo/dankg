@@ -50,7 +50,7 @@ before/after on the identical task and fixture shape.
 # Results
 
 | Task | Arm | Correct | Tool calls (unprompted &#8594; prompted) | Tokens (unprompted &#8594; prompted) | Wall-clock (unprompted &#8594; prompted) |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | A: decision citation | ctags | yes | 5 &#8594; 6 | 38,627 &#8594; 54,535 | ~19s &#8594; ~51s |
 | A: decision citation | LSP | yes | 6 &#8594; 11 | 41,893 &#8594; 43,808 | ~28s &#8594; ~90s |
 | A: decision citation | literate | yes | 4 &#8594; 6 | 38,696 &#8594; 40,125 | ~15s &#8594; ~48s |

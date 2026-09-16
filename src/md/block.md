@@ -14,7 +14,7 @@ crate prefers "kept, uninterpreted" over "dropped."
 //! are gathered into `Block::Passthrough` and kept verbatim. They are not
 //! errors. They do not warn. They simply carry no graph meaning.
 
-use super::{Block, InfoString, List, ListItem, KNOWN_ATTRS};
+use super::{Align, Block, InfoString, List, ListItem, KNOWN_ATTRS};
 use crate::diag::Diags;
 
 /// A source line paired with its original 1-based line number. This way,
@@ -75,6 +75,10 @@ fn parse_lines(lines: &[Line], diags: &mut Diags) -> Vec<Block> {
                 gather_passthrough(lines, i, |l| !l.text.trim().is_empty());
             blocks.push(block);
             i = next;
+        } else if table_starts_at(lines, i) {
+            let (block, next) = gather_table(lines, i);
+            blocks.push(block);
+            i = next;
         } else if let Some(marker) = list_marker(&line.text) {
             let (block, next) = gather_list(lines, i, marker, diags);
             blocks.push(block);
@@ -105,7 +109,7 @@ fn gather_paragraph(lines: &[Line], start: usize) -> (Block, usize) {
         if line.text.trim().is_empty() {
             break;
         }
-        if i > start && interrupts_paragraph(&line.text) {
+        if i > start && (interrupts_paragraph(&line.text) || table_starts_at(lines, i)) {
             break;
         }
         if !text.is_empty() {
@@ -133,6 +137,18 @@ fn interrupts_paragraph(text: &str) -> bool {
         // Only a list that starts at 1 may interrupt a paragraph. This keeps
         // "the year 1986. It was" from becoming a list.
         || list_marker(text).is_some_and(|m| !m.ordered || m.start == 1)
+}
+
+/// Whether `lines[i]` opens a table: the two-line lookahead
+/// `parse_lines`' own table branch uses, shared here so a table can
+/// interrupt a paragraph that precedes it with no blank line in between,
+/// the same as a heading or a fence already does.
+fn table_starts_at(lines: &[Line], i: usize) -> bool {
+    lines[i].text.contains('|')
+        && lines
+            .get(i + 1)
+            .and_then(|l| parse_delimiter_row(&l.text))
+            .is_some_and(|a| a.len() == split_row(&lines[i].text).len())
 }
 
 fn gather_passthrough(
@@ -407,6 +423,116 @@ fn gather_list(lines: &[Line], start: usize, first: Marker, diags: &mut Diags) -
 }
 ```
 
+A GFM pipe table: a header row, a delimiter row naming each column's
+alignment, then data rows. Detection is the two-line lookahead
+`table_starts_at` runs before either `gather_paragraph` or the main
+`parse_lines` loop commits to something else. A data row is collected
+exactly as parsed -- shorter or longer than the header -- and stops at
+the first line `interrupts_paragraph` would also treat as a new block,
+the same boundary a paragraph already respects. Two narrowings, both
+deliberate: a `|` inside a backtick code span still splits a cell
+(wrap it as `\|` to keep it out of the boundary), and `\|` needs no
+special unescaping here at all -- `inline::parse` already turns any
+backslash-escaped ASCII punctuation into literal text, `|` included.
+
+```rust name=table path=md/block.rs
+fn gather_table(lines: &[Line], start: usize) -> (Block, usize) {
+    let header = split_row(&lines[start].text)
+        .iter()
+        .map(|c| super::inline::parse(c))
+        .collect();
+    let aligns = parse_delimiter_row(&lines[start + 1].text).unwrap_or_default();
+
+    let mut rows = Vec::new();
+    let mut i = start + 2;
+    while i < lines.len() {
+        let text = &lines[i].text;
+        if text.trim().is_empty() || interrupts_paragraph(text) {
+            break;
+        }
+        rows.push(split_row(text).iter().map(|c| super::inline::parse(c)).collect());
+        i += 1;
+    }
+
+    (Block::Table { aligns, header, rows, line: lines[start].num }, i)
+}
+
+/// Split one table row into raw, still-markdown cell texts. A `|` preceded
+/// by a backslash does not split -- `inline::parse` unescapes it the same
+/// way it already unescapes any other `\`-escaped ASCII punctuation. A
+/// leading or trailing `|` (the common, but optional, GFM style) is
+/// stripped rather than producing an empty edge cell.
+fn split_row(text: &str) -> Vec<String> {
+    let mut trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix('|') {
+        trimmed = rest;
+    }
+    if unescaped_trailing_pipe(trimmed) {
+        trimmed = &trimmed[..trimmed.len() - 1];
+    }
+
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' if i + 1 < chars.len() => {
+                cur.push(chars[i]);
+                cur.push(chars[i + 1]);
+                i += 2;
+            }
+            '|' => {
+                cells.push(cur.trim().to_string());
+                cur = String::new();
+                i += 1;
+            }
+            c => {
+                cur.push(c);
+                i += 1;
+            }
+        }
+    }
+    cells.push(cur.trim().to_string());
+    cells
+}
+
+fn unescaped_trailing_pipe(text: &str) -> bool {
+    if !text.ends_with('|') {
+        return false;
+    }
+    let backslashes = text[..text.len() - 1].chars().rev().take_while(|c| *c == '\\').count();
+    backslashes % 2 == 0
+}
+
+/// A table's delimiter row: cells of `-` runs, each optionally flanked by a
+/// leading and/or trailing `:`. `None` when any cell fails to match --
+/// `table_starts_at` treats that as "no table here" rather than a
+/// malformed one.
+fn parse_delimiter_row(text: &str) -> Option<Vec<Align>> {
+    let cells = split_row(text);
+    if cells.is_empty() {
+        return None;
+    }
+    let mut aligns = Vec::with_capacity(cells.len());
+    for cell in &cells {
+        let left = cell.starts_with(':');
+        let right = cell.ends_with(':');
+        let dashes = cell.trim_matches(':');
+        if dashes.is_empty() || !dashes.chars().all(|c| c == '-') {
+            return None;
+        }
+        aligns.push(match (left, right) {
+            (true, true) => Align::Center,
+            (true, false) => Align::Left,
+            (false, true) => Align::Right,
+            (false, false) => Align::None,
+        });
+    }
+    Some(aligns)
+}
+```
+
 `atx_heading` strips a trailing run of `#` as a closing sequence rather
 than content, matching CommonMark's own `## Title ##` convention. The
 remaining recognisers (fence open, thematic break, HTML block start) are
@@ -662,6 +788,75 @@ mod tests {
         let (b, _) = blocks("the year\n2. was\n");
         assert_eq!(b.len(), 1);
         assert!(matches!(b[0], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn basic_table_with_alignment() {
+        let (b, d) = blocks("| A | B | C |\n|:---|:---:|---:|\n| a | b | c |\n");
+        assert!(d.is_empty());
+        let Block::Table { aligns, header, rows, line } = &b[0] else { panic!() };
+        assert_eq!(*aligns, vec![Align::Left, Align::Center, Align::Right]);
+        assert_eq!(header.iter().map(|c| Inline::plain(c)).collect::<Vec<_>>(), vec!["A", "B", "C"]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].iter().map(|c| Inline::plain(c)).collect::<Vec<_>>(), vec!["a", "b", "c"]);
+        assert_eq!(*line, 1);
+    }
+
+    #[test]
+    fn table_without_leading_or_trailing_pipes() {
+        let (b, _) = blocks("A | B\n---|---\na | b\n");
+        let Block::Table { header, rows, .. } = &b[0] else { panic!() };
+        assert_eq!(header.len(), 2);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn escaped_pipe_stays_inside_one_cell() {
+        let (b, _) = blocks("| A |\n|---|\n| a \\| b |\n");
+        let Block::Table { rows, .. } = &b[0] else { panic!() };
+        assert_eq!(rows[0].len(), 1);
+        assert_eq!(Inline::plain(&rows[0][0]), "a | b");
+    }
+
+    #[test]
+    fn ragged_row_kept_exactly_as_parsed() {
+        let (b, _) = blocks("| A | B |\n|---|---|\n| only one |\n| a | b | c |\n");
+        let Block::Table { rows, .. } = &b[0] else { panic!() };
+        assert_eq!(rows[0].len(), 1);
+        assert_eq!(rows[1].len(), 3);
+    }
+
+    #[test]
+    fn mismatched_delimiter_cell_count_is_not_a_table() {
+        let (b, _) = blocks("| A | B |\n|---|\n| a | b |\n");
+        assert!(matches!(b[0], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn invalid_delimiter_row_is_not_a_table() {
+        let (b, _) = blocks("| A | B |\n| not a delim | row |\n");
+        assert!(matches!(b[0], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn table_interrupts_a_preceding_paragraph_with_no_blank_line() {
+        let (b, _) = blocks("text\n| A |\n|---|\n| a |\n");
+        assert!(matches!(b[0], Block::Paragraph { .. }));
+        assert!(matches!(b[1], Block::Table { .. }));
+    }
+
+    #[test]
+    fn blank_line_ends_a_table() {
+        let (b, _) = blocks("| A |\n|---|\n| a |\n\ntext\n");
+        assert!(matches!(b[0], Block::Table { .. }));
+        assert!(matches!(b[1], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn table_inside_a_list_item() {
+        let (b, _) = blocks("- | A |\n  |---|\n  | a |\n");
+        let Block::List(l) = &b[0] else { panic!() };
+        assert!(matches!(l.items[0].blocks[0], Block::Table { .. }));
     }
 }
 ```

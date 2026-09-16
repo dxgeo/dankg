@@ -75,7 +75,7 @@ question: a tool with real find-references, not just definitions.
 # Results
 
 | Task | Arm | Correct | Tool calls | Tokens | Wall-clock | Notes |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | A: decision citation | raw (`pilot.md`) | yes | 5 | -- | -- | Grepped `architecture.md`'s decision list directly. |
 | A: decision citation | literate (`pilot.md`) | yes | 6 | -- | -- | Grepped the `.md` files the same way; never ran `dankg`. |
 | A: decision citation | raw+ctags | yes | 5 | 38,627 | ~19s | Never called `readtags`. Found `resolve.rs` by `find`/`grep`, read it, then grepped `architecture.md`'s decision list -- the identical method the original raw arm used, at the identical cost. |

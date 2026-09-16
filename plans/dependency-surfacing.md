@@ -19,12 +19,12 @@ panel actually read from. The other two live entirely inside
 `eval::plan`, re-parsed from disk on demand, never materialized as a
 node or edge.
 
-| Concept          | Declared as                                      | Graph / TUI today |
-|-------------------|--------------------------------------------------|--------------------|
-| Code block         | fenced block, `name=`                             | `NodeKind::Block` -- a real tree row, drawn identically to a heading |
-| Eval chain          | `deps=` / `xdeps=name`                            | none -- `eval::plan::BlockRef` only, resolved fresh per eval run |
-| File artifact         | `produces=file:PATH` / `reads=file:PATH`         | none -- decision 33: "never resolved on its own" |
-| DB relation touch      | inferred, not authored                         | already shown: `⚭` badge, `produces:`/`reads:` panel rows |
+| Concept | Declared as | Graph / TUI today |
+| --- | --- | --- |
+| Code block | fenced block, `name=` | `NodeKind::Block` -- a real tree row, drawn identically to a heading |
+| Eval chain | `deps=` / `xdeps=name` | none -- `eval::plan::BlockRef` only, resolved fresh per eval run |
+| File artifact | `produces=file:PATH` / `reads=file:PATH` | none -- decision 33: "never resolved on its own" |
+| DB relation touch | inferred, not authored | already shown: `⚭` badge, `produces:`/`reads:` panel rows |
 
 **Correction, kept for the record.** Mid-discussion I first guessed
 the existing `⚭` badge already covered "file dependency." It doesn't
@@ -333,7 +333,7 @@ disk. Browsing tolerates a stale snapshot until restart; only
 ## 7\. Decisions, as shipped
 
 | Question | Shipped as |
-|---|---|
+| --- | --- |
 | Block-kind glyph | `»` -- alt considered: `ƒ` |
 | Eval-chain glyphs | `⇒N` / `⇐N` -- alt considered: `↳N` / `↰N` |
 | File-artifact glyph | `▤` -- alt considered: `⌁` |

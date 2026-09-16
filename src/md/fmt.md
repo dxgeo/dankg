@@ -32,7 +32,7 @@ be re-read as markup on the next parse has to be escaped back in.
 //! `inline.rs` rather than reimplemented, because an escaper that disagrees
 //! with the parser about flanking silently mangles emphasis.
 
-use super::{Block, Document, Inline, InfoString, List, KNOWN_ATTRS};
+use super::{Align, Block, Document, Inline, InfoString, List, KNOWN_ATTRS};
 use crate::diag::Diags;
 
 /// Render a document to its normal form.
@@ -115,6 +115,9 @@ fn strip_block(b: &Block) -> Block {
                 .collect(),
             line: 0,
         }),
+        Block::Table { aligns, header, rows, .. } => {
+            Block::Table { aligns: aligns.clone(), header: header.clone(), rows: rows.clone(), line: 0 }
+        }
     }
 }
 ```
@@ -150,6 +153,7 @@ fn block(b: &Block) -> String {
         // bullet inside a list item. `***` is a thematic break everywhere.
         Block::ThematicBreak { .. } => "***\n".to_string(),
         Block::Passthrough { text, .. } => format!("{text}\n"),
+        Block::Table { aligns, header, rows, .. } => table(aligns, header, rows),
     }
 }
 
@@ -167,6 +171,52 @@ fn heading(level: u8, inlines: &[Inline]) -> String {
         text.insert(text.len() - run, '\\');
     }
     format!("{hashes} {text}\n")
+}
+```
+
+A table's rows are rendered at their own, individually-parsed cell
+count -- never padded or truncated to the header's width. Padding here
+would make a ragged row's normal form disagree with the ragged row
+`without_lines` actually parsed back out of it, which is exactly the
+round-trip `verify` exists to catch. Rectangling a table into a grid is
+`render::typst`'s job (decision 44), not the formatter's.
+
+```rust name=table path=md/fmt.rs
+fn table(aligns: &[Align], header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
+    let mut out = table_row(header);
+    out.push_str(&delimiter_row(aligns));
+    for r in rows {
+        out.push_str(&table_row(r));
+    }
+    out
+}
+
+fn table_row(cells: &[Vec<Inline>]) -> String {
+    let mut out = String::from("|");
+    for cell in cells {
+        out.push(' ');
+        out.push_str(&inlines_text_cell(cell));
+        out.push_str(" |");
+    }
+    out.push('\n');
+    out
+}
+
+fn delimiter_row(aligns: &[Align]) -> String {
+    let mut out = String::from("|");
+    for a in aligns {
+        let seg = match a {
+            Align::None => "---",
+            Align::Left => ":--",
+            Align::Right => "--:",
+            Align::Center => ":-:",
+        };
+        out.push(' ');
+        out.push_str(seg);
+        out.push_str(" |");
+    }
+    out.push('\n');
+    out
 }
 ```
 
@@ -281,7 +331,20 @@ document's real content.
 
 ```rust name=writer_and_run path=md/fmt.rs
 fn inlines_text(inlines: &[Inline]) -> String {
-    let mut w = Writer { out: String::new(), prev: '\n', line_start: true };
+    let mut w = Writer { out: String::new(), prev: '\n', line_start: true, esc_pipe: false };
+    w.run(inlines, ' ');
+    w.out
+}
+
+/// Render one table cell's own inline content. Unlike `inlines_text`, a
+/// cell never starts a fresh line -- it always follows `| `, mid-line -- so
+/// `line_start` starts `false`. Otherwise a cell beginning with `#`, `-`,
+/// `~`, or the like would be escaped as if it could open a new block, which
+/// it never can from inside a cell. A bare `|` is escaped on the way out
+/// instead: a literal pipe in a cell would otherwise be read back as a new
+/// column boundary on the next parse.
+fn inlines_text_cell(inlines: &[Inline]) -> String {
+    let mut w = Writer { out: String::new(), prev: ' ', line_start: false, esc_pipe: true };
     w.run(inlines, ' ');
     w.out
 }
@@ -292,6 +355,9 @@ struct Writer {
     /// must not change what the flanking rules see.
     prev: char,
     line_start: bool,
+    /// Set only when rendering a table cell (`inlines_text_cell`): escapes a
+    /// bare `|` so it round-trips instead of becoming a new column.
+    esc_pipe: bool,
 }
 
 impl Writer {
@@ -375,6 +441,7 @@ impl Writer {
                 // writes an unescaped `[`. A stray `]` in its text would
                 // close it early.
                 '\\' | '`' | '[' | ']' => self.out.push('\\'),
+                '|' if self.esc_pipe => self.out.push('\\'),
                 '*' | '_' => {
                     let (open, close) = super::inline::can_open_close(c, before, after);
                     if open || close {
@@ -619,6 +686,39 @@ mod tests {
         assert_eq!(stable("\\# not a heading\n"), "\\# not a heading\n");
         assert_eq!(stable("the year\n1986\\. it was\n"), "the year\n1986\\. it was\n");
         assert_eq!(stable("a \\[bracket\\]\n"), "a \\[bracket\\]\n");
+    }
+
+    #[test]
+    fn table_normalizes_delimiter_spelling() {
+        assert_eq!(
+            stable("A|B\n:-|-:\na|b\n"),
+            "| A | B |\n| :-- | --: |\n| a | b |\n"
+        );
+    }
+
+    #[test]
+    fn ragged_table_row_round_trips_without_padding() {
+        let source = "| A | B |\n| --- | --- |\n| only one |\n";
+        let once = stable(source);
+        assert_eq!(once, "| A | B |\n| --- | --- |\n| only one |\n");
+
+        let mut diags = Diags::new("t.md");
+        let original = Document::parse(source, &mut diags);
+        let mut again = Diags::new("t.md");
+        let reparsed = Document::parse(&once, &mut again);
+        assert_eq!(without_lines(&reparsed), without_lines(&original), "meaning changed");
+    }
+
+    #[test]
+    fn literal_pipe_in_a_cell_round_trips() {
+        let source = "| A |\n| --- |\n| a \\| b |\n";
+        let once = stable(source);
+
+        let mut diags = Diags::new("t.md");
+        let original = Document::parse(source, &mut diags);
+        let mut again = Diags::new("t.md");
+        let reparsed = Document::parse(&once, &mut again);
+        assert_eq!(without_lines(&reparsed), without_lines(&original), "meaning changed");
     }
 
     #[test]

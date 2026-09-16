@@ -79,7 +79,7 @@ historical run, unchanged, the same reuse `ctags_pilot.md` made.
 # Results
 
 | Task | Arm | Correct | Tool calls | Tokens | Wall-clock | Notes |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | A: decision citation | raw (`pilot.md`, historical) | yes | 5 | -- | -- | Grepped `architecture.md`'s decision list directly. |
 | A: decision citation | literate (fresh, this trial) | yes | 4 | 38,696 | ~15s | Grepped `src/graph/resolve.md` and `architecture.md`. Never ran `dankg`. |
 | A: decision citation | raw+LSP (fresh, this trial) | yes | 6 | 41,893 | ~28s | Grepped `resolve.rs` and `architecture.md`. Never called `lsp_query.py`. |

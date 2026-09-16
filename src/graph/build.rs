@@ -213,6 +213,32 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                     }
                 }
             }
+            // A link in a table cell is still a link. Rows are contiguous
+            // source lines with no gaps (a table stops at the first blank
+            // line, `md/block.rs`'s own `gather_table`), so a row's real
+            // line is derivable from the table's own start line without
+            // storing one per row: header, then delimiter, then row `r`.
+            Block::Table { header, rows, line, .. } => {
+                let owner = match current.clone() {
+                    Some(id) => id,
+                    None => {
+                        let id = file_node(&key, path, doc, nodes, &tags);
+                        *current = Some(id.clone());
+                        stack.push((0, id.clone()));
+                        id
+                    }
+                };
+                let mut header_cursor = *line;
+                for cell in header {
+                    collect_links(cell, &owner, &mut header_cursor, links, nodes);
+                }
+                for (r, row) in rows.iter().enumerate() {
+                    let mut cursor = *line + 2 + r as u32;
+                    for cell in row {
+                        collect_links(cell, &owner, &mut cursor, links, nodes);
+                    }
+                }
+            }
             _ => {}
         }
     };

@@ -142,6 +142,23 @@ pub enum Block {
     ThematicBreak { line: u32 },
     /// A construct outside the implemented subset, kept verbatim.
     Passthrough { text: String, line: u32 },
+    /// A GFM pipe table. `aligns` has one entry per header column, read off
+    /// the delimiter row. A data row is kept exactly as parsed -- shorter or
+    /// longer than the header -- never padded or truncated here. Padding is
+    /// a rendering-time concern (`render::typst`, `render::weave_html`), not
+    /// a parsing one: doing it here would make `fmt::verify`'s round-trip
+    /// check disagree with the original document.
+    Table { aligns: Vec<Align>, header: Vec<Vec<Inline>>, rows: Vec<Vec<Vec<Inline>>>, line: u32 },
+}
+
+/// A GFM table column's alignment, read off its delimiter cell
+/// (`:---`/`:---:`/`---:`/`---`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    None,
+    Left,
+    Center,
+    Right,
 }
 
 impl Block {
@@ -151,7 +168,8 @@ impl Block {
             | Block::Code { line, .. }
             | Block::Paragraph { line, .. }
             | Block::ThematicBreak { line }
-            | Block::Passthrough { line, .. } => *line,
+            | Block::Passthrough { line, .. }
+            | Block::Table { line, .. } => *line,
             Block::List(l) => l.line,
         }
     }
