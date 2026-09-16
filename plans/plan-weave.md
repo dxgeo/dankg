@@ -18,10 +18,10 @@ anything in). Confirmed with the user: single file only for a first
 cut, no corpus-wide weave yet.
 
 **Priority for this pass: the PDF/Typst backend, with real table
-support, not the HTML backend.** Two things drive that: Typst tables
+support, not the HTML backend.** Two things drive that. Typst tables
 are the whole reason a reader would pick PDF over HTML in the first
-place (a typeset table is where PDF actually earns the compile step),
-and DanKG's own corpus already produces exactly the kind of content a
+place -- a typeset table is where PDF actually earns the compile step.
+DanKG's own corpus already produces exactly the kind of content a
 table renders best -- an eval block's captured `duckdb -csv` output.
 Implementation proceeds table-subset first, then the Typst backend and
 its table mapping, then CSV/JSON data tables, and only then the HTML
@@ -65,8 +65,8 @@ code block and says so, rather than refusing to run.
 
 **Slug generation.** Heading anchors in the woven HTML page reuse
 `graph::slug::Slugger`, the same slugger `graph/build.rs` and
-`tangle.rs` already run per file, so a woven page's `#anchor`s agree
-with the graph's own node slugs instead of inventing a second numbering
+`tangle.rs` already run per file. A woven page's `#anchor`s agree with
+the graph's own node slugs instead of inventing a second numbering
 scheme for the same headings.
 
 ## What's new
@@ -74,8 +74,8 @@ scheme for the same headings.
 ### Weave scope: the whole document, not named/top-level blocks
 
 `tangle` and `eval` both narrow to `plan::top_level_blocks` -- named,
-top-level, not nested in a list (decision 23). Weave can't: the point
-is a document someone reads, so it walks every `Block` in
+top-level, not nested in a list (decision 23). Weave can't. The point
+is a document someone reads. Weave walks every `Block` in
 `Document.blocks`, in document order -- headings, paragraphs, lists,
 thematic breaks, passthrough, tables, and code blocks alike. Code
 blocks are rendered read-only. Weave never executes anything and never
@@ -96,9 +96,9 @@ executable block, nothing the graph needs. It stops being fine the
 moment weave has to typeset the same file: a raw `| a | b |` line
 surviving into a PDF as literal pipes is not a table, it is a
 formatting bug. Tables have to become real structure before either
-backend can render one, so this is a `md/block.rs` change, not a
-`render/` one, and it benefits `dankg fmt` too -- a table gets
-normalized the same way a list or a heading already does.
+backend can render one. So this is a `md/block.rs` change, not a
+`render/` one. It benefits `dankg fmt` too -- a table gets normalized
+the same way a list or a heading already does.
 
 A new `Block::Table { aligns: Vec<Align>, header: Vec<Vec<Inline>>, rows: Vec<Vec<Vec<Inline>>>, line: u32 }`, `Align` being
 `None`/`Left`/`Center`/`Right` per column, read off the delimiter row's
@@ -122,19 +122,17 @@ list-vs-paragraph scope cut elsewhere in this codebase:
 - A `|` inside an inline code span still splits a cell. Wrap it as
   `\|` to keep it out of the boundary. GFM special-cases pipes
   inside backticks; this hand-rolled scanner does not.
-- A table never interrupts an in-progress paragraph the way GFM allows.
-  A blank line before one is required here, matching how thematic
-  breaks and fences already behave in `interrupts_paragraph`... except
-  a table *is* added to that function's own checks, so a table **does**
-  correctly end a paragraph that precedes it without a blank line in
-  between -- it just cannot begin output mid-paragraph the one line a
-  table's header and delimiter rows require lookahead for.
+- A table does interrupt an in-progress paragraph with no blank line
+  required, the same as a heading or a fence already does in
+  `interrupts_paragraph`. This needs its own check rather than folding
+  into that function: `table_starts_at`'s own two-line lookahead runs
+  before `gather_paragraph` commits to including the next line at all.
 - A short or long data row is kept exactly as parsed, never padded or
   truncated to the header's column count, by the parser or by `fmt`.
   Padding at format time would make `fmt::verify`'s round-trip check
   disagree with the original document -- the AST has to keep what was
   actually there. Rectangling a ragged table into a grid is a
-  rendering-time concern, and belongs to decision 44's Typst mapping,
+  rendering-time concern and belongs to decision 44's Typst mapping,
   not to the subset itself.
 
 This becomes `## Decision 42: GFM tables enter the markdown subset`.
@@ -169,9 +167,9 @@ a PDF generator:
 - A fenced block tagged `csv`, `tsv`, or `json` renders as a `#table()`
   too, built from `data::table` (decision 45) instead of from
   `Block::Table`. Both paths converge on one internal
-  `emit_table(columns, header, rows, aligns)` helper, so the Typst
-  output for a GFM table and a CSV-tagged code block share one code
-  path and one set of tests.
+  `emit_table(columns, header, rows, aligns)` helper. The Typst output
+  for a GFM table and a CSV-tagged code block shares one code path and
+  one set of tests.
 - Passthrough content -- anything outside DanKG's markdown subset --
   is emitted as escaped literal text, never as raw Typst. An unparsed
   construct must never become unvalidated Typst markup.
@@ -184,7 +182,7 @@ a PDF generator:
 `tangle::spawn_against_dir`'s `cmd::build` plus `std::process::Command`
 call exactly. New config family in `src/config.md`: `FAMILIES` gains
 `("weave.", &["command"])`, a `Weave { name, command: Option<String> }`
-struct, and a `Config::weave(name)` lookup, so a corpus opts in with:
+struct, and a `Config::weave(name)` lookup. A corpus opts in with:
 
 ```
 [weave.pdf]
@@ -213,8 +211,7 @@ follows:
 - `from_delimited(text, delim: char) -> TableData` -- CSV (`,`) and TSV
   (`\t`) share one reader. Quoted fields, `""`-escaped quotes, first
   row is the header. Every byte sequence is *some* valid delimited
-  text, so this never fails -- there is no malformed-CSV case to
-  report.
+  text. This never fails -- there is no malformed-CSV case to report.
 - `from_json(text) -> Option<TableData>` -- a small hand-rolled
   recursive-descent JSON parser (null/bool/number/string/array/object;
   numbers and strings only, no crate), restricted to exactly the two
@@ -244,17 +241,17 @@ result fence is written back with no language tag at all -- bare
 triple backtick, whatever the reader's own configured command printed.
 Tagging a result fence with its true shape (`duckdb -csv` implies
 `csv`) would mean `eval::result::write_back` has to learn what format
-a command's output is in, and no config key records that today. That
-is a real, separate feature -- teaching `[db.*]`/`[lang.*]` sections an
+a command's output is in. No config key records that today. That is a
+real, separate feature -- teaching `[db.*]`/`[lang.*]` sections an
 explicit `format=` key, or inferring one from a `-csv` flag already
-sitting in `command` -- and it is out of scope for this plan. For now,
-a corpus author who wants a captured SQL result to render as a table
+sitting in `command`. It is out of scope for this plan. For now, a
+corpus author who wants a captured SQL result to render as a table
 adds `csv` to the result fence's info string by hand once `dankg eval`
 has written it; `dankg eval`'s own next run does not touch that tag
 either way, since it rewrites only the fence's *content*, not its
 info string. Both HTML and Typst renderers read the same `TableData`,
 whether it came from a hand-written CSV block or a hand-tagged eval
-result, so nothing above is eval-specific.
+result. Nothing above is eval-specific.
 
 This becomes `## Decision 45: Data tables from CSV/JSON/TSV fenced blocks`.
 
@@ -265,7 +262,7 @@ dankg weave <path> --format html|pdf [-o <file>] [--toc | --no-toc]
 ```
 
 - Exactly one path, the same single-target shape `init` already uses.
-  Corpus-wide weave is out of scope for now, so there's no
+  Corpus-wide weave is out of scope for now. There's no
   file-or-directory branch to build, unlike `tangle`/`check`.
 - `--format` is required, the same "needs `--lang`" refusal `tangle`'s
   own parser already gives for a missing required value.
@@ -279,7 +276,7 @@ dankg weave <path> --format html|pdf [-o <file>] [--toc | --no-toc]
   by tangle for the same purpose).
 - `--toc`/`--no-toc` only apply to `--format pdf`. HTML's table of
   contents always ships with its own in-page toggle (see the HTML
-  section below), so combining `--toc`/`--no-toc` with `--format html`
+  section below). Combining `--toc`/`--no-toc` with `--format html`
   is a parse error -- the same "ask for different things" refusal
   `--all`/`--depth` already give each other in `graph`'s own parser.
   Default when omitted: `--toc` (shown). Tables need no flag of their
@@ -290,11 +287,11 @@ dankg weave <path> --format html|pdf [-o <file>] [--toc | --no-toc]
 
 A new renderer, distinct from `render/html.rs` (the graph page).
 `tests/support/html.rs` already proves out a CommonMark block/inline ->
-HTML walk, but it lives in the test crate on purpose, as a conformance
-oracle scored against the markdown spec, not a product renderer -- and
-`src/` can't depend on `tests/` in the first place. So `weave_html.rs`
-is a fresh implementation with the same shape, extended with what a
-woven page actually needs:
+HTML walk. It lives in the test crate on purpose, though, as a
+conformance oracle scored against the markdown spec, not a product
+renderer. `src/` can't depend on `tests/` in the first place, either.
+So `weave_html.rs` is a fresh implementation with the same shape,
+extended with what a woven page actually needs:
 
 - Every heading gets an `id` from `graph::slug::Slugger`.
 - A `<nav id="toc">` built from `doc.headings()`, nested by level.
@@ -303,7 +300,7 @@ woven page actually needs:
   (pan, zoom, expand-on-click), a woven page has nothing to compute
   client-side.
 - `Block::Table` becomes `<table><thead>...` with a per-cell
-  `text-align` inline style carrying `Align`, and a fenced block tagged
+  `text-align` inline style carrying `Align`. A fenced block tagged
   `csv`/`tsv`/`json` renders through the exact same `TableData` ->
   `<table>` path (decision 45), with no `Align` to apply -- browser
   default alignment, nothing invented.
@@ -320,8 +317,8 @@ never renders markdown to HTML at runtime.
 
 <!-- dankg:depends target=../architecture.md#markdown-subset quote="DanKG itself never renders markdown to HTML." -->
 
-The fix is a one-line correction, not a reversal: that was true before
-weave existed, and the woven HTML page is the one deliberate exception,
+The fix is a one-line correction, not a reversal. That was true before
+weave existed. The woven HTML page is the one deliberate exception,
 kept in its own renderer rather than folded into the graph's. The
 `tests/support/html.rs` doc comment gets the matching one-line update.
 Neither gets any functional change.
@@ -343,12 +340,13 @@ picks the HTML or PDF renderer, writes the result, and returns a
 - `src/main.md`: import `dankg::weave`, add a `Command::Weave { .. }`
   arm, and a `weave_cmd` function mirroring `tangle_cmd`'s
   report-printing shape.
-- architecture.md: a new `# Weave` prose section near *Tangle* (CLI
-  shape, scope, the two backends, config, the table story end to end),
-  decisions 41-45 added to the decision list, the *Markdown subset*
-  section updated for both the HTML-rendering correction and the new
-  table entry, and the *Pipeline*/*Module layout* diagrams updated to
-  mention `weave.rs`, `render/weave_html.rs`, `render/typst.rs`, and
+- architecture.md gets four updates. A new `# Weave` prose section
+  near *Tangle* covers the CLI shape, scope, the two backends, config,
+  and the table story end to end. Decisions 41-45 get added to the
+  decision list. The *Markdown subset* section gets updated for both
+  the HTML-rendering correction and the new table entry. The
+  *Pipeline*/*Module layout* diagrams get updated to mention
+  `weave.rs`, `render/weave_html.rs`, `render/typst.rs`, and
   `data/table.rs`.
 
 ## What this explicitly does not do
@@ -378,7 +376,7 @@ picks the HTML or PDF renderer, writes the result, and returns a
   enum, table detection/parsing, and round-trip-safe table formatting
   (decision 42). Touching all three is unavoidable: a new `Block`
   variant is exhaustively matched in `fmt.rs` twice (normalize and
-  render) by design, so the compiler is what catches a forgotten arm.
+  render) by design. The compiler is what catches a forgotten arm.
 - `src/eval/sql.md` -- not modified, but the hand-rolled-scanner
   precedent `data::table`'s CSV and JSON readers both follow.
 - `src/cli.md`, `src/config.md`, `src/main.md` -- CLI, config family,
@@ -412,10 +410,14 @@ picks the HTML or PDF renderer, writes the result, and returns a
    - `typst.rs`: a GFM table with mixed alignment, a ragged row padded
      at render time, and a `csv`-tagged block, each rendering the
      expected `#table()` call.
-4. A manual smoke test against this repo: a scratch file combining a
-   GFM table and a fenced `csv` block, woven with `dankg weave scratch.md --format html -o /tmp/scratch.html`, opened by hand; and, with
-   `typst` installed locally (`/opt/homebrew/bin/typst`, confirmed
-   0\.15.1) and a scratch `.dankg/config` setting `[weave.pdf] command = typst compile {typ} {pdf}`, `dankg weave scratch.md --format pdf -o /tmp/scratch.pdf` run end to end -- confirming the compiled PDF
-   actually opens, that both tables typeset correctly (including the
-   aligned columns and the repeated header), and that `--no-toc`
-   actually omits the outline.
+4. A manual smoke test against this repo, in two parts. First, a
+   scratch file combining a GFM table and a fenced `csv` block, woven
+   with `dankg weave scratch.md --format html -o /tmp/scratch.html`,
+   opened by hand. Second, the same file compiled to PDF: with `typst`
+   installed locally (`/opt/homebrew/bin/typst`, confirmed 0.15.1) and
+   a scratch `.dankg/config` setting
+   `[weave.pdf] command = typst compile {typ} {pdf}`, run
+   `dankg weave scratch.md --format pdf -o /tmp/scratch.pdf` end to
+   end. Confirm the compiled PDF actually opens. Confirm both tables
+   typeset correctly, aligned columns and repeated header included.
+   Confirm `--no-toc` actually omits the outline.

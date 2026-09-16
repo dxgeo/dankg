@@ -430,9 +430,9 @@ alignment, then data rows. Detection is the two-line lookahead
 exactly as parsed -- shorter or longer than the header -- and stops at
 the first line `interrupts_paragraph` would also treat as a new block,
 the same boundary a paragraph already respects. Two narrowings, both
-deliberate: a `|` inside a backtick code span still splits a cell
-(wrap it as `\|` to keep it out of the boundary), and `\|` needs no
-special unescaping here at all -- `inline::parse` already turns any
+deliberate. A `|` inside a backtick code span still splits a cell --
+wrap it as `\|` to keep it out of the boundary. `\|` needs no special
+unescaping here at all: `inline::parse` already turns any
 backslash-escaped ASCII punctuation into literal text, `|` included.
 
 ```rust name=table path=md/block.rs

@@ -108,12 +108,12 @@ fn parse_records(text: &str, delim: char) -> Vec<Vec<String>> {
 ## JSON
 
 A small hand-rolled recursive-descent parser -- null/bool/number
-(kept as its own original text, never parsed to a float, so a large or
-precise number is never silently rounded)/string/array/object -- then
-a second pass that recognizes exactly the two shapes a table can come
-from. Anything else returns `None`; the caller (`weave`) falls back to
-an ordinary code block, the same graceful degradation an unconfigured
-`[weave.pdf] command` already gets.
+(kept as its own original text rather than parsed to a float, so a
+large or precise number is never silently rounded)/string/array/object --
+then a second pass that recognizes exactly the two shapes a table can
+come from. Anything else returns `None`; the caller (`weave`) falls
+back to an ordinary code block, the same graceful degradation an
+unconfigured `[weave.pdf] command` already gets.
 
 ```rust name=json_value path=data/table.rs
 #[derive(Debug, Clone, PartialEq)]
