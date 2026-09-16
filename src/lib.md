@@ -23,6 +23,7 @@ conversion proceeds. Only what backs each name does.
 pub mod cli;
 pub mod cmd;
 pub mod config;
+pub mod data;
 pub mod depends;
 pub mod diag;
 pub mod eval;
