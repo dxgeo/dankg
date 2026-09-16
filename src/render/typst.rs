@@ -11,6 +11,11 @@
 //! and a `csv`/`tsv`/`json`-tagged code block both become a Typst
 //! `#table()`, converging on one `emit_table` so the two sources share one
 //! code path.
+//!
+//! Targets Typst 0.15.1's syntax (confirmed by `tests/typst.rs`'s own
+//! real-compile check). Typst is still pre-1.0; no `typst --version`
+//! check guards this, the same as `duckdb` gets none from `[db.*]
+//! command` -- see this file's own prose for why.
 
 use crate::data::table::{self, TableData};
 use crate::diag::Diags;

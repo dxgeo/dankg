@@ -20,3 +20,4 @@ pub mod render;
 pub mod tag;
 pub mod tangle;
 pub mod tui;
+pub mod weave;

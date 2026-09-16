@@ -83,8 +83,35 @@ pub enum Command {
     /// `paths: Vec<String>` variant above, `init` never reads an
     /// existing corpus, only ever writes into one place.
     Init { path: String },
+    /// `dankg weave <path> --format html|pdf [-o <file>] [--toc | --no-toc]`:
+    /// turns one markdown file into a readable document (plan-weave.md,
+    /// decisions 41-45). Exactly one path, the same single-target shape
+    /// `init` already uses -- weave never walks a corpus. `--toc`/`--no-toc`
+    /// only apply to `--format pdf`; HTML's own table of contents always
+    /// ships with its in-page toggle, so combining either with
+    /// `--format html` is a parse error.
+    Weave { path: String, format: WeaveFormat, output: Option<String>, toc: bool },
     Help,
     Version,
+}
+
+/// `dankg weave`'s own two output formats, kept separate from `Format`
+/// above -- folding `pdf` into that shared enum would let
+/// `graph --format pdf` parse too, which makes no sense for a graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeaveFormat {
+    Html,
+    Pdf,
+}
+
+impl WeaveFormat {
+    fn parse(value: &str) -> Result<WeaveFormat, String> {
+        match value {
+            "html" => Ok(WeaveFormat::Html),
+            "pdf" => Ok(WeaveFormat::Pdf),
+            other => Err(format!("unknown weave format `{other}` (expected html or pdf)")),
+        }
+    }
 }
 ```
 
@@ -107,17 +134,20 @@ usage:
   dankg check [<path>...] [--no-cache]
   dankg tangle <path>... --lang <lang> [-o <dir>] [--no-cache]
   dankg init  [<path>]
+  dankg weave <path> --format html|pdf [-o <file>] [--toc | --no-toc]
   dankg --help
   dankg --version
 
 options:
-  --format <fmt>   json (default), html, dot, mermaid
+  --format <fmt>   json (default), html, dot, mermaid; html or pdf for weave
   --depth <n>      hops from the entry to draw; default from [graph] depth
   --all            draw the whole index (graph/tui), or every eval DAG leaf
   --live           spawn every [db.*]'s own list command (graph only) and add
                    a node for whatever it reports that the corpus does not
                    already explain
   -o, --output     write to a file instead of stdout, or a directory (tangle)
+  --toc            include a table of contents (weave --format pdf; default)
+  --no-toc         omit it
   --no-cache       ignore .dankg/cache/ and write nothing back to it
   --check          report files not in normal form; write nothing
   --block <name>   the named block eval should run, with its dependencies
@@ -247,6 +277,21 @@ existing corpus on purpose makes a nested one, the same way
 and `.dankgignore` are only ever written when not already there;
 existing content elsewhere in `<path>` is never touched.
 
+`weave` turns one markdown file into a readable document -- HTML, or
+PDF compiled through Typst -- never a whole corpus (plan-weave.md,
+decision 41). `--format html` defaults to stdout, matching every other
+`--format`'s own default; `--format pdf` defaults to
+`.dankg/build/weave/<name>.pdf`. Weave always writes the Typst source
+to `.dankg/build/weave/<name>.typ` first, whether or not a
+`[weave.pdf] command` exists to compile it -- unconfigured, weave
+reports that no PDF was produced rather than refusing to run, the same
+graceful degradation an unconfigured `[tangle.*] command` already
+gets. `[weave.pdf] template` and `[weave.html] css` each name a local
+file weave reads once: a Typst preamble concatenated in front of the
+emitted body, or CSS appended after the page's own built-in
+stylesheet. Either missing or unreadable warns and is skipped, not
+fatal.
+
 Diagnostics go to stderr, so stdout stays pipeable.
 ";
 ```
@@ -275,12 +320,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         "check" => return check(args),
         "tangle" => return tangle(args),
         "init" => return init(args),
+        "weave" => return weave(args),
         other if other.starts_with('-') => {
             return Err(format!("unknown option `{other}`"));
         }
         other => {
             return Err(format!(
-                "unknown command `{other}` (expected `graph`, `index`, `fmt`, `tui`, `eval`, `check`, `tangle`, or `init`)"
+                "unknown command `{other}` (expected `graph`, `index`, `fmt`, `tui`, `eval`, `check`, `tangle`, `init`, or `weave`)"
             ));
         }
     }
@@ -585,6 +631,48 @@ fn init<I: Iterator<Item = String>>(args: I) -> Result<Command, String> {
     }
 
     Ok(Command::Init { path: path.unwrap_or_else(|| ".".to_string()) })
+}
+
+/// `weave` takes exactly one path, the same shape `init` already uses --
+/// unlike `tangle`/`check`, there is no file-or-directory branch, since
+/// weave never walks a corpus (plan-weave.md decision 41).
+fn weave<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
+    let mut path: Option<String> = None;
+    let mut format: Option<WeaveFormat> = None;
+    let mut output = None;
+    let mut toc: Option<bool> = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--format" | "-f" => {
+                let value = args.next().ok_or("`--format` needs a value")?;
+                format = Some(WeaveFormat::parse(&value)?);
+            }
+            "-o" | "--output" => {
+                output = Some(args.next().ok_or("`--output` needs a value")?);
+            }
+            "--toc" => toc = Some(true),
+            "--no-toc" => toc = Some(false),
+            "-h" | "--help" => return Ok(Command::Help),
+            other if other.starts_with("--format=") => {
+                format = Some(WeaveFormat::parse(&other["--format=".len()..])?);
+            }
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown option `{other}`"));
+            }
+            _ if path.is_some() => {
+                return Err(format!("`weave` takes exactly one path (already have `{}`)", path.unwrap()));
+            }
+            other => path = Some(other.to_string()),
+        }
+    }
+
+    let path = path.ok_or("`weave` needs a path")?;
+    let format = format.ok_or("`weave` needs `--format html` or `--format pdf`")?;
+    if format == WeaveFormat::Html && toc.is_some() {
+        return Err("`--toc`/`--no-toc` only apply to `--format pdf`; HTML's own table of contents always ships with its in-page toggle".to_string());
+    }
+    Ok(Command::Weave { path, format, output, toc: toc.unwrap_or(true) })
 }
 ```
 
@@ -987,6 +1075,54 @@ mod tests {
             parse(args(&["check", "notes", "--no-cache"])).unwrap(),
             Command::Check { paths: vec!["notes".into()], cache: false }
         );
+    }
+
+    #[test]
+    fn weave_collects_path_format_and_output() {
+        assert_eq!(
+            parse(args(&["weave", "a.md", "--format", "html"])).unwrap(),
+            Command::Weave { path: "a.md".into(), format: WeaveFormat::Html, output: None, toc: true }
+        );
+        assert_eq!(
+            parse(args(&["weave", "a.md", "--format=pdf", "-o", "a.pdf"])).unwrap(),
+            Command::Weave {
+                path: "a.md".into(),
+                format: WeaveFormat::Pdf,
+                output: Some("a.pdf".into()),
+                toc: true,
+            }
+        );
+    }
+
+    #[test]
+    fn weave_toc_defaults_to_shown_and_no_toc_turns_it_off() {
+        assert_eq!(
+            parse(args(&["weave", "a.md", "--format", "pdf", "--no-toc"])).unwrap(),
+            Command::Weave { path: "a.md".into(), format: WeaveFormat::Pdf, output: None, toc: false }
+        );
+    }
+
+    #[test]
+    fn weave_needs_a_path_and_a_format() {
+        assert!(parse(args(&["weave", "--format", "pdf"])).unwrap_err().contains("needs a path"));
+        assert!(parse(args(&["weave", "a.md"])).unwrap_err().contains("needs `--format"));
+    }
+
+    #[test]
+    fn weave_takes_at_most_one_path() {
+        assert!(parse(args(&["weave", "a.md", "b.md", "--format", "pdf"]))
+            .unwrap_err()
+            .contains("exactly one path"));
+    }
+
+    #[test]
+    fn weave_toc_flags_refuse_to_pair_with_format_html() {
+        assert!(parse(args(&["weave", "a.md", "--format", "html", "--toc"]))
+            .unwrap_err()
+            .contains("only apply to `--format pdf`"));
+        assert!(parse(args(&["weave", "a.md", "--format", "html", "--no-toc"]))
+            .unwrap_err()
+            .contains("only apply to `--format pdf`"));
     }
 }
 ```

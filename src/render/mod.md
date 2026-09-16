@@ -1,10 +1,10 @@
 # Render mod
 
-Six renderers exist: `render/json.rs`, `dot.rs`, `mermaid.rs`, `html.rs`,
-`assets.rs`, and `typst.rs`. The first five handle one output format
-`dankg graph --format` accepts; `typst.rs` is `dankg weave --format pdf`'s
-own markup emitter (plan-weave.md, decision 44). This file only declares
-them.
+Seven renderers exist: `render/json.rs`, `dot.rs`, `mermaid.rs`, `html.rs`,
+`assets.rs`, `typst.rs`, and `weave_html.rs`. The first five handle one
+output format `dankg graph --format` accepts. The last two are
+`dankg weave`'s own pair, one per `--format` value (plan-weave.md,
+decisions 43-44). This file only declares them.
 
 Nothing here re-exports anything or adds its own logic. Once each sibling
 has its own literate source, this file's only job is to list them. That is
@@ -23,4 +23,5 @@ pub mod html;
 pub mod json;
 pub mod mermaid;
 pub mod typst;
+pub mod weave_html;
 ```

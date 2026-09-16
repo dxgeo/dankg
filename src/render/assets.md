@@ -667,3 +667,124 @@ pub const JS: &str = r##"
 })();
 "##;
 ```
+
+`WEAVE_CSS` is `render::weave_html`'s own stylesheet, never shared with
+`CSS` above. Prose typography -- a serif reading column, a code font,
+table borders -- has nothing in common with a pan/zoom SVG canvas's
+rules. A woven page has no script to style around, either: the whole
+table-of-contents toggle is CSS alone, a hidden checkbox, a `<label>`
+that toggles it, and a `:checked` sibling selector that hides the nav
+body. No JavaScript exists for it to misfire.
+
+```rust name=weave_css path=render/assets.rs
+pub const WEAVE_CSS: &str = r##"
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa;
+  --fg: #1c1c1b;
+  --muted: #8c8c86;
+  --rule: #dcdcd6;
+  --code-bg: #f2f2ef;
+  --accent: #2f6f4f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a;
+    --fg: #e6e6e2;
+    --muted: #7e8188;
+    --rule: #303338;
+    --code-bg: #1f2124;
+    --accent: #74c39a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.6 ui-serif, Georgia, "Times New Roman", serif;
+}
+
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.25;
+}
+
+a { color: var(--accent); }
+
+code, pre {
+  font: 0.9em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+
+pre {
+  background: var(--code-bg);
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  border-radius: 6px;
+}
+
+pre code { background: none; padding: 0; }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1.25rem 0;
+}
+
+th, td {
+  border: 1px solid var(--rule);
+  padding: 0.4rem 0.65rem;
+  text-align: left;
+}
+
+th { background: var(--code-bg); }
+
+hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 2rem 0;
+}
+
+.toc-toggle { display: none; }
+
+nav#toc {
+  max-width: 46rem;
+  margin: 1rem auto 0;
+  padding: 0.75rem 1.25rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+
+nav#toc .toc-label {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  display: block;
+}
+
+nav#toc .toc-body { margin-top: 0.6rem; }
+nav#toc ul { list-style: none; margin: 0; padding-left: 1.1rem; }
+nav#toc > .toc-body > ul { padding-left: 0; }
+nav#toc a { text-decoration: none; }
+nav#toc a:hover { text-decoration: underline; }
+
+.toc-toggle:checked ~ nav#toc .toc-body { display: none; }
+.toc-toggle:checked ~ nav#toc .toc-label::after {
+  content: " (hidden -- click to show)";
+  font-weight: 400;
+  color: var(--muted);
+}
+"##;
+```

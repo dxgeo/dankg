@@ -10,7 +10,7 @@ the right `ExitCode`. Every command's own logic lives in the library
 crate (`session::run`, `tangle::run`, `tui::run`), never here.
 
 ```rust name=module_doc path=main.rs
-use dankg::cli::{self, Command, Format};
+use dankg::cli::{self, Command, Format, WeaveFormat};
 use dankg::config::Config;
 use dankg::depends;
 use dankg::diag::{Diags, Level};
@@ -27,6 +27,7 @@ use dankg::render::{dot, html, json, mermaid};
 use dankg::tag;
 use dankg::tangle;
 use dankg::tui;
+use dankg::weave;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -84,6 +85,9 @@ fn main() -> ExitCode {
             report(tangle_cmd(&paths, &lang, output.as_deref(), cache))
         }
         Command::Init { path } => report(init_report(&path)),
+        Command::Weave { path, format, output, toc } => {
+            report(weave_cmd(&path, format, output.as_deref(), toc))
+        }
     }
 }
 ```
@@ -104,6 +108,34 @@ fn tangle_cmd(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -
     }
     if report.ran_command {
         eprintln!("ran `[tangle.{lang}] command`");
+    }
+    Ok(())
+}
+
+/// `dankg weave`: never automatic, the same principle as `tangle` (decision
+/// 9) -- and, like `tangle`, no confirm prompt either, since weave does not
+/// run the reader's program, only compiles a document.
+fn weave_cmd(path: &str, format: WeaveFormat, output: Option<&str>, toc: bool) -> Result<(), String> {
+    let (weave_format, label) = match format {
+        WeaveFormat::Html => (weave::Format::Html, "html"),
+        WeaveFormat::Pdf => (weave::Format::Pdf, "pdf"),
+    };
+    let report = weave::run(path, weave_format, output, toc)?;
+    match format {
+        WeaveFormat::Html => {
+            if let Some(p) = &report.output {
+                eprintln!("wrote {}", p.display());
+            }
+        }
+        WeaveFormat::Pdf => {
+            if let Some(typ) = &report.typ_path {
+                eprintln!("wrote {}", typ.display());
+            }
+            match (&report.pdf_written, &report.output) {
+                (true, Some(pdf)) => eprintln!("compiled {}", pdf.display()),
+                _ => eprintln!("no `[weave.{label}] command` configured; PDF not produced"),
+            }
+        }
     }
     Ok(())
 }
