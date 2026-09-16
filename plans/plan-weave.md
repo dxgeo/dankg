@@ -177,22 +177,53 @@ a PDF generator:
   true.
 
 `weave::run` always writes the `.typ` to
-`.dankg/build/weave/<name>.typ`, then spawns a configured
+`.dankg/build/weave/<name>.typ` (`<name>` is `graph::build::file_stem`
+of `strip_extension(path)`, not `strip_extension` alone -- `Path::join`
+silently replaces its base entirely when the joined piece is itself
+absolute, which `strip_extension` alone can be whenever a reader passes
+an absolute path; `file_stem` never is), then spawns a configured
 `[weave.pdf] command` against it -- mirroring
 `tangle::spawn_against_dir`'s `cmd::build` plus `std::process::Command`
 call exactly. New config family in `src/config.md`: `FAMILIES` gains
-`("weave.", &["command"])`, a `Weave { name, command: Option<String> }`
+`("weave.", &["command", "template", "css"])`, a
+`Weave { name, command: Option<String>, template: Option<String>, css: Option<String> }`
 struct, and a `Config::weave(name)` lookup. A corpus opts in with:
 
 ```
 [weave.pdf]
 command = typst compile {typ} {pdf}
+template = docs/weave-template.typ
+
+[weave.html]
+css = docs/weave-theme.css
 ```
 
 Unconfigured, weave still writes the `.typ` and reports that no PDF
 was produced, the same graceful degradation tangle already gives an
 unconfigured build step. No confirm prompt either way -- weave doesn't
 run the reader's program, only compiles a document.
+
+**Custom templates, for both backends.** `[weave.pdf] template` names
+a Typst file `weave::run` reads once and concatenates in front of the
+emitted body, verbatim, before the `.typ` is ever written --
+`render::typst` itself never learns a template exists. A plain-text
+prepend, deliberately, not a Typst `#import`: an `#import`'s own path
+resolves relative to the *compiled* `.typ` file under
+`.dankg/build/weave/`, not to the config that named it, which is
+exactly the mismatch string concatenation has no path to get wrong.
+This is also the natural, idiomatic shape for a minimal Typst template
+in the first place -- `#set page(...)`/`#show heading: ...` rules
+placed before a document's own content already apply to everything
+that follows, with no wrapper function or import required.
+`[weave.html] css` is the same idea for the HTML backend: a stylesheet
+`weave::run` reads once and hands to `weave_html::render`, appended
+after `WEAVE_CSS` inside the page's own `<style>` tag rather than
+replacing it. Overriding one rule -- a font, a color, the reading
+column's width -- never costs the reader the built-in
+table-of-contents toggle or table borders this way. Either file missing or
+unreadable warns and is skipped, the same "misconfigured is reported,
+not fatal" shape `Config::load` itself already takes for an unreadable
+`.dankg/config`.
 
 **Typst's own version is targeted by documentation, not pinned by
 code.** Typst is still pre-1.0. Its syntax has changed between
@@ -333,6 +364,10 @@ extended with what a woven page actually needs:
   `WEAVE_CSS` constant in `render/assets.md`, kept separate from the
   graph page's own `CSS` -- prose typography (and now table styling)
   has nothing in common with a pan/zoom SVG canvas's rules.
+- `weave_html::render` takes an `extra_css: Option<&str>` parameter --
+  `[weave.html] css`'s own content, read by `weave::run` -- appended
+  after `WEAVE_CSS` inside the same `<style>` tag. See "Custom
+  templates" above.
 
 This becomes `## Decision 43: Weave HTML rendering`. It also means one
 existing sentence in architecture.md stops being true and needs fixing
@@ -354,7 +389,10 @@ corpus-walk branch. Reads and parses the one file, discovers root and
 config the same way `tangle::run`'s single-file branch already does,
 picks the HTML or PDF renderer, writes the result, and returns a
 `Report` for `main.rs` to print -- mirroring `tangle::Report` and
-`tangle_cmd`'s own shape.
+`tangle_cmd`'s own shape. `Report` carries `output: Option<PathBuf>`
+(the final artifact -- a file, or `None` for HTML's own stdout
+default), `typ_path: Option<PathBuf>` (PDF only, always written), and
+`pdf_written: bool`.
 
 ### Wiring
 
