@@ -266,7 +266,7 @@ A pipe table is no longer `Block::Passthrough`. A new `Block::Table { aligns, he
 
 ## Decision 43: Weave HTML rendering
 
-`render::weave_html` is a fresh renderer, not a reuse of `render::html` (the graph page) or of `tests/support/html.rs`'s CommonMark conformance oracle. One self-contained page: `WEAVE_CSS` (a new constant in `render/assets.rs`) inlined into a `<style>` tag, heading anchors from `graph::slug::Slugger`, and a table of contents whose expand/collapse toggle is pure CSS -- a hidden checkbox, a `<label>`, a `:checked` sibling selector, no JavaScript. `[weave.html] css` names a stylesheet appended after `WEAVE_CSS` rather than replacing it, so overriding one rule never costs the built-in toggle or table styling.
+`render::weave_html` is a fresh renderer, not a reuse of `render::html` (the graph page) or of `tests/support/html.rs`'s CommonMark conformance oracle. One self-contained page: `WEAVE_CSS` (a new constant in `render/assets.rs`) inlined into a `<style>` tag, heading anchors from `graph::slug::Slugger`, and a table of contents whose expand/collapse toggle is pure CSS -- a hidden checkbox, a `<label>`, a `:checked` sibling selector, no JavaScript. `[weave.html] css` names a stylesheet appended after `WEAVE_CSS` rather than replacing it. Overriding one rule this way never costs the built-in toggle or table styling.
 
 **Rationale:** A woven HTML page is the one deliberate exception to *Markdown subset*'s own claim that DanKG never renders markdown to HTML at runtime -- true before weave existed, not after. Keeping it in its own renderer, rather than folding it into `render::html`, matches the fact that a prose reading page and a pan/zoom SVG canvas share nothing but the word "HTML."
 
@@ -447,8 +447,12 @@ src/
     json.rs          canonical graph dump
     dot.rs           graphviz
     mermaid.rs       flowchart
-    html.rs          single self-contained file
+    html.rs          single self-contained graph page
     assets.rs        CSS + JS as const &str, inlined at build
+    typst.rs         weave --format pdf's own markup emitter
+    weave_html.rs    weave --format html's own self-contained page
+  data/
+    table.rs         CSV/TSV/JSON readers for weave's data tables
   eval/
     plan.rs          dep DAG, topological order, "what will run" report
     files.rs         loads the (usually zero) extra files a cross-file
@@ -456,6 +460,7 @@ src/
     run.rs           process spawn, timeout, output capture
     result.rs        hashing, write-back, staleness detection
   tangle.rs          heading -> file placement, tree assembly, build spawn
+  weave.rs           single-file document -> HTML or PDF via Typst
   depends.rs         dankg:depends marker: quote-anchored prose staleness
 ```
 
@@ -2597,6 +2602,105 @@ reason pilot 1 needed none either. That arrives once a second module
   other purely-authorial, per-file glue preferences ever justify their own
   `dankg.tangle.*` key, versus staying a `glue` script's own problem to
   solve by reading the block source it is free to read, is open.
+
+# Weave
+
+Tangle assembles a program. Weave is the literate-programming term for
+the other half: typesetting the same source as a document a person
+reads, rather than compiling it into one a machine runs. `dankg weave`
+turns one markdown file into HTML or a PDF (compiled through Typst).
+
+```
+dankg weave <path> --format html|pdf [-o <file>] [--toc | --no-toc]
+```
+
+<!-- dankg:depends target=#tangle quote="extracting and reassembling code chunks into compilable source, as opposed to" -->
+
+## Weave's own scope
+
+Single-file only (decision 41). Unlike `tangle`/`eval`, there is no
+directory-or-several-paths branch: naming a corpus-wide walk is out of
+scope for now, confirmed with the user during design. Weave walks
+every `Block` in the parsed document, in order -- headings,
+paragraphs, lists, thematic breaks, tables, passthrough, and code
+blocks alike -- not the named, top-level subset `tangle`/`eval`
+narrow to (decision 23), since weave has nothing to run and nothing to
+place in a source tree. A construct outside DanKG's markdown subset
+(`Block::Passthrough`) renders as escaped literal text in both
+backends, never as raw markup: an unparsed construct must never become
+unvalidated HTML or Typst.
+
+## Tables
+
+A GFM pipe table is real structure, `Block::Table`, not
+`Block::Passthrough` (decision 42). A fenced block tagged `csv`,
+`tsv`, or `json` is a second table source, read by `data::table`'s
+hand-rolled CSV/TSV and JSON readers into the same `TableData { header, rows }` shape regardless of which produced it (decision 45). Both
+weave backends consume both sources through one shared table emitter
+apiece. The language tag alone decides; content is never sniffed.
+
+## HTML backend
+
+`render::weave_html` (decision 43) is a single self-contained page:
+`WEAVE_CSS` inlined into a `<style>` tag, heading anchors from
+`graph::slug::Slugger`, and a table of contents whose expand/collapse
+toggle is pure CSS -- a hidden checkbox, a `<label>`, a `:checked`
+sibling selector. No JavaScript exists on the page for it to misfire.
+`--format html` defaults to stdout, the same as every other
+`--format`'s own default.
+
+## PDF backend
+
+`render::typst` (decision 44) emits Typst markup only -- a sibling to
+`render::dot`/`render::mermaid`, never a PDF generator. `weave::run`
+always writes `.dankg/build/weave/<name>.typ`, then spawns a
+configured `[weave.pdf] command` (typically
+`typst compile {typ} {pdf}`) against it. Unconfigured, weave still
+writes the `.typ` and reports that no PDF was produced, the same
+graceful degradation an unconfigured `[tangle.*] command` already
+gets. `--toc`/`--no-toc` control Typst's own `#outline()`; HTML's
+table of contents always ships with its in-page toggle instead, so
+combining either flag with `--format html` is a parse error.
+
+## Custom templates
+
+`[weave.pdf] template` names a Typst file `weave::run` reads once and
+concatenates in front of the emitted body, verbatim, before the `.typ`
+is written. A plain-text prepend, deliberately, not a Typst `#import`:
+an `#import`'s own path resolves relative to the *compiled* `.typ`
+under `.dankg/build/weave/`, not to the config that named it, which is
+exactly the mismatch string concatenation has no path to get wrong.
+`[weave.html] css` is the same idea for the HTML backend: a stylesheet
+appended after `WEAVE_CSS` inside the page's own `<style>` tag, rather
+than replacing it. Overriding one rule this way never costs the
+built-in toggle or table styling. Either file missing or unreadable warns and
+is skipped, the same "misconfigured is reported, not fatal" shape
+`Config::load` itself already takes for an unreadable `.dankg/config`.
+
+## Typst's version is never pinned
+
+Typst is still pre-1.0. `render::typst`'s own syntax targets 0.15.1,
+documented in its module doc and confirmed by `tests/typst.rs`'s real
+`typst compile` check, never enforced by a runtime `typst --version`
+check or by linking a Typst crate. Pandoc's own Typst writer and
+Org-mode's LaTeX/`ox-typst` export backends solve the identical "emit
+markup, shell out to compile it" problem the identical way: document a
+target version, let a real incompatibility surface as the compiler's
+own error. `duckdb` already gets exactly this treatment from `[db.*] command` in this codebase.
+
+## Open questions (Weave)
+
+- Corpus-wide weave -- `paths: Vec<String>`, directory walking, the
+  way tangle's decision 26 does it -- is confirmed out of scope for
+  now, not ruled out permanently.
+- Tagging an eval result fence with its own output format
+  automatically (`duckdb -csv` implying a `csv` tag) is deferred
+  (decision 45): no config key today records what format a `[db.*]`/
+  `[lang.*]` command's output is in.
+- Syntax highlighting in the HTML backend's code blocks is out of
+  scope. Typst gets it for free in the PDF backend; HTML code blocks
+  stay plain `<pre><code>`, the same as the graph page's own
+  conformance oracle.
 
 # File dependencies
 
