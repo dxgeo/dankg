@@ -98,11 +98,11 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool) -> Resul
 
     let entry_rel = abs_path.strip_prefix(&root).map(index::to_slash).unwrap_or_else(|_| path.to_string());
     warn_stale_pairs(&doc, path, &entry_rel, &root, &config, &mut diags);
-    let tables = produced_tables(&doc, &entry_rel, &root, &mut diags);
+    let (tables, images) = produced_artifacts(&doc, &entry_rel, &root, &mut diags);
 
     let report = match format {
-        Format::Html => render_html(&doc, &title, &config, &root, &tables, output, &mut diags)?,
-        Format::Pdf => render_pdf(&doc, &title, &config, &root, &name, &tables, output, toc, &mut diags)?,
+        Format::Html => render_html(&doc, &title, &config, &root, &tables, &images, output, &mut diags)?,
+        Format::Pdf => render_pdf(&doc, &title, &config, &root, &name, &tables, &images, output, toc, &mut diags)?,
     };
 
     diags.sort();
@@ -167,59 +167,92 @@ fn warn_stale_pairs(doc: &Document, path: &str, entry_rel: &str, root: &Path, co
 ```
 
 A recognized pair (decision 46) whose source block also declares
-`produces=file:PATH` (decision 33) may have a real table sitting on
-disk, not just captured stdout -- `df.to_csv(...)`, say, printing
-nothing itself. `produced_tables` resolves that path the same way
-`dankg check` already verifies one (`plan::parse_artifact`/`resolve_artifact`,
-decision 33's own logic, reused rather than reimplemented) and, for a
-`.csv`/`.tsv`/`.json` extension, reads it. Anything else -- a
-different extension, a missing or unreadable file, an artifact path
-that escapes the root -- is silently absent from the returned map;
-only a real read failure gets a stderr warning, matching decision
-47's own "misconfigured is reported, not fatal" stance. The map holds
-a lang tag and the file's own raw content, keyed by the source
-block's index -- not a parsed `TableData`, since a `.json` file that
-turns out not to be table-shaped still needs `code_or_data_table`'s
-own existing fallback to an ordinary code block (decision 45), and
-that dispatch already lives in both renderers. Handing over raw text
-and a lang tag reuses it exactly, rather than a third copy of the
-same csv/tsv/json-or-fallback logic.
+`produces=file:PATH` (decision 33) may have a real table or a real
+image sitting on disk, not just captured stdout -- `df.to_csv(...)`
+or `plt.savefig(...)`, say, printing nothing themselves.
+`produced_artifacts` resolves that path the same way `dankg check`
+already verifies one (`plan::parse_artifact`/`resolve_artifact`,
+decision 33's own logic, reused rather than reimplemented) and reads
+it, once its extension says which of the two it is. Anything else --
+an unrecognized extension, a missing or unreadable file, an artifact
+path that escapes the root -- is silently absent from both returned
+maps; only a real read failure gets a stderr warning, matching
+decision 47's own "misconfigured is reported, not fatal" stance.
+
+The table map holds a lang tag and the file's own raw content, keyed
+by the source block's index -- not a parsed `TableData`, since a
+`.json` file that turns out not to be table-shaped still needs
+`code_or_data_table`'s own existing fallback to an ordinary code
+block (decision 45). That dispatch already lives in both renderers.
+Handing over raw text and a lang tag reuses it exactly, rather than a
+third copy of the same csv/tsv/json-or-fallback logic. The image map
+holds the raw bytes and the artifact's own root-relative path --
+unlike a table, an image is never fed through a shared parser either
+backend already has. Each renders it its own way (decision 51).
 
 <!-- dankg:depends target=../architecture.md#decision-50-a-producesfile-csvtsvjson-artifact-renders-as-a-table quote="never a parsed `TableData`" -->
 
-```rust name=produced_tables path=weave.rs
-fn produced_tables(doc: &Document, entry_rel: &str, root: &Path, diags: &mut Diags) -> HashMap<usize, (String, String)> {
+```rust name=produced_artifacts path=weave.rs
+fn produced_artifacts(
+    doc: &Document,
+    entry_rel: &str,
+    root: &Path,
+    diags: &mut Diags,
+) -> (HashMap<usize, (String, String)>, HashMap<usize, (Vec<u8>, String)>) {
     let mut tables = HashMap::new();
+    let mut images = HashMap::new();
     for b in plan::top_level_blocks(doc, entry_rel) {
         if result::recorded_hash(doc, b.index, b.name).is_none() {
-            continue; // no recognized pair, nothing to attach a table to
+            continue; // no recognized pair, nothing to attach an artifact to
         }
         let Some(raw) = b.produces else { continue };
         let Some(rel_path) = plan::parse_artifact(raw) else { continue };
-        let Some(lang) = table_lang(rel_path) else { continue };
         let Some(resolved) = plan::resolve_artifact(entry_rel, rel_path) else {
             diags.warn(b.line, format!("`{}` produces={raw} escapes the root; not rendered", b.name));
             continue;
         };
-        match fs::read_to_string(root.join(&resolved)) {
-            Ok(content) => {
-                tables.insert(b.index, (lang.to_string(), content));
+        if let Some(lang) = table_lang(rel_path) {
+            match fs::read_to_string(root.join(&resolved)) {
+                Ok(content) => {
+                    tables.insert(b.index, (lang.to_string(), content));
+                }
+                Err(e) => diags.warn(b.line, format!("`{}` produces={raw} could not be read ({e}); not rendered", b.name)),
             }
-            Err(e) => diags.warn(b.line, format!("`{}` produces={raw} could not be read ({e}); not rendered", b.name)),
+        } else if image_ext(rel_path).is_some() {
+            match fs::read(root.join(&resolved)) {
+                Ok(bytes) => {
+                    images.insert(b.index, (bytes, resolved));
+                }
+                Err(e) => diags.warn(b.line, format!("`{}` produces={raw} could not be read ({e}); not rendered", b.name)),
+            }
         }
     }
-    tables
+    (tables, images)
 }
 
 /// The three extensions `code_or_data_table` already renders as a table
 /// (decision 45); anything else is not a table shape this feature
-/// knows how to show, so `produced_tables` leaves it out silently
+/// knows how to show, so `produced_artifacts` leaves it out silently
 /// rather than guessing.
 fn table_lang(path: &str) -> Option<&'static str> {
     match path.rsplit('.').next()?.to_ascii_lowercase().as_str() {
         "csv" => Some("csv"),
         "tsv" => Some("tsv"),
         "json" => Some("json"),
+        _ => None,
+    }
+}
+
+/// The image extensions decision 51 knows how to render. `jpg`/`jpeg`
+/// canonicalize to one tag: both mean the same MIME type, and both
+/// renderers only ever need to know "this is a jpeg."
+fn image_ext(path: &str) -> Option<&'static str> {
+    match path.rsplit('.').next()?.to_ascii_lowercase().as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "gif" => Some("gif"),
+        "svg" => Some("svg"),
+        "webp" => Some("webp"),
         _ => None,
     }
 }
@@ -254,11 +287,12 @@ fn render_html(
     config: &Config,
     root: &Path,
     tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
     output: Option<&str>,
     diags: &mut Diags,
 ) -> Result<Report, String> {
     let extra_css = config.weave("html").and_then(|w| w.css).and_then(|rel| read_asset(root, &rel, "css", diags));
-    let rendered = weave_html::render(doc, title, extra_css.as_deref(), tables, diags);
+    let rendered = weave_html::render(doc, title, extra_css.as_deref(), tables, images, diags);
 
     let written = match output {
         Some(p) => {
@@ -282,6 +316,18 @@ neither may be configured. The `.typ` is always written, whether or
 not `command` exists to compile it -- decision 44's own graceful
 degradation.
 
+An image (decision 51) has to actually exist somewhere Typst can find
+it by a relative path -- `render::typst` only ever emits markup, never
+touches a filesystem. `render_pdf` copies each one into
+`build_dir/assets/`, at the same root-relative path `produced_artifacts`
+already resolved it to, before compiling. `#image(...)`'s own
+reference and the copy's own destination are computed from that
+identical string. The two can never name different files. A copy
+that fails is dropped from the map `typst::render` sees and warned
+about on stderr, the same "misconfigured is reported, not fatal"
+shape as everything else weave reads off disk -- never a reference to
+a file that was never actually written.
+
 ```rust name=render_pdf path=weave.rs
 fn render_pdf(
     doc: &Document,
@@ -290,11 +336,28 @@ fn render_pdf(
     root: &Path,
     name: &str,
     tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
     output: Option<&str>,
     toc: bool,
     diags: &mut Diags,
 ) -> Result<Report, String> {
-    let body = typst::render(doc, title, toc, tables, diags);
+    let build_dir = root.join(".dankg").join("build").join("weave");
+    let assets_dir = build_dir.join("assets");
+    let mut copied_images = images.clone();
+    for (index, (bytes, resolved)) in images {
+        let dest = assets_dir.join(resolved);
+        let result = dest
+            .parent()
+            .map(fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|()| fs::write(&dest, bytes));
+        if let Err(e) = result {
+            diags.warn(0, format!("could not copy `{resolved}` into the build directory ({e}); not rendered"));
+            copied_images.remove(index);
+        }
+    }
+
+    let body = typst::render(doc, title, toc, tables, &copied_images, diags);
     let weave_cfg = config.weave("pdf");
     let preamble =
         weave_cfg.as_ref().and_then(|w| w.template.clone()).and_then(|rel| read_asset(root, &rel, "template", diags));
@@ -303,7 +366,6 @@ fn render_pdf(
         None => body,
     };
 
-    let build_dir = root.join(".dankg").join("build").join("weave");
     let typ_path = build_dir.join(format!("{name}.typ"));
     if let Some(parent) = typ_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -548,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn produced_tables_reads_a_csv_artifact_for_a_recognized_pair() {
+    fn produced_artifacts_reads_a_csv_artifact_for_a_recognized_pair() {
         let dir = scratch(&[
             ("a.md", "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n"),
             ("data.csv", "x,y\n1,2\n"),
@@ -557,25 +619,44 @@ mod tests {
         let doc = Document::parse(&source, &mut Diags::new("a.md"));
 
         let mut diags = Diags::new("a.md");
-        let tables = produced_tables(&doc, "a.md", &dir, &mut diags);
+        let (tables, images) = produced_artifacts(&doc, "a.md", &dir, &mut diags);
         assert_eq!(tables.get(&0), Some(&("csv".to_string(), "x,y\n1,2\n".to_string())));
+        assert!(images.is_empty());
         assert!(diags.items().is_empty(), "{:?}", diags.items());
     }
 
     #[test]
-    fn produced_tables_is_silent_for_a_named_block_with_no_recorded_result() {
+    fn produced_artifacts_reads_a_png_artifact_for_a_recognized_pair() {
+        let dir = scratch(&[(
+            "a.md",
+            "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n",
+        )]);
+        fs::write(dir.join("chart.png"), [0xffu8, 0xd8, 0xff, 0xe0]).unwrap();
+        let source = fs::read_to_string(dir.join("a.md")).unwrap();
+        let doc = Document::parse(&source, &mut Diags::new("a.md"));
+
+        let mut diags = Diags::new("a.md");
+        let (tables, images) = produced_artifacts(&doc, "a.md", &dir, &mut diags);
+        assert!(tables.is_empty());
+        assert_eq!(images.get(&0), Some(&(vec![0xff, 0xd8, 0xff, 0xe0], "chart.png".to_string())));
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn produced_artifacts_is_silent_for_a_named_block_with_no_recorded_result() {
         let dir = scratch(&[("a.md", "```python name=a produces=file:data.csv\nwrite_csv()\n```\n"), ("data.csv", "x,y\n1,2\n")]);
         let source = fs::read_to_string(dir.join("a.md")).unwrap();
         let doc = Document::parse(&source, &mut Diags::new("a.md"));
 
         let mut diags = Diags::new("a.md");
-        let tables = produced_tables(&doc, "a.md", &dir, &mut diags);
+        let (tables, images) = produced_artifacts(&doc, "a.md", &dir, &mut diags);
         assert!(tables.is_empty());
+        assert!(images.is_empty());
         assert!(diags.items().is_empty(), "{:?}", diags.items());
     }
 
     #[test]
-    fn produced_tables_warns_on_a_missing_artifact() {
+    fn produced_artifacts_warns_on_a_missing_artifact() {
         let dir = scratch(&[(
             "a.md",
             "```python name=a produces=file:missing.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n",
@@ -584,25 +665,37 @@ mod tests {
         let doc = Document::parse(&source, &mut Diags::new("a.md"));
 
         let mut diags = Diags::new("a.md");
-        let tables = produced_tables(&doc, "a.md", &dir, &mut diags);
+        let (tables, images) = produced_artifacts(&doc, "a.md", &dir, &mut diags);
         assert!(tables.is_empty());
+        assert!(images.is_empty());
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
         assert!(diags.items()[0].message.contains("could not be read"), "{:?}", diags.items());
     }
 
     #[test]
-    fn produced_tables_is_silent_for_an_unrecognized_extension() {
+    fn produced_artifacts_is_silent_for_an_unrecognized_extension() {
         let dir = scratch(&[(
             "a.md",
-            "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n",
+            "```python name=a produces=file:notes.txt\nwrite_notes()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n",
         )]);
         let source = fs::read_to_string(dir.join("a.md")).unwrap();
         let doc = Document::parse(&source, &mut Diags::new("a.md"));
 
         let mut diags = Diags::new("a.md");
-        let tables = produced_tables(&doc, "a.md", &dir, &mut diags);
+        let (tables, images) = produced_artifacts(&doc, "a.md", &dir, &mut diags);
         assert!(tables.is_empty());
+        assert!(images.is_empty());
         assert!(diags.items().is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn image_ext_recognizes_common_extensions_case_insensitively_and_canonicalizes_jpeg() {
+        assert_eq!(image_ext("chart.png"), Some("png"));
+        assert_eq!(image_ext("chart.PNG"), Some("png"));
+        assert_eq!(image_ext("chart.jpg"), Some("jpg"));
+        assert_eq!(image_ext("chart.jpeg"), Some("jpg"));
+        assert_eq!(image_ext("chart.svg"), Some("svg"));
+        assert_eq!(image_ext("data.csv"), None);
     }
 }
 ```

@@ -64,13 +64,24 @@ use std::fmt::Write as _;
 /// toggle one, so the choice is made once, at compile time, unlike the
 /// HTML backend's own in-page toggle. `tables` (decision 50) names
 /// which recognized pairs' `produces=file:` artifact was read off disk
-/// as a table, keyed by the source block's own index.
-pub fn render(doc: &Document, title: &str, toc: bool, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) -> String {
+/// as a table, keyed by the source block's own index. `images`
+/// (decision 51) is the same idea for an image artifact -- its bytes
+/// are never used here, only the root-relative path `render_pdf`
+/// already copied it to under `assets/`, since this module only ever
+/// emits markup.
+pub fn render(
+    doc: &Document,
+    title: &str,
+    toc: bool,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    diags: &mut Diags,
+) -> String {
     let mut out = cover_page(title, &doc.frontmatter);
     if toc {
         out.push_str("#outline()\n\n");
     }
-    out.push_str(&blocks(&doc.blocks, tables, diags));
+    out.push_str(&blocks(&doc.blocks, tables, images, diags));
     out
 }
 ```
@@ -168,6 +179,9 @@ same source block index, is real content the block actually wrote,
 not an editorial judgment about trustworthiness. It renders inside
 the pair whenever present, through the identical `code_or_data_table`
 below a `csv`/`json` fence's own inline content already goes through.
+A produced image (decision 51) is the same idea for `images`; the
+bytes themselves stay unused here, since `#image(...)` only ever
+needs the path `render_pdf` already copied the real file to.
 
 ```rust name=blocks_and_block path=render/typst.rs
 /// A named `Code` block immediately followed by its recorded eval
@@ -178,20 +192,25 @@ below a `csv`/`json` fence's own inline content already goes through.
 /// discarded: a hidden block (decision 48), paired or not, contributes
 /// no blank-line separator either, the same as if it were never in
 /// `items` at all.
-fn blocks(items: &[Block], tables: &HashMap<usize, (String, String)>, diags: &mut Diags) -> String {
+fn blocks(
+    items: &[Block],
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    diags: &mut Diags,
+) -> String {
     let mut rendered = Vec::new();
     let mut i = 0;
     while i < items.len() {
         if let Block::Code { info, text, line, .. } = &items[i] {
             if let Some(pair) = result::recognize_pair(items, i) {
                 if !info.weave_hidden() {
-                    rendered.push(eval_pair(info, text, *line, &pair, tables.get(&i), diags));
+                    rendered.push(eval_pair(info, text, *line, &pair, tables.get(&i), images.get(&i), diags));
                 }
                 i += 3;
                 continue;
             }
         }
-        if let Some(s) = block(&items[i], tables, diags) {
+        if let Some(s) = block(&items[i], tables, images, diags) {
             rendered.push(s);
         }
         i += 1;
@@ -199,7 +218,12 @@ fn blocks(items: &[Block], tables: &HashMap<usize, (String, String)>, diags: &mu
     rendered.join("\n")
 }
 
-fn block(b: &Block, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) -> Option<String> {
+fn block(
+    b: &Block,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    diags: &mut Diags,
+) -> Option<String> {
     Some(match b {
         Block::Heading { level, inlines, .. } => {
             let eq = "=".repeat((*level).clamp(1, 6) as usize);
@@ -208,7 +232,7 @@ fn block(b: &Block, tables: &HashMap<usize, (String, String)>, diags: &mut Diags
         Block::Paragraph { inlines, .. } => format!("{}\n", inline_text(inlines)),
         Block::Code { info, .. } if info.weave_hidden() => return None,
         Block::Code { info, text, line, .. } => code_or_data_table(info, text, *line, diags),
-        Block::List(l) => list(l, tables, diags),
+        Block::List(l) => list(l, tables, images, diags),
         Block::ThematicBreak { .. } => "#line(length: 100%)\n".to_string(),
         Block::Passthrough { text, .. } => format!("{}\n", escape_typst(text)),
         Block::Table { aligns, header, rows, .. } => table_block(aligns, header, rows),
@@ -218,16 +242,19 @@ fn block(b: &Block, tables: &HashMap<usize, (String, String)>, diags: &mut Diags
 /// The `#block(stroke: ...)` decision 46 wraps a source block and its
 /// recorded output in. `failed` alone picks the stroke color and the
 /// caption text -- one flag, not two independent things that could
-/// disagree. `table` (decision 50), when present, is the source
-/// block's own `produces=file:` artifact, already read off disk --
+/// disagree. `table`/`image` (decisions 50/51), when present, are the
+/// source block's own `produces=file:` artifact, already resolved --
 /// appended after the captured output, since stdout might be a log
-/// line while the real content lives in the file.
+/// line while the real content lives in the file. A block declares at
+/// most one `produces=file:` today, so at most one of the two is ever
+/// `Some`.
 fn eval_pair(
     source_info: &InfoString,
     source_text: &str,
     source_line: u32,
     pair: &Pair,
     table: Option<&(String, String)>,
+    image: Option<&(Vec<u8>, String)>,
     diags: &mut Diags,
 ) -> String {
     let color = if pair.failed { "red" } else { "gray" };
@@ -241,6 +268,12 @@ fn eval_pair(
         }
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
         body.push_str(&code_or_data_table(&info, content, source_line, diags));
+    }
+    if let Some((_, resolved)) = image {
+        if let Some(produces) = source_info.produces() {
+            let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n\n", escape_typst(produces));
+        }
+        let _ = write!(body, "#image(\"assets/{}\")\n", escape_typst_string(resolved));
     }
     if let Some(p) = provenance_text(pair) {
         let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n", escape_typst(&p));
@@ -265,11 +298,16 @@ fn provenance_text(pair: &Pair) -> Option<String> {
     Some(parts.join(" -- "))
 }
 
-fn list(l: &List, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) -> String {
+fn list(
+    l: &List,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    diags: &mut Diags,
+) -> String {
     let marker = if l.ordered { "+" } else { "-" };
     let mut out = String::new();
     for item in &l.items {
-        let body = blocks(&item.blocks, tables, diags);
+        let body = blocks(&item.blocks, tables, images, diags);
         for (i, line) in body.lines().enumerate() {
             if i == 0 {
                 out.push_str(marker);
@@ -512,10 +550,18 @@ mod tests {
     }
 
     fn render_doc_with_tables(source: &str, tables: &HashMap<usize, (String, String)>) -> (String, Diags) {
+        render_doc_with_artifacts(source, tables, &HashMap::new())
+    }
+
+    fn render_doc_with_artifacts(
+        source: &str,
+        tables: &HashMap<usize, (String, String)>,
+        images: &HashMap<usize, (Vec<u8>, String)>,
+    ) -> (String, Diags) {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, tables, &mut diags);
+        let out = render(&doc, "Title", true, tables, images, &mut diags);
         (out, diags)
     }
 
@@ -533,7 +579,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", false, &HashMap::new(), &mut diags);
+        let out = render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), &mut diags);
         assert!(!out.contains("#outline()"));
     }
 
@@ -545,7 +591,7 @@ mod tests {
             &mut d,
         );
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Author: Jane Doe"), "{cover}");
@@ -728,6 +774,23 @@ mod tests {
         let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
         let (out, _) = render_doc(src);
         assert!(!out.contains("#table("), "{out}");
+    }
+
+    #[test]
+    fn a_produced_image_renders_as_an_image_reference() {
+        let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images);
+        assert!(out.contains("#image(\"assets/chart.png\")"), "{out}");
+        assert!(out.contains("file:chart.png"), "{out}");
+    }
+
+    #[test]
+    fn no_produced_image_means_no_image_reference() {
+        let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("#image("), "{out}");
     }
 }
 ```

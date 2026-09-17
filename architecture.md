@@ -325,6 +325,15 @@ For a recognized pair (decision 46) whose source block also declares `produces=f
 
 <!-- dankg:depends target=#decision-45-data-tables-from-csvjsontsv-fenced-blocks quote="Tagging an eval result fence with its own output format automatically is deferred" -->
 
+## Decision 51: A `produces=file:` image renders as a real image
+
+`produced_artifacts` resolves a `png`/`jpg`/`jpeg`/`gif`/`svg`/`webp` extension the identical way decision 50 resolves a table one, into raw bytes and the artifact's own root-relative path, keyed by the source block's index. Neither renderer parses an image; each embeds it its own way. In HTML, the bytes are base64-encoded by a hand-rolled encoder (decision 1: zero crates, the same choice `data::table`'s own CSV/JSON readers already made) and inlined as `<img src="data:…;base64,…">`, keeping the woven page one self-contained file with nothing to ship alongside it (decision 43). In Typst, `render_pdf` copies the bytes into `.dankg/build/weave/assets/<root-relative-path>` before compiling -- `render::typst` only ever emits markup, never touches a filesystem. The emitted `#image("assets/<root-relative-path>")` reference and the copy's own destination are computed from that identical string. The two can never name different files. A copy that fails is dropped from the map the Typst renderer sees and warned about on stderr: never a reference to a file that was never actually written. A missing or unreadable source artifact gets decision 50's own treatment: a stderr warning, nothing added to the page.
+
+**Rationale:** A chart is the ordinary case decision 50 does not cover -- `plt.savefig(...)` writes an image, not a table. Two backends that display an image at all necessarily display it two different ways: an inline data URI has no Typst equivalent; a compiled asset path has no HTML one. Unlike decision 50's table, there is no single shared emitter to reuse here. Keeping each backend's own handling in its own module, fed from the same resolved bytes and path, is the least duplication the two real constraints allow.
+
+<!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
+<!-- dankg:depends target=#decision-43-weave-html-rendering quote="A woven HTML page is the one deliberate exception" -->
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in

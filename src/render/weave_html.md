@@ -44,6 +44,7 @@ pub fn render(
     title: &str,
     extra_css: Option<&str>,
     tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
     diags: &mut Diags,
 ) -> String {
     let slugs = heading_slugs(doc);
@@ -67,7 +68,7 @@ pub fn render(
 
     out.push_str("<main>\n");
     let _ = writeln!(out, "<h1>{}</h1>", escape(title));
-    blocks(&mut out, &doc.blocks, &slugs, tables, diags);
+    blocks(&mut out, &doc.blocks, &slugs, tables, images, diags);
     out.push_str("</main>\n</body>\n</html>\n");
     out
 }
@@ -167,6 +168,9 @@ same source block index, is real content the block actually wrote,
 not an editorial judgment about trustworthiness. It renders inside
 the pair whenever present, through the identical `code_or_data_table`
 below a `csv`/`json` fence's own inline content already goes through.
+A produced image (decision 51) is the same idea for `images`, base64-
+inlined as a `data:` URI so the woven page stays one self-contained
+file (decision 43) with nothing else to ship alongside it.
 
 ```rust name=blocks_and_block path=render/weave_html.rs
 /// A named `Code` block immediately followed by its recorded eval
@@ -174,24 +178,38 @@ below a `csv`/`json` fence's own inline content already goes through.
 /// per-block walk ever sees it, and consumed as one unit -- three
 /// `Block`s in `items`, one `<figure>` in `out`. Anything else falls
 /// through to `block` exactly as before.
-fn blocks(out: &mut String, items: &[Block], slugs: &HashMap<u32, String>, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) {
+fn blocks(
+    out: &mut String,
+    items: &[Block],
+    slugs: &HashMap<u32, String>,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    diags: &mut Diags,
+) {
     let mut i = 0;
     while i < items.len() {
         if let Block::Code { info, text, line, .. } = &items[i] {
             if let Some(pair) = result::recognize_pair(items, i) {
                 if !info.weave_hidden() {
-                    eval_pair(out, info, text, *line, &pair, tables.get(&i), diags);
+                    eval_pair(out, info, text, *line, &pair, tables.get(&i), images.get(&i), diags);
                 }
                 i += 3;
                 continue;
             }
         }
-        block(out, &items[i], slugs, tables, diags);
+        block(out, &items[i], slugs, tables, images, diags);
         i += 1;
     }
 }
 
-fn block(out: &mut String, b: &Block, slugs: &HashMap<u32, String>, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) {
+fn block(
+    out: &mut String,
+    b: &Block,
+    slugs: &HashMap<u32, String>,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    diags: &mut Diags,
+) {
     match b {
         Block::Heading { level, inlines, line } => {
             let id = slugs.get(line).map(String::as_str).unwrap_or("");
@@ -205,7 +223,7 @@ fn block(out: &mut String, b: &Block, slugs: &HashMap<u32, String>, tables: &Has
                 code_or_data_table(out, info, text, *line, diags);
             }
         }
-        Block::List(l) => list(out, l, slugs, tables, diags),
+        Block::List(l) => list(out, l, slugs, tables, images, diags),
         Block::ThematicBreak { .. } => out.push_str("<hr>\n"),
         // Outside the subset. Escaped, not raw: an unparsed construct
         // must never become unvalidated HTML.
@@ -220,10 +238,12 @@ fn block(out: &mut String, b: &Block, slugs: &HashMap<u32, String>, tables: &Has
 /// output in. `failed` alone drives both the caption text and the
 /// extra `failed` class `WEAVE_CSS` keys its border/caption color off
 /// of -- one flag, not two independent things that could disagree.
-/// `table` (decision 50), when present, is the source block's own
-/// `produces=file:` artifact, already read off disk -- appended after
-/// the captured output, since stdout might be a log line while the
-/// real content lives in the file.
+/// `table`/`image` (decisions 50/51), when present, are the source
+/// block's own `produces=file:` artifact, already read off disk --
+/// appended after the captured output, since stdout might be a log
+/// line while the real content lives in the file. A block declares at
+/// most one `produces=file:` today, so at most one of the two is ever
+/// `Some`.
 fn eval_pair(
     out: &mut String,
     source_info: &InfoString,
@@ -231,6 +251,7 @@ fn eval_pair(
     source_line: u32,
     pair: &Pair,
     table: Option<&(String, String)>,
+    image: Option<&(Vec<u8>, String)>,
     diags: &mut Diags,
 ) {
     let class = if pair.failed { "eval-pair failed" } else { "eval-pair" };
@@ -246,8 +267,55 @@ fn eval_pair(
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
         code_or_data_table(out, &info, content, source_line, diags);
     }
+    if let Some((bytes, resolved)) = image {
+        if let Some(produces) = source_info.produces() {
+            let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(produces));
+        }
+        let _ = writeln!(
+            out,
+            "<img src=\"data:{};base64,{}\" alt=\"{}\">",
+            mime_for(resolved),
+            base64_encode(bytes),
+            escape_attr(resolved)
+        );
+    }
     provenance(out, pair);
     out.push_str("</figure>\n");
+}
+
+/// The MIME type a `data:` URI needs, from the artifact's own extension
+/// (`weave::image_ext`'s own recognized set). `image_ext` never hands
+/// this an extension outside that set, so the fallback never actually
+/// fires; it exists only so this stays a total function.
+fn mime_for(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+const BASE64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// A hand-rolled RFC 4648 encoder (decision 1: zero crates), the same
+/// choice `data::table`'s own hand-rolled CSV/JSON readers already made
+/// for the identical reason. Standard alphabet, `=` padding.
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(BASE64_ALPHABET[(n >> 18 & 0x3f) as usize] as char);
+        out.push(BASE64_ALPHABET[(n >> 12 & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 { BASE64_ALPHABET[(n >> 6 & 0x3f) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { BASE64_ALPHABET[(n & 0x3f) as usize] as char } else { '=' });
+    }
+    out
 }
 
 /// `produces`/`reads` (decision 33), when either is non-empty, is the
@@ -268,7 +336,14 @@ fn provenance(out: &mut String, pair: &Pair) {
     let _ = writeln!(out, "<p class=\"eval-provenance\">{}</p>", escape(&parts.join(" -- ")));
 }
 
-fn list(out: &mut String, l: &List, slugs: &HashMap<u32, String>, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) {
+fn list(
+    out: &mut String,
+    l: &List,
+    slugs: &HashMap<u32, String>,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    diags: &mut Diags,
+) {
     let tag = if l.ordered { "ol" } else { "ul" };
     if l.ordered && l.start != 1 {
         let _ = writeln!(out, "<{tag} start=\"{}\">", l.start);
@@ -277,7 +352,7 @@ fn list(out: &mut String, l: &List, slugs: &HashMap<u32, String>, tables: &HashM
     }
     for item in &l.items {
         out.push_str("<li>");
-        blocks(out, &item.blocks, slugs, tables, diags);
+        blocks(out, &item.blocks, slugs, tables, images, diags);
         out.push_str("</li>\n");
     }
     let _ = writeln!(out, "</{tag}>");
@@ -490,10 +565,18 @@ mod tests {
     }
 
     fn render_doc_with_tables(source: &str, tables: &HashMap<usize, (String, String)>) -> (String, Diags) {
+        render_doc_with_artifacts(source, tables, &HashMap::new())
+    }
+
+    fn render_doc_with_artifacts(
+        source: &str,
+        tables: &HashMap<usize, (String, String)>,
+        images: &HashMap<usize, (Vec<u8>, String)>,
+    ) -> (String, Diags) {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, tables, &mut diags);
+        let out = render(&doc, "Title", None, tables, images, &mut diags);
         (out, diags)
     }
 
@@ -677,6 +760,45 @@ mod tests {
     }
 
     #[test]
+    fn base64_encode_matches_rfc_4648_test_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn mime_for_covers_every_recognized_image_extension() {
+        assert_eq!(mime_for("a.png"), "image/png");
+        assert_eq!(mime_for("a.PNG"), "image/png");
+        assert_eq!(mime_for("a.jpg"), "image/jpeg");
+        assert_eq!(mime_for("a.jpeg"), "image/jpeg");
+        assert_eq!(mime_for("a.gif"), "image/gif");
+        assert_eq!(mime_for("a.svg"), "image/svg+xml");
+        assert_eq!(mime_for("a.webp"), "image/webp");
+    }
+
+    #[test]
+    fn a_produced_image_renders_as_a_base64_data_uri() {
+        let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"hi".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images);
+        assert!(out.contains("<img src=\"data:image/png;base64,aGk=\""), "{out}");
+        assert!(out.contains("<figcaption>file:chart.png</figcaption>"), "{out}");
+    }
+
+    #[test]
+    fn no_produced_image_means_no_img_tag() {
+        let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("<img"), "{out}");
+    }
+
+    #[test]
     fn ordered_and_unordered_lists() {
         let (out, _) = render_doc("- a\n- b\n");
         assert!(out.contains("<ul>\n<li>"));
@@ -694,7 +816,7 @@ mod tests {
     fn extra_css_is_appended_after_weave_css_not_swapped_in() {
         let mut diags = Diags::new("t.md");
         let doc = Document::parse("# H\n", &mut diags);
-        let out = render(&doc, "Title", Some("body { font-family: serif; }"), &HashMap::new(), &mut diags);
+        let out = render(&doc, "Title", Some("body { font-family: serif; }"), &HashMap::new(), &HashMap::new(), &mut diags);
         let style_start = out.find("<style>").unwrap();
         let style_end = out.find("</style>").unwrap();
         let style = &out[style_start..style_end];
