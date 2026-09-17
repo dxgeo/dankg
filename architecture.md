@@ -2006,6 +2006,18 @@ dependency side effects re-run on every eval, and there is no persistent state
 between separate `dankg eval` invocations. Both are the price of not writing a
 PTY session manager, and both keep evaluation reproducible.
 
+The spawned process's own working directory (decision 49) is the
+declaring file's own directory, not wherever `dankg` itself was
+invoked from. `run`/`run_db`/`run_at` take a `dir: &Path`, set via
+`Command::current_dir`; `session::run_one`, their one and only caller,
+computes it as `root.join(dir_of(entry_file))`. Before this fix, a
+block's own relative file access only landed where a reader of its
+source would expect if `dankg` happened to already be running from
+that exact directory -- harmless until `dankg weave` started reading
+a `produces=file:PATH` artifact back off disk (see *Produced
+artifacts* under *Weave*, below), which made a wrong working
+directory a wrong result rather than an unnoticed inconsistency.
+
 Timeout defaults to 30s, overridable per block via `timeout`. The
 target's own value governs the one spawn covering its whole chain.
 stdout and stderr are captured on their own threads, not read after
@@ -2687,6 +2699,78 @@ hand-rolled CSV/TSV and JSON readers into the same `TableData { header, rows }` 
 weave backends consume both sources through one shared table emitter
 apiece. The language tag alone decides; content is never sniffed.
 
+## Recorded eval output
+
+A named `Code` block immediately followed by its own recorded
+`<!-- dankg:result ... -->` marker and output fence renders as one
+paired unit instead of three unrelated blocks (decision 46): an
+HTML `<figure>`, a Typst `#block(stroke: ...)`. Before this, the
+marker fell into the same `Block::Passthrough` arm every other
+unparsed construct does, and rendered as literal escaped comment
+text -- a bug visible the moment weave met any file `dankg eval` had
+touched. `eval::result::recognize_pair` finds the shape by index
+alone: a named `Code`, a one-line `Passthrough` matching that name's
+marker, then a plain `Code`. A `failed` run gets a visually distinct
+pairing (an added CSS class in HTML, a different stroke color in
+Typst); `produces=`/`reads=`, decision 36's own inferred SQL relation
+names, print as a short "writes: X" / "reads: Y" line when either is
+non-empty.
+
+## Hiding a block from the page
+
+`weave=hidden` (decision 48) drops a code block from the woven page
+entirely -- not a placeholder, not a collapsed toggle, absent as if
+it were never in the document. A hidden source block's paired result,
+if it has one, is hidden with it. The attribute is weave-only.
+`dankg tangle` and `dankg eval` never look at it. A hidden block
+still tangles and still evaluates exactly as it would without the
+tag.
+
+## Staleness
+
+Each recognized pair gets one freshness check (decision 47): the same
+`expected_hash`-against-stored-`hash` comparison `dankg check` and
+`dankg eval --if-stale` already make, built the same lazy, file-scoped
+way `run_one`'s own `--if-stale` precheck already is (decision 19). A
+cross-file `deps=`/`xdeps=` chain loads only what it reaches. A
+`Graph` is built only if the chain actually carries a `table:` xdep.
+A real hash mismatch, a changed plan, or a language/database dropped
+from config all print the same stderr warning naming the block. The
+rendered page itself never changes because of this: two `dankg weave`
+runs against the same file produce byte-identical output regardless
+of what state a `deps=`/`xdeps=` chain is in elsewhere, the same way a
+missing `[weave.html] css` warns without altering the page around it.
+This narrows decision 41's own "never consults `deps=`/`name=`":
+weave now reads them too, read-only, only ever to ask whether a
+stored answer still matches its own inputs.
+
+## Produced artifacts
+
+A recognized pair's source block may also declare `produces=file:PATH`
+(*File dependencies*, below) -- a real table or a real image sitting
+on disk, not just captured stdout, since a block whose real point is
+a chart or a table usually does not print either one. `weave::produced_artifacts`
+resolves that path the same way `dankg check` already verifies one
+(`plan::parse_artifact`/`resolve_artifact`, made `pub(crate)` for this
+reuse) and reads it once its extension says which of the two it is
+(decisions 50 and 51). A `.csv`/`.tsv`/`.json` extension is handed to
+both renderers' own existing `code_or_data_table` as raw text and a
+lang tag -- never a parsed `TableData` -- so a `.json` file that is
+not table-shaped still gets that function's own existing fallback to
+an ordinary code block, with a warning, rather than a second copy of
+the same dispatch. A `png`/`jpg`/`jpeg`/`gif`/`svg`/`webp` extension
+is embedded instead: base64-inlined as an HTML `data:` URI (a new
+hand-rolled RFC 4648 encoder, decision 1), or copied into
+`.dankg/build/weave/assets/<root-relative-path>` and referenced by
+that same path in a Typst `#image(...)` call, since `render::typst`
+only ever emits markup and never touches a filesystem itself. Either
+kind renders below the captured stdout inside the same paired unit --
+both show, since stdout might be a log line while the real content
+lives in the file. A missing or unreadable artifact warns on stderr
+and adds nothing to the page; any other extension adds nothing
+either, silently, the same never-content-sniff stance decision 45
+already takes.
+
 ## HTML backend
 
 `render::weave_html` (decision 43) is a single self-contained page:
@@ -2745,10 +2829,21 @@ own error. `duckdb` already gets exactly this treatment from `[db.*] command` in
 - Corpus-wide weave -- `paths: Vec<String>`, directory walking, the
   way tangle's decision 26 does it -- is confirmed out of scope for
   now, not ruled out permanently.
-- Tagging an eval result fence with its own output format
-  automatically (`duckdb -csv` implying a `csv` tag) is deferred
-  (decision 45): no config key today records what format a `[db.*]`/
-  `[lang.*]` command's output is in.
+- Tagging the *captured-stdout* result fence with its own output
+  format automatically (`duckdb -csv` implying a `csv` tag) is still
+  deferred (decision 45): no config key today records what format a
+  `[db.*]`/`[lang.*]` command's output is in. Decisions 50 and 51
+  reach the same practical goal a different way instead -- a block
+  writes its table or image to a real file and declares
+  `produces=file:PATH` by hand, rather than dankg guessing a format
+  from a command string.
+- More than one `produces=file:` artifact per block (decision 50/51) --
+  `InfoString::produces()` returns its whole raw value unsplit, unlike
+  `deps()`/`xdeps()`'s own comma-split. One block, one artifact, for
+  now.
+- Solving the working-directory question (decision 49) for a chain
+  whose concatenated blocks live in more than one directory. The fix
+  covers the single-file case, which is the overwhelming common one.
 - Syntax highlighting in the HTML backend's code blocks is out of
   scope. Typst gets it for free in the PDF backend; HTML code blocks
   stay plain `<pre><code>`, the same as the graph page's own

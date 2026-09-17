@@ -381,6 +381,67 @@ the result.
 
 <!-- dankg:depends target=architecture.md#decision-24-tangle-placement quote="Heading containment + document order; `deps` not consulted." -->
 
+### `weave` — typeset one file as a document
+
+```sh
+dankg weave notes/index.md --format html -o out.html   # a self-contained page
+dankg weave notes/index.md --format pdf                # compiled through Typst
+```
+
+`weave` turns one markdown file into a document a person reads,
+never a whole corpus. It walks every block in the file, not just the
+named, top-level ones `eval`/`tangle` narrow to, and never runs
+anything: it only typesets what is already there, including whatever
+`dankg eval` already recorded.
+
+A named block immediately followed by its own recorded
+`<!-- dankg:result ... -->` marker renders as one paired unit --
+source, then a labeled "Output" -- instead of three unrelated blocks.
+A failed run gets a visually distinct pairing. `weave=hidden` on a
+block drops it from the page entirely, paired result included, while
+leaving it tangle-able and eval-able exactly as before:
+
+````markdown
+```python name=setup weave=hidden
+data = {"Rust": 2010, "Typst": 2019}
+```
+
+```python name=show deps=setup
+for name, year in sorted(data.items()):
+    print(f"{name}: {year}")
+```
+````
+
+A stale recorded result (its source changed since `dankg eval` last
+ran) never changes the rendered page. Weave only ever warns on
+`stderr`, the same way a missing `[weave.html] css` does. The same
+file always weaves to the same output, regardless of what state
+anything else is in.
+
+A block that also declares `produces=file:PATH` (see `eval` above)
+may have a real table or a real image sitting on disk, not just
+captured stdout. A `csv`/`tsv`/`json` extension renders as a genuine
+table; an image extension (`png`/`jpg`/`jpeg`/`gif`/`svg`/`webp`)
+renders as a genuine embedded image -- inlined in HTML, copied
+alongside the compiled PDF in Typst's case. Both render inside the
+same paired unit as the block's captured stdout, since a chart-making
+block usually logs a line rather than printing the chart itself:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png
+draw_chart(data, "chart.png")
+print("wrote chart.png")
+```
+````
+
+`[weave.html] css` and `[weave.pdf] template`/`command` configure a
+stylesheet, a Typst preamble, and the compiler invocation (see
+Configuration below).
+
+<!-- dankg:depends target=architecture.md#recorded-eval-output quote="A named `Code` block immediately followed by its own recorded" -->
+<!-- dankg:depends target=architecture.md#staleness quote="The rendered page itself never changes because of this" -->
+<!-- dankg:depends target=architecture.md#produced-artifacts quote="A recognized pair's source block may also declare" -->
+
 ### `init` — scaffold a new corpus
 
 ```sh
