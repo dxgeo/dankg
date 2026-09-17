@@ -27,7 +27,13 @@ use std::fmt::Write as _;
 /// -- a font, a color, the reading column's width -- without having to
 /// reimplement the CSS-only table-of-contents toggle or the table
 /// borders just to get back what they did not mean to lose.
-pub fn render(doc: &Document, title: &str, extra_css: Option<&str>, diags: &mut Diags) -> String {
+pub fn render(
+    doc: &Document,
+    title: &str,
+    extra_css: Option<&str>,
+    tables: &HashMap<usize, (String, String)>,
+    diags: &mut Diags,
+) -> String {
     let slugs = heading_slugs(doc);
 
     let mut out = String::with_capacity(assets::WEAVE_CSS.len() + 4 * 1024);
@@ -49,7 +55,7 @@ pub fn render(doc: &Document, title: &str, extra_css: Option<&str>, diags: &mut 
 
     out.push_str("<main>\n");
     let _ = writeln!(out, "<h1>{}</h1>", escape(title));
-    blocks(&mut out, &doc.blocks, &slugs, diags);
+    blocks(&mut out, &doc.blocks, &slugs, tables, diags);
     out.push_str("</main>\n</body>\n</html>\n");
     out
 }
@@ -114,24 +120,24 @@ fn toc_link(out: &mut String, (_, inlines, line): (u8, &[Inline], u32), slugs: &
 /// per-block walk ever sees it, and consumed as one unit -- three
 /// `Block`s in `items`, one `<figure>` in `out`. Anything else falls
 /// through to `block` exactly as before.
-fn blocks(out: &mut String, items: &[Block], slugs: &HashMap<u32, String>, diags: &mut Diags) {
+fn blocks(out: &mut String, items: &[Block], slugs: &HashMap<u32, String>, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) {
     let mut i = 0;
     while i < items.len() {
         if let Block::Code { info, text, line, .. } = &items[i] {
             if let Some(pair) = result::recognize_pair(items, i) {
                 if !info.weave_hidden() {
-                    eval_pair(out, info, text, *line, &pair, diags);
+                    eval_pair(out, info, text, *line, &pair, tables.get(&i), diags);
                 }
                 i += 3;
                 continue;
             }
         }
-        block(out, &items[i], slugs, diags);
+        block(out, &items[i], slugs, tables, diags);
         i += 1;
     }
 }
 
-fn block(out: &mut String, b: &Block, slugs: &HashMap<u32, String>, diags: &mut Diags) {
+fn block(out: &mut String, b: &Block, slugs: &HashMap<u32, String>, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) {
     match b {
         Block::Heading { level, inlines, line } => {
             let id = slugs.get(line).map(String::as_str).unwrap_or("");
@@ -145,7 +151,7 @@ fn block(out: &mut String, b: &Block, slugs: &HashMap<u32, String>, diags: &mut 
                 code_or_data_table(out, info, text, *line, diags);
             }
         }
-        Block::List(l) => list(out, l, slugs, diags),
+        Block::List(l) => list(out, l, slugs, tables, diags),
         Block::ThematicBreak { .. } => out.push_str("<hr>\n"),
         // Outside the subset. Escaped, not raw: an unparsed construct
         // must never become unvalidated HTML.
@@ -160,13 +166,32 @@ fn block(out: &mut String, b: &Block, slugs: &HashMap<u32, String>, diags: &mut 
 /// output in. `failed` alone drives both the caption text and the
 /// extra `failed` class `WEAVE_CSS` keys its border/caption color off
 /// of -- one flag, not two independent things that could disagree.
-fn eval_pair(out: &mut String, source_info: &InfoString, source_text: &str, source_line: u32, pair: &Pair, diags: &mut Diags) {
+/// `table` (decision 50), when present, is the source block's own
+/// `produces=file:` artifact, already read off disk -- appended after
+/// the captured output, since stdout might be a log line while the
+/// real content lives in the file.
+fn eval_pair(
+    out: &mut String,
+    source_info: &InfoString,
+    source_text: &str,
+    source_line: u32,
+    pair: &Pair,
+    table: Option<&(String, String)>,
+    diags: &mut Diags,
+) {
     let class = if pair.failed { "eval-pair failed" } else { "eval-pair" };
     let _ = writeln!(out, "<figure class=\"{class}\">");
     code_or_data_table(out, source_info, source_text, source_line, diags);
     let caption = if pair.failed { "Output (failed)" } else { "Output" };
     let _ = writeln!(out, "<figcaption>{caption}</figcaption>");
     code_or_data_table(out, pair.output_info, pair.output_text, pair.output_line, diags);
+    if let Some((lang, content)) = table {
+        if let Some(produces) = source_info.produces() {
+            let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(produces));
+        }
+        let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
+        code_or_data_table(out, &info, content, source_line, diags);
+    }
     provenance(out, pair);
     out.push_str("</figure>\n");
 }
@@ -189,7 +214,7 @@ fn provenance(out: &mut String, pair: &Pair) {
     let _ = writeln!(out, "<p class=\"eval-provenance\">{}</p>", escape(&parts.join(" -- ")));
 }
 
-fn list(out: &mut String, l: &List, slugs: &HashMap<u32, String>, diags: &mut Diags) {
+fn list(out: &mut String, l: &List, slugs: &HashMap<u32, String>, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) {
     let tag = if l.ordered { "ol" } else { "ul" };
     if l.ordered && l.start != 1 {
         let _ = writeln!(out, "<{tag} start=\"{}\">", l.start);
@@ -198,7 +223,7 @@ fn list(out: &mut String, l: &List, slugs: &HashMap<u32, String>, diags: &mut Di
     }
     for item in &l.items {
         out.push_str("<li>");
-        blocks(out, &item.blocks, slugs, diags);
+        blocks(out, &item.blocks, slugs, tables, diags);
         out.push_str("</li>\n");
     }
     let _ = writeln!(out, "</{tag}>");
@@ -374,10 +399,14 @@ mod tests {
     use crate::md::Document;
 
     fn render_doc(source: &str) -> (String, Diags) {
+        render_doc_with_tables(source, &HashMap::new())
+    }
+
+    fn render_doc_with_tables(source: &str, tables: &HashMap<usize, (String, String)>) -> (String, Diags) {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, &mut diags);
+        let out = render(&doc, "Title", None, tables, &mut diags);
         (out, diags)
     }
 
@@ -532,6 +561,35 @@ mod tests {
     }
 
     #[test]
+    fn a_produced_table_renders_inside_the_pair() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("wrote data.csv"), "{out}");
+        assert!(out.contains("<figcaption>file:data.csv</figcaption>"), "{out}");
+        assert!(out.contains("<th>a</th>"), "{out}");
+        assert!(out.contains("<td>1</td>"), "{out}");
+    }
+
+    #[test]
+    fn a_json_artifact_that_is_not_table_shaped_falls_back_to_code() {
+        let src = "```python name=a produces=file:data.json\nwrite_json()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("json".to_string(), "{\"not\": \"a table\"}".to_string()));
+        let (out, diags) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("not"), "{out}");
+        assert!(!diags.items().is_empty(), "expected a warning about the non-table json");
+    }
+
+    #[test]
+    fn no_produced_table_means_no_extra_section() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("<table"), "{out}");
+    }
+
+    #[test]
     fn ordered_and_unordered_lists() {
         let (out, _) = render_doc("- a\n- b\n");
         assert!(out.contains("<ul>\n<li>"));
@@ -549,7 +607,7 @@ mod tests {
     fn extra_css_is_appended_after_weave_css_not_swapped_in() {
         let mut diags = Diags::new("t.md");
         let doc = Document::parse("# H\n", &mut diags);
-        let out = render(&doc, "Title", Some("body { font-family: serif; }"), &mut diags);
+        let out = render(&doc, "Title", Some("body { font-family: serif; }"), &HashMap::new(), &mut diags);
         let style_start = out.find("<style>").unwrap();
         let style_end = out.find("</style>").unwrap();
         let style = &out[style_start..style_end];

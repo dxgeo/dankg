@@ -309,6 +309,22 @@ The rendered document itself never changes because of this check. `warn_stale_pa
 <!-- dankg:depends target=#decision-19-eval-scope quote="One file; `deps`/`--all` never cross files." -->
 <!-- dankg:depends target=#decision-41-weave-scope quote="Decision 47 narrows this: weave reads" -->
 
+## Decision 49: eval spawns in the declaring file's own directory
+
+`eval::run::run`/`run_db`/`run_at` take a `dir: &Path`, spawned via `Command::current_dir`. `eval::session::run_one` -- their one and only caller -- computes it as `root.join(dir_of(entry_file))` and passes it through. `run_one`'s own public signature is unchanged. `run_single`, `tui::eval`, and the existing test suite need no changes beyond the two functions whose signature did change.
+
+**Rationale:** Before this, a spawned block's process inherited whatever directory `dankg` itself was invoked from, never the directory its own source file lives in -- not where `produces=file:PATH` already resolves relative to (decision 33). A script's own relative file access only landed where a reader of its source would expect if `dankg` happened to be run from exactly the right place. This was always a latent gap. It only becomes load-bearing once something actually reads a `produces=file:` artifact back (decision 50). A chain concatenating blocks from more than one directory still has no single correct answer -- accepted as a known limitation, not solved here.
+
+<!-- dankg:depends target=#decision-33-file-artifact-dependency quote="each paired with an ordinary" -->
+
+## Decision 50: A `produces=file:` CSV/TSV/JSON artifact renders as a table
+
+For a recognized pair (decision 46) whose source block also declares `produces=file:PATH` (decision 33), a `.csv`/`.tsv`/`.json` extension is resolved the same way `dankg check` already verifies one -- `plan::parse_artifact`/`resolve_artifact`, made `pub(crate)` for this reuse -- then read off disk. The raw content and a lang tag, never a parsed `TableData`, are handed to both renderers' own existing `code_or_data_table`: the identical csv/tsv/json-or-fallback dispatch a `csv`/`json`-tagged fence's own inline content already goes through (decision 45), fed from a file instead of the fence's own text. It renders inside the same paired unit, after the captured stdout -- both show, since stdout might be a log line while the real content lives in the file. A missing or unreadable artifact warns on stderr and adds nothing to the page, matching decision 47's own "misconfigured is reported, not fatal" stance. Any other extension adds nothing either, silently -- the extension is the only signal, never content-sniffed (decision 45's own stance, unchanged).
+
+**Rationale:** A block whose real point is a table usually does not print one; it writes a file (`df.to_csv(...)`) and maybe logs a line. Decision 45's own rationale already named this gap and deferred it. Reusing `code_or_data_table` rather than a second parser keeps exactly one place responsible for "does this csv/tsv/json content become a table," whether it came from a fence or a file.
+
+<!-- dankg:depends target=#decision-45-data-tables-from-csvjsontsv-fenced-blocks quote="Tagging an eval result fence with its own output format automatically is deferred" -->
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in

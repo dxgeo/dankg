@@ -54,6 +54,7 @@ use crate::data::table::{self, TableData};
 use crate::diag::Diags;
 use crate::eval::result::{self, Pair};
 use crate::md::{Align, Block, Document, Frontmatter, InfoString, Inline, List, Value};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 /// `title` becomes the cover page's own large centered heading, with the
@@ -61,13 +62,15 @@ use std::fmt::Write as _;
 /// (Typst's table of contents) is inserted right after the page break
 /// that follows only when `toc` is true -- a PDF has no runtime to
 /// toggle one, so the choice is made once, at compile time, unlike the
-/// HTML backend's own in-page toggle.
-pub fn render(doc: &Document, title: &str, toc: bool, diags: &mut Diags) -> String {
+/// HTML backend's own in-page toggle. `tables` (decision 50) names
+/// which recognized pairs' `produces=file:` artifact was read off disk
+/// as a table, keyed by the source block's own index.
+pub fn render(doc: &Document, title: &str, toc: bool, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) -> String {
     let mut out = cover_page(title, &doc.frontmatter);
     if toc {
         out.push_str("#outline()\n\n");
     }
-    out.push_str(&blocks(&doc.blocks, diags));
+    out.push_str(&blocks(&doc.blocks, tables, diags));
     out
 }
 ```
@@ -160,6 +163,12 @@ the rendered document -- the woven page stays a pure function of the
 one file's own content, not of whatever state a `deps=`/`xdeps=`
 chain happens to be in elsewhere when weave runs.
 
+A produced table (decision 50) is different: `tables`, keyed by the
+same source block index, is real content the block actually wrote,
+not an editorial judgment about trustworthiness. It renders inside
+the pair whenever present, through the identical `code_or_data_table`
+below a `csv`/`json` fence's own inline content already goes through.
+
 ```rust name=blocks_and_block path=render/typst.rs
 /// A named `Code` block immediately followed by its recorded eval
 /// result (decision 46) is recognized here, before `block` ever sees
@@ -169,20 +178,20 @@ chain happens to be in elsewhere when weave runs.
 /// discarded: a hidden block (decision 48), paired or not, contributes
 /// no blank-line separator either, the same as if it were never in
 /// `items` at all.
-fn blocks(items: &[Block], diags: &mut Diags) -> String {
+fn blocks(items: &[Block], tables: &HashMap<usize, (String, String)>, diags: &mut Diags) -> String {
     let mut rendered = Vec::new();
     let mut i = 0;
     while i < items.len() {
         if let Block::Code { info, text, line, .. } = &items[i] {
             if let Some(pair) = result::recognize_pair(items, i) {
                 if !info.weave_hidden() {
-                    rendered.push(eval_pair(info, text, *line, &pair, diags));
+                    rendered.push(eval_pair(info, text, *line, &pair, tables.get(&i), diags));
                 }
                 i += 3;
                 continue;
             }
         }
-        if let Some(s) = block(&items[i], diags) {
+        if let Some(s) = block(&items[i], tables, diags) {
             rendered.push(s);
         }
         i += 1;
@@ -190,7 +199,7 @@ fn blocks(items: &[Block], diags: &mut Diags) -> String {
     rendered.join("\n")
 }
 
-fn block(b: &Block, diags: &mut Diags) -> Option<String> {
+fn block(b: &Block, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) -> Option<String> {
     Some(match b {
         Block::Heading { level, inlines, .. } => {
             let eq = "=".repeat((*level).clamp(1, 6) as usize);
@@ -199,7 +208,7 @@ fn block(b: &Block, diags: &mut Diags) -> Option<String> {
         Block::Paragraph { inlines, .. } => format!("{}\n", inline_text(inlines)),
         Block::Code { info, .. } if info.weave_hidden() => return None,
         Block::Code { info, text, line, .. } => code_or_data_table(info, text, *line, diags),
-        Block::List(l) => list(l, diags),
+        Block::List(l) => list(l, tables, diags),
         Block::ThematicBreak { .. } => "#line(length: 100%)\n".to_string(),
         Block::Passthrough { text, .. } => format!("{}\n", escape_typst(text)),
         Block::Table { aligns, header, rows, .. } => table_block(aligns, header, rows),
@@ -209,13 +218,30 @@ fn block(b: &Block, diags: &mut Diags) -> Option<String> {
 /// The `#block(stroke: ...)` decision 46 wraps a source block and its
 /// recorded output in. `failed` alone picks the stroke color and the
 /// caption text -- one flag, not two independent things that could
-/// disagree.
-fn eval_pair(source_info: &InfoString, source_text: &str, source_line: u32, pair: &Pair, diags: &mut Diags) -> String {
+/// disagree. `table` (decision 50), when present, is the source
+/// block's own `produces=file:` artifact, already read off disk --
+/// appended after the captured output, since stdout might be a log
+/// line while the real content lives in the file.
+fn eval_pair(
+    source_info: &InfoString,
+    source_text: &str,
+    source_line: u32,
+    pair: &Pair,
+    table: Option<&(String, String)>,
+    diags: &mut Diags,
+) -> String {
     let color = if pair.failed { "red" } else { "gray" };
     let caption = if pair.failed { "Output (failed)" } else { "Output" };
     let mut body = code_or_data_table(source_info, source_text, source_line, diags);
     let _ = write!(body, "\n#text(size: 9pt, fill: {color})[{caption}]\n\n");
     body.push_str(&code_or_data_table(pair.output_info, pair.output_text, pair.output_line, diags));
+    if let Some((lang, content)) = table {
+        if let Some(produces) = source_info.produces() {
+            let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n\n", escape_typst(produces));
+        }
+        let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
+        body.push_str(&code_or_data_table(&info, content, source_line, diags));
+    }
     if let Some(p) = provenance_text(pair) {
         let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n", escape_typst(&p));
     }
@@ -239,11 +265,11 @@ fn provenance_text(pair: &Pair) -> Option<String> {
     Some(parts.join(" -- "))
 }
 
-fn list(l: &List, diags: &mut Diags) -> String {
+fn list(l: &List, tables: &HashMap<usize, (String, String)>, diags: &mut Diags) -> String {
     let marker = if l.ordered { "+" } else { "-" };
     let mut out = String::new();
     for item in &l.items {
-        let body = blocks(&item.blocks, diags);
+        let body = blocks(&item.blocks, tables, diags);
         for (i, line) in body.lines().enumerate() {
             if i == 0 {
                 out.push_str(marker);
@@ -482,10 +508,14 @@ mod tests {
     use crate::md::Document;
 
     fn render_doc(source: &str) -> (String, Diags) {
+        render_doc_with_tables(source, &HashMap::new())
+    }
+
+    fn render_doc_with_tables(source: &str, tables: &HashMap<usize, (String, String)>) -> (String, Diags) {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &mut diags);
+        let out = render(&doc, "Title", true, tables, &mut diags);
         (out, diags)
     }
 
@@ -503,7 +533,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", false, &mut diags);
+        let out = render(&doc, "Title", false, &HashMap::new(), &mut diags);
         assert!(!out.contains("#outline()"));
     }
 
@@ -515,7 +545,7 @@ mod tests {
             &mut d,
         );
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Author: Jane Doe"), "{cover}");
@@ -670,6 +700,34 @@ mod tests {
         let (out, _) = render_doc("```sh name=a\necho hi\n```\n");
         assert!(!out.contains("#block(stroke"), "{out}");
         assert!(out.contains("echo hi"), "{out}");
+    }
+
+    #[test]
+    fn a_produced_table_renders_inside_the_pair() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("wrote data.csv"), "{out}");
+        assert!(out.contains("file:data.csv"), "{out}");
+        assert!(out.contains("#table("), "{out}");
+    }
+
+    #[test]
+    fn a_json_artifact_that_is_not_table_shaped_falls_back_to_code() {
+        let src = "```python name=a produces=file:data.json\nwrite_json()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("json".to_string(), "{\"not\": \"a table\"}".to_string()));
+        let (out, diags) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("not"), "{out}");
+        assert!(!diags.items().is_empty(), "expected a warning about the non-table json");
+    }
+
+    #[test]
+    fn no_produced_table_means_no_extra_section() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("#table("), "{out}");
     }
 }
 ```

@@ -15,6 +15,7 @@ use crate::graph::build::{file_stem, strip_extension};
 use crate::graph::index;
 use crate::md::Document;
 use crate::render::{typst, weave_html};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,8 +42,9 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool) -> Resul
     let mut diags = Diags::new(path);
     let doc = Document::parse(&source, &mut diags);
 
-    let root = index::discover_root(Path::new(path))
-        .unwrap_or_else(|| Path::new(path).parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")));
+    let abs_path = index::absolute(Path::new(path));
+    let root = index::discover_root(&abs_path)
+        .unwrap_or_else(|| abs_path.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")));
     let mut cfg_diags = Diags::new(".dankg/config");
     let config = Config::load(&root, &mut cfg_diags);
     diags.absorb(cfg_diags);
@@ -50,15 +52,13 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool) -> Resul
     let name = file_stem(&strip_extension(path)).to_string();
     let title = doc.frontmatter.title().map(str::to_string).unwrap_or_else(|| name.clone());
 
-    let entry_rel = index::absolute(Path::new(path))
-        .strip_prefix(&root)
-        .map(index::to_slash)
-        .unwrap_or_else(|_| path.to_string());
+    let entry_rel = abs_path.strip_prefix(&root).map(index::to_slash).unwrap_or_else(|_| path.to_string());
     warn_stale_pairs(&doc, path, &entry_rel, &root, &config, &mut diags);
+    let tables = produced_tables(&doc, &entry_rel, &root, &mut diags);
 
     let report = match format {
-        Format::Html => render_html(&doc, &title, &config, &root, output, &mut diags)?,
-        Format::Pdf => render_pdf(&doc, &title, &config, &root, &name, output, toc, &mut diags)?,
+        Format::Html => render_html(&doc, &title, &config, &root, &tables, output, &mut diags)?,
+        Format::Pdf => render_pdf(&doc, &title, &config, &root, &name, &tables, output, toc, &mut diags)?,
     };
 
     diags.sort();
@@ -97,6 +97,42 @@ fn warn_stale_pairs(doc: &Document, path: &str, entry_rel: &str, root: &Path, co
     }
 }
 
+fn produced_tables(doc: &Document, entry_rel: &str, root: &Path, diags: &mut Diags) -> HashMap<usize, (String, String)> {
+    let mut tables = HashMap::new();
+    for b in plan::top_level_blocks(doc, entry_rel) {
+        if result::recorded_hash(doc, b.index, b.name).is_none() {
+            continue; // no recognized pair, nothing to attach a table to
+        }
+        let Some(raw) = b.produces else { continue };
+        let Some(rel_path) = plan::parse_artifact(raw) else { continue };
+        let Some(lang) = table_lang(rel_path) else { continue };
+        let Some(resolved) = plan::resolve_artifact(entry_rel, rel_path) else {
+            diags.warn(b.line, format!("`{}` produces={raw} escapes the root; not rendered", b.name));
+            continue;
+        };
+        match fs::read_to_string(root.join(&resolved)) {
+            Ok(content) => {
+                tables.insert(b.index, (lang.to_string(), content));
+            }
+            Err(e) => diags.warn(b.line, format!("`{}` produces={raw} could not be read ({e}); not rendered", b.name)),
+        }
+    }
+    tables
+}
+
+/// The three extensions `code_or_data_table` already renders as a table
+/// (decision 45); anything else is not a table shape this feature
+/// knows how to show, so `produced_tables` leaves it out silently
+/// rather than guessing.
+fn table_lang(path: &str) -> Option<&'static str> {
+    match path.rsplit('.').next()?.to_ascii_lowercase().as_str() {
+        "csv" => Some("csv"),
+        "tsv" => Some("tsv"),
+        "json" => Some("json"),
+        _ => None,
+    }
+}
+
 fn read_asset(root: &Path, rel: &str, key: &str, diags: &mut Diags) -> Option<String> {
     let full = root.join(rel);
     match fs::read_to_string(&full) {
@@ -113,11 +149,12 @@ fn render_html(
     title: &str,
     config: &Config,
     root: &Path,
+    tables: &HashMap<usize, (String, String)>,
     output: Option<&str>,
     diags: &mut Diags,
 ) -> Result<Report, String> {
     let extra_css = config.weave("html").and_then(|w| w.css).and_then(|rel| read_asset(root, &rel, "css", diags));
-    let rendered = weave_html::render(doc, title, extra_css.as_deref(), diags);
+    let rendered = weave_html::render(doc, title, extra_css.as_deref(), tables, diags);
 
     let written = match output {
         Some(p) => {
@@ -140,11 +177,12 @@ fn render_pdf(
     config: &Config,
     root: &Path,
     name: &str,
+    tables: &HashMap<usize, (String, String)>,
     output: Option<&str>,
     toc: bool,
     diags: &mut Diags,
 ) -> Result<Report, String> {
-    let body = typst::render(doc, title, toc, diags);
+    let body = typst::render(doc, title, toc, tables, diags);
     let weave_cfg = config.weave("pdf");
     let preamble =
         weave_cfg.as_ref().and_then(|w| w.template.clone()).and_then(|rel| read_asset(root, &rel, "template", diags));
@@ -380,6 +418,74 @@ mod tests {
 
         let mut diags = Diags::new("a.md");
         warn_stale_pairs(&doc, dir.join("a.md").to_str().unwrap(), "a.md", &dir, &config, &mut diags);
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn table_lang_recognizes_csv_tsv_json_case_insensitively() {
+        assert_eq!(table_lang("data.csv"), Some("csv"));
+        assert_eq!(table_lang("data.CSV"), Some("csv"));
+        assert_eq!(table_lang("data.tsv"), Some("tsv"));
+        assert_eq!(table_lang("data.json"), Some("json"));
+        assert_eq!(table_lang("chart.png"), None);
+        assert_eq!(table_lang("no_extension"), None);
+    }
+
+    #[test]
+    fn produced_tables_reads_a_csv_artifact_for_a_recognized_pair() {
+        let dir = scratch(&[
+            ("a.md", "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n"),
+            ("data.csv", "x,y\n1,2\n"),
+        ]);
+        let source = fs::read_to_string(dir.join("a.md")).unwrap();
+        let doc = Document::parse(&source, &mut Diags::new("a.md"));
+
+        let mut diags = Diags::new("a.md");
+        let tables = produced_tables(&doc, "a.md", &dir, &mut diags);
+        assert_eq!(tables.get(&0), Some(&("csv".to_string(), "x,y\n1,2\n".to_string())));
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn produced_tables_is_silent_for_a_named_block_with_no_recorded_result() {
+        let dir = scratch(&[("a.md", "```python name=a produces=file:data.csv\nwrite_csv()\n```\n"), ("data.csv", "x,y\n1,2\n")]);
+        let source = fs::read_to_string(dir.join("a.md")).unwrap();
+        let doc = Document::parse(&source, &mut Diags::new("a.md"));
+
+        let mut diags = Diags::new("a.md");
+        let tables = produced_tables(&doc, "a.md", &dir, &mut diags);
+        assert!(tables.is_empty());
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn produced_tables_warns_on_a_missing_artifact() {
+        let dir = scratch(&[(
+            "a.md",
+            "```python name=a produces=file:missing.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n",
+        )]);
+        let source = fs::read_to_string(dir.join("a.md")).unwrap();
+        let doc = Document::parse(&source, &mut Diags::new("a.md"));
+
+        let mut diags = Diags::new("a.md");
+        let tables = produced_tables(&doc, "a.md", &dir, &mut diags);
+        assert!(tables.is_empty());
+        assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("could not be read"), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn produced_tables_is_silent_for_an_unrecognized_extension() {
+        let dir = scratch(&[(
+            "a.md",
+            "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n",
+        )]);
+        let source = fs::read_to_string(dir.join("a.md")).unwrap();
+        let doc = Document::parse(&source, &mut Diags::new("a.md"));
+
+        let mut diags = Diags::new("a.md");
+        let tables = produced_tables(&doc, "a.md", &dir, &mut diags);
+        assert!(tables.is_empty());
         assert!(diags.items().is_empty(), "{:?}", diags.items());
     }
 }

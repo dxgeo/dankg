@@ -18,6 +18,7 @@
 use dankg::diag::Diags;
 use dankg::md::Document;
 use dankg::render::typst;
+use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 
@@ -61,7 +62,7 @@ fn rendered_typst_actually_compiles() {
     assert!(parse_diags.is_empty(), "fixture should parse cleanly: {:?}", parse_diags.items());
 
     let mut diags = Diags::new("t.md");
-    let typ = typst::render(&doc, "Weave Smoke Test", true, &mut diags);
+    let typ = typst::render(&doc, "Weave Smoke Test", true, &HashMap::new(), &mut diags);
     assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
 
     let dir = std::env::temp_dir().join(format!("dankg-typst-smoke-{}", std::process::id()));
