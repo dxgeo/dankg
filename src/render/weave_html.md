@@ -138,9 +138,9 @@ instead of Typst markup.
 
 A code block tagged `weave=hidden` (decision 48) produces nothing at
 all here -- not a placeholder, not a collapsed toggle. It is a
-weave-only rendering hint: `dankg tangle` and `dankg eval` never look
-at it, so a hidden block still tangles and still evaluates exactly as
-it would without the tag.
+weave-only rendering hint. `dankg tangle` and `dankg eval` never look
+at it. A hidden block still tangles and still evaluates exactly as it
+would without the tag.
 
 A named `Code` block immediately followed by its own recorded
 `<!-- dankg:result ... -->` marker and output fence (decision 46)

@@ -142,8 +142,8 @@ never become unvalidated Typst markup.
 
 A code block tagged `weave=hidden` (decision 48) contributes nothing:
 no text, no separator blank line either, as if it were never in the
-document at all. It is a weave-only rendering hint -- `dankg tangle`
-and `dankg eval` never look at it, so a hidden block still tangles and
+document at all. It is a weave-only rendering hint. `dankg tangle`
+and `dankg eval` never look at it. A hidden block still tangles and
 still evaluates exactly as it would without the tag.
 
 A named `Code` block immediately followed by its own recorded

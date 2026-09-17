@@ -677,8 +677,8 @@ that toggles it, and a `:checked` sibling selector that hides the nav
 body. No JavaScript exists for it to misfire.
 
 `--fail` (decision 46) is a second accent color, alongside `--accent`,
-reserved for a recorded eval result that failed: `figure.eval-pair`
-groups a source block with its recorded output, and `.failed` on that
+reserved for a recorded eval result that failed. `figure.eval-pair`
+groups a source block with its recorded output. `.failed` on that
 same figure switches its left border and caption to `--fail` instead
 of `--rule`/`--muted`. A plain, unpaired code block never sees either
 class.

@@ -47,7 +47,7 @@ written.
 **The lazy, file-scoped chain resolution `run_one` already uses.**
 Decision 19 keeps eval file-scoped; a cross-file `deps=`/`xdeps=`
 chain is resolved by loading only what it actually reaches, through
-`eval::files::Files`, and a `Graph` is only ever built if a `table:`
+`eval::files::Files`. A `Graph` is only ever built if a `table:`
 xdep is actually found along the way.
 
 <!-- dankg:depends target=../architecture.md#decision-19-eval-scope quote="One file; `deps`/`--all` never cross files." -->
