@@ -17,6 +17,9 @@ own single-file path already take for the identical reason (decision
 use crate::cmd;
 use crate::config::Config;
 use crate::diag::Diags;
+use crate::eval::files::Files;
+use crate::eval::session::corpus_graph_if_needed;
+use crate::eval::{plan, result};
 use crate::graph::build::{file_stem, strip_extension};
 use crate::graph::index;
 use crate::md::Document;
@@ -75,6 +78,12 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool) -> Resul
     let name = file_stem(&strip_extension(path)).to_string();
     let title = doc.frontmatter.title().map(str::to_string).unwrap_or_else(|| name.clone());
 
+    let entry_rel = index::absolute(Path::new(path))
+        .strip_prefix(&root)
+        .map(index::to_slash)
+        .unwrap_or_else(|_| path.to_string());
+    warn_stale_pairs(&doc, path, &entry_rel, &root, &config, &mut diags);
+
     let report = match format {
         Format::Html => render_html(&doc, &title, &config, &root, output, &mut diags)?,
         Format::Pdf => render_pdf(&doc, &title, &config, &root, &name, output, toc, &mut diags)?,
@@ -83,6 +92,61 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool) -> Resul
     diags.sort();
     diags.emit();
     Ok(report)
+}
+```
+
+Every recognized pair (decision 46) gets one freshness check: the
+same comparison `dankg check` and `dankg eval --if-stale` already
+make, `is_stale`'s `expected_hash` against the marker's own stored
+`hash`. `corpus_graph_if_needed` is `session::run_single`'s own
+`--if-stale` precheck, reused rather than reimplemented -- the same
+lazy shape decision 19 already established: a `Graph` is only ever
+built if some block's own `xdeps=` actually carries a `table:` entry.
+Weave still never executes anything; this only ever compares hashes
+already on disk against a fresh recomputation.
+
+A stale result changes nothing about what gets rendered. `warn_stale_pairs`
+writes to `diags` alone -- a stderr warning, by the time `run` calls
+`diags.emit()` -- and returns nothing for either renderer to consume.
+The woven document stays a pure function of the one file's own
+content. Two runs against the same file produce byte-identical
+output, regardless of whatever state a `deps=`/`xdeps=` chain happens
+to be in elsewhere. A reader learns about a stale result the same way
+they learn about a missing CSS file or an unclosed fence: a warning
+next to the output, never a silent change to it.
+
+<!-- dankg:depends target=../architecture.md#decision-47-weave-staleness-is-reported-never-rendered quote="A confirmed match warns about nothing at all." -->
+
+```rust name=warn_stale_pairs path=weave.rs
+fn warn_stale_pairs(doc: &Document, path: &str, entry_rel: &str, root: &Path, config: &Config, diags: &mut Diags) {
+    let mut discover_diags = Diags::new(entry_rel);
+    let mut files = Files::new(root.to_path_buf());
+    if files.discover(entry_rel, &mut discover_diags).is_err() {
+        return;
+    }
+    let (files, graph) = match corpus_graph_if_needed(path, files) {
+        Ok(v) => v,
+        Err(e) => {
+            diags.warn(0, format!("could not check eval result staleness: {e}"));
+            return;
+        }
+    };
+    let all_blocks = files.all_blocks();
+    let mut xdep_cache = std::collections::HashMap::new();
+
+    for b in plan::top_level_blocks(doc, entry_rel) {
+        let Some(stored) = result::recorded_hash(doc, b.index, b.name) else { continue };
+        let outcome = (|| {
+            let chain = plan::plan_for(&all_blocks, entry_rel, b.name).map_err(|e| e.to_string())?;
+            let hash_template = result::hash_template_for(config, &chain)?;
+            result::is_stale(&files, config, &all_blocks, graph.as_ref(), &chain, &hash_template, stored, &mut xdep_cache)
+        })();
+        match outcome {
+            Ok(false) => {}
+            Ok(true) => diags.warn(b.line, format!("`{}` recorded result looks stale; rerun `dankg eval`", b.name)),
+            Err(e) => diags.warn(b.line, format!("`{}` staleness could not be verified: {e}", b.name)),
+        }
+    }
 }
 ```
 
@@ -339,6 +403,61 @@ mod tests {
         let dir = scratch(&[(".dankg/config", "[weave.pdf]\ntemplate = nope.typ\n"), ("a.md", "# H\n")]);
         let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, true).unwrap();
         assert!(report.typ_path.unwrap().exists());
+    }
+
+    fn stale_scratch(hash_hex: &str) -> (PathBuf, Config) {
+        let dir = scratch(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", &format!("```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash={hash_hex} -->\n\n```\nhi\n```\n")),
+        ]);
+        let config = Config::load(&dir, &mut Diags::new(".dankg/config"));
+        (dir, config)
+    }
+
+    #[test]
+    fn warn_stale_pairs_is_silent_when_the_recorded_result_is_current() {
+        let (dir, config) = stale_scratch("0000000000000000");
+        let source = fs::read_to_string(dir.join("a.md")).unwrap();
+        let doc = Document::parse(&source, &mut Diags::new("a.md"));
+        let blocks = plan::top_level_blocks(&doc, "a.md");
+        let chain = plan::plan_for(&blocks, "a.md", "a").unwrap();
+        let template = result::hash_template_for(&config, &chain).unwrap();
+        let real_hash = result::expected_hash(&chain, &template, &[]);
+
+        let source = fs::read_to_string(dir.join("a.md")).unwrap().replace("0000000000000000", &crate::hash::hex(real_hash));
+        fs::write(dir.join("a.md"), &source).unwrap();
+        let doc = Document::parse(&source, &mut Diags::new("a.md"));
+
+        let mut diags = Diags::new("a.md");
+        warn_stale_pairs(&doc, dir.join("a.md").to_str().unwrap(), "a.md", &dir, &config, &mut diags);
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn warn_stale_pairs_warns_when_the_source_changed_since_the_result_was_recorded() {
+        let (dir, config) = stale_scratch("0000000000000000");
+        let source = fs::read_to_string(dir.join("a.md")).unwrap();
+        let doc = Document::parse(&source, &mut Diags::new("a.md"));
+
+        let mut diags = Diags::new("a.md");
+        warn_stale_pairs(&doc, dir.join("a.md").to_str().unwrap(), "a.md", &dir, &config, &mut diags);
+        assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("looks stale"), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn warn_stale_pairs_is_silent_for_a_named_block_with_no_recorded_result() {
+        let dir = scratch(&[
+            (".dankg/config", "[lang.sh]\ncommand = sh {file}\n"),
+            ("a.md", "```sh name=a\necho hi\n```\n"),
+        ]);
+        let config = Config::load(&dir, &mut Diags::new(".dankg/config"));
+        let source = fs::read_to_string(dir.join("a.md")).unwrap();
+        let doc = Document::parse(&source, &mut Diags::new("a.md"));
+
+        let mut diags = Diags::new("a.md");
+        warn_stale_pairs(&doc, dir.join("a.md").to_str().unwrap(), "a.md", &dir, &config, &mut diags);
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
     }
 }
 ```

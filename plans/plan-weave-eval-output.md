@@ -29,7 +29,7 @@ Decision 41 currently states weave "never consults `deps=`/`name=`."
 This plan narrows that claim: showing a result honestly now requires
 both.
 
-<!-- dankg:depends target=../architecture.md#decision-41-weave-scope quote="Weave never executes anything and never consults `deps=`/`name=`." -->
+<!-- dankg:depends target=../architecture.md#decision-41-weave-scope quote="Weave never executes anything." -->
 
 ## What this reuses
 

@@ -254,7 +254,7 @@ A `SELECT` result's row count, or any other captured output, never enters the st
 
 ## Decision 41: Weave scope
 
-`dankg weave <path> --format html|pdf` turns one markdown file into a readable document. Single-file only -- no corpus-wide walk exists yet. Unlike `tangle`/`eval`, weave walks every `Block` in document order: headings, paragraphs, lists, thematic breaks, tables, passthrough, and code blocks alike, not just named, top-level ones. Code blocks render read-only. Weave never executes anything and never consults `deps=`/`name=`.
+`dankg weave <path> --format html|pdf` turns one markdown file into a readable document. Single-file only -- no corpus-wide walk exists yet. Unlike `tangle`/`eval`, weave walks every `Block` in document order: headings, paragraphs, lists, thematic breaks, tables, passthrough, and code blocks alike, not just named, top-level ones. Code blocks render read-only. Weave never executes anything. (Decision 47 narrows this: weave reads `name=`/`deps=`/`xdeps=` too, but read-only, to check a recorded result's own staleness -- never to plan or run anything.)
 
 **Rationale:** Weave produces something a person reads, not a program. `plan::top_level_blocks`'s own narrowing (decision 23) exists to match what `eval` can run. Nothing here runs. Nothing here needs that scope.
 
@@ -297,6 +297,17 @@ A fenced code block tagged `weave=hidden` produces nothing in either weave backe
 A named `Code` block immediately followed by a `<!-- dankg:result ... -->` marker for that same name, then the recorded output fence, renders as one visual unit in both weave backends instead of three unrelated blocks. `eval::result::recognize_pair` is the read-only sibling of `locate_existing` that finds this shape from a block index alone, without a caller-supplied name, and hands back the marker's own `failed`/`produces`/`reads` alongside the output text. The marker itself is never rendered as text again. A `failed` result gets a visually distinct pairing (HTML: an added CSS class; Typst: a different stroke color); `produces`/`reads`, when either is non-empty, prints as a short line under the output -- what the block wrote, what it read.
 
 **Rationale:** Before this, the marker fell into the same catch-all `Block::Passthrough` arm every other unparsed construct does, and rendered as literal escaped comment text -- a bug visible the moment weave meets any file `dankg eval` has touched. A reader of a woven document has no reason to see the marker's own machinery; they came for the code and the answer it produced, shown together.
+
+## Decision 47: Weave staleness is reported, never rendered
+
+Each recognized pair (decision 46) gets one freshness check: `eval::result::is_stale`'s own `expected_hash` against the marker's own stored `hash`, the same comparison `dankg check` and `dankg eval --if-stale` already make. `weave::warn_stale_pairs` builds the one target's own chain with `plan::top_level_blocks`/`plan::plan_for`, resolving a cross-file `deps=`/`xdeps=` chain by loading exactly what it reaches through `eval::files::Files`. A `Graph` is built only if the chain actually carries a `table:` xdep. `eval::session::corpus_graph_if_needed` is reused directly rather than reimplemented here -- the same lazy, file-scoped shape `run_one`'s own `--if-stale` precheck already established (decision 19), never a whole-corpus walk. A real hash mismatch, a `plan::PlanError`, and a missing `[lang.*]`/`[db.*]` config section all get the same treatment: a stderr warning through `diags`, naming the block. A confirmed match warns about nothing at all. This narrows decision 41's "never consults `deps=`/`name=`": weave now reads `name=`/`deps=`/`xdeps=`, read-only, to ask whether a stored answer still matches its own inputs. It still never plans or runs anything.
+
+The rendered document itself never changes because of this check. `warn_stale_pairs` writes only to `diags`, never to the HTML or Typst output either backend builds. Two `dankg weave` runs against the same file produce byte-identical output regardless of whatever state a `deps=`/`xdeps=` chain is in elsewhere at the time.
+
+**Rationale:** Showing a recorded result without saying whether it is still trustworthy would tell a reader something false: that what they are reading is current. A stderr warning says so without it. Folding that warning into the rendered page itself was considered and rejected: it would make the woven document's own content depend on the state of files outside the one being woven, action at a distance a reader has no way to see coming from the source alone. A warning next to the output, the same way a missing CSS file or an unclosed fence already gets one, keeps the document itself predictable and puts the judgment call -- rerun `dankg eval` or not -- back with the reader.
+
+<!-- dankg:depends target=#decision-19-eval-scope quote="One file; `deps`/`--all` never cross files." -->
+<!-- dankg:depends target=#decision-41-weave-scope quote="Decision 47 narrows this: weave reads" -->
 
 # Terminology
 

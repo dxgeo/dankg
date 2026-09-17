@@ -683,6 +683,9 @@ same figure switches its left border and caption to `--fail` instead
 of `--rule`/`--muted`. A plain, unpaired code block never sees either
 class.
 
+A stale recorded result (decision 47) gets no styling here at all --
+staleness is reported to stderr, never folded into the rendered page.
+
 ```rust name=weave_css path=render/assets.rs
 pub const WEAVE_CSS: &str = r##"
 :root {

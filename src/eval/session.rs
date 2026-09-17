@@ -343,8 +343,11 @@ fn list_blocks(path: &str, blocks: &[BlockRef], doc: &Document, config: &Config)
 /// `table:` xdep -- the common case stays exactly as file-scoped and
 /// cheap as it always was (decision 19). Otherwise, a fresh whole-corpus
 /// `Files` plus its resolved `Graph`, for `xdep_hashes` to resolve a
-/// `table:` entry against.
-fn corpus_graph_if_needed(path: &str, files: Files) -> Result<(Files, Option<Graph>), String> {
+/// `table:` entry against. `pub(crate)`, not private: `weave::warn_stale_pairs`
+/// (decision 47) reuses this exact precheck for its own staleness check,
+/// rather than a second copy of "build a graph only if something actually
+/// needs one."
+pub(crate) fn corpus_graph_if_needed(path: &str, files: Files) -> Result<(Files, Option<Graph>), String> {
     let needs_corpus = files.all_blocks().iter().any(|b| !plan::table_xdeps(b).is_empty());
     if !needs_corpus {
         return Ok((files, None));

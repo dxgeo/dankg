@@ -154,6 +154,12 @@ blocks. The marker itself is never emitted as text;
 
 <!-- dankg:depends target=../../architecture.md#decision-46-a-recorded-eval-result-renders-paired-with-its-source quote="The marker itself is never rendered as text again." -->
 
+A stale result (decision 47) changes nothing here. Staleness is
+reported to stderr by `weave::warn_stale_pairs`, never folded into
+the rendered document -- the woven page stays a pure function of the
+one file's own content, not of whatever state a `deps=`/`xdeps=`
+chain happens to be in elsewhere when weave runs.
+
 ```rust name=blocks_and_block path=render/typst.rs
 /// A named `Code` block immediately followed by its recorded eval
 /// result (decision 46) is recognized here, before `block` ever sees
