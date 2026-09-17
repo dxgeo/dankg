@@ -292,6 +292,14 @@ A fenced code block tagged `weave=hidden` produces nothing in either weave backe
 
 **Rationale:** A block worth keeping in the source -- readable in an editor, tangled into a real file, evaluated for its result -- is not always a block worth showing a reader of the woven document, and forcing an author to delete or comment it out to get it out of the page would cost the source its own value. A separate attribute, rather than overloading an existing one, keeps tangle's and eval's own scope untouched: neither command gained a reason to care what a reader of the *rendered* document sees.
 
+## Decision 46: A recorded eval result renders paired with its source
+
+A named `Code` block immediately followed by a `<!-- dankg:result ... -->` marker for that same name, then the recorded output fence, renders as one visual unit in both weave backends instead of three unrelated blocks. `eval::result::recognize_pair` is the read-only sibling of `locate_existing` that finds this shape from a block index alone, without a caller-supplied name, and hands back the marker's own `failed`/`produces`/`reads` alongside the output text. The marker itself is never rendered as text again. A `failed` result gets a visually distinct pairing (HTML: an added CSS class; Typst: a different stroke color); `produces`/`reads`, when either is non-empty, prints as a short line under the output -- what the block wrote, what it read.
+
+**Rationale:** Before this, the marker fell into the same catch-all `Block::Passthrough` arm every other unparsed construct does, and rendered as literal escaped comment text -- a bug visible the moment weave meets any file `dankg eval` has touched. A reader of a woven document has no reason to see the marker's own machinery; they came for the code and the answer it produced, shown together.
+
+# Terminology
+
 - root :: The directory defining one knowledge base. Everything under it is in
   the corpus. Everything outside is not. Never called a "vault".
 - node :: One heading, at any depth, in one file.

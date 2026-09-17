@@ -27,7 +27,7 @@ use crate::graph::build::strip_extension;
 use crate::graph::model::{Graph, NodeId};
 use crate::graph::query::find_producer;
 use crate::hash;
-use crate::md::{Block, Document};
+use crate::md::{Block, Document, InfoString};
 ```
 
 `expected_hash` covers the target's whole dependency chain and the
@@ -389,6 +389,59 @@ pub fn locate_existing(doc: &Document, code_index: usize, name: &str) -> Option<
     }
     let Block::Code { end_line, .. } = doc.blocks.get(code_index + 2)? else { return None };
     Some((*line, *end_line))
+}
+```
+
+`recognize_pair` is `locate_existing`'s read-only sibling for
+`dankg weave` (decision 46): the same three-block shape, found from
+a block index alone rather than a caller-supplied name, and handing
+back the marker's own fields instead of just a line range.
+
+<!-- dankg:depends target=../../architecture.md#decision-46-a-recorded-eval-result-renders-paired-with-its-source quote="the read-only sibling of `locate_existing` that finds this shape from a block index alone" -->
+
+```rust name=recognize_pair path=eval/result.rs
+/// A source block's recorded result, recognized by shape rather than by
+/// a name the caller already knows (contrast `locate_existing`, which
+/// `write_back` calls once it already has one). `output_info`/
+/// `output_text` are the plain fence right after the marker -- the
+/// captured stdout `write_back` stored, never re-run here.
+pub struct Pair<'a> {
+    pub name: &'a str,
+    pub hash: u64,
+    pub failed: bool,
+    pub produces: Vec<String>,
+    pub reads: Vec<String>,
+    pub output_info: &'a InfoString,
+    pub output_text: &'a str,
+    pub output_line: u32,
+}
+
+/// Looks at `items[index]` and the two blocks after it for the exact
+/// shape `write_back` produces: a named `Code`, a one-line
+/// `Passthrough` whose marker names that same block, then a plain
+/// `Code`. `None` covers every way that shape can fail to hold --
+/// `items[index]` is not named code, there is no marker right after
+/// it, or the marker names something else (a stray comment, not one
+/// `dankg eval` wrote for this block).
+pub fn recognize_pair(items: &[Block], index: usize) -> Option<Pair<'_>> {
+    let Block::Code { info, .. } = items.get(index)? else { return None };
+    let name = info.name()?;
+
+    let Block::Passthrough { text, .. } = items.get(index + 1)? else { return None };
+    let mut lines = text.lines();
+    let first = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    let (marker_name, hash, failed, produces, reads) = parse_marker(first)?;
+    if marker_name != name {
+        return None;
+    }
+
+    let Block::Code { info: output_info, text: output_text, line: output_line, .. } = items.get(index + 2)? else {
+        return None;
+    };
+    Some(Pair { name, hash, failed, produces, reads, output_info, output_text, output_line: *output_line })
 }
 ```
 
@@ -818,6 +871,46 @@ mod tests {
     fn locate_existing_is_none_with_nothing_following() {
         let d = doc("```python name=index\nprint(1)\n```\n");
         assert!(locate_existing(&d, 0, "index").is_none());
+    }
+
+    #[test]
+    fn recognize_pair_finds_the_marker_and_output() {
+        let src = "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=000000000000002a produces=orders reads=customers -->\n\n```\nhi\n```\n";
+        let d = doc(src);
+        let pair = recognize_pair(&d.blocks, 0).unwrap();
+        assert_eq!(pair.name, "a");
+        assert_eq!(pair.hash, 0x2a);
+        assert!(!pair.failed);
+        assert_eq!(pair.produces, vec!["orders".to_string()]);
+        assert_eq!(pair.reads, vec!["customers".to_string()]);
+        assert_eq!(pair.output_text, "hi\n");
+    }
+
+    #[test]
+    fn recognize_pair_carries_the_failed_flag() {
+        let src = "```sh name=a\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n\n```\n";
+        let d = doc(src);
+        let pair = recognize_pair(&d.blocks, 0).unwrap();
+        assert!(pair.failed);
+    }
+
+    #[test]
+    fn recognize_pair_is_none_for_a_different_name() {
+        let src = "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=other hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let d = doc(src);
+        assert!(recognize_pair(&d.blocks, 0).is_none());
+    }
+
+    #[test]
+    fn recognize_pair_is_none_for_an_unnamed_block() {
+        let d = doc("```sh\necho hi\n```\n");
+        assert!(recognize_pair(&d.blocks, 0).is_none());
+    }
+
+    #[test]
+    fn recognize_pair_is_none_with_nothing_following() {
+        let d = doc("```sh name=a\necho hi\n```\n");
+        assert!(recognize_pair(&d.blocks, 0).is_none());
     }
 
     #[test]

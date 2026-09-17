@@ -676,6 +676,13 @@ table-of-contents toggle is CSS alone, a hidden checkbox, a `<label>`
 that toggles it, and a `:checked` sibling selector that hides the nav
 body. No JavaScript exists for it to misfire.
 
+`--fail` (decision 46) is a second accent color, alongside `--accent`,
+reserved for a recorded eval result that failed: `figure.eval-pair`
+groups a source block with its recorded output, and `.failed` on that
+same figure switches its left border and caption to `--fail` instead
+of `--rule`/`--muted`. A plain, unpaired code block never sees either
+class.
+
 ```rust name=weave_css path=render/assets.rs
 pub const WEAVE_CSS: &str = r##"
 :root {
@@ -686,6 +693,7 @@ pub const WEAVE_CSS: &str = r##"
   --rule: #dcdcd6;
   --code-bg: #f2f2ef;
   --accent: #2f6f4f;
+  --fail: #a13c3c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -696,6 +704,7 @@ pub const WEAVE_CSS: &str = r##"
     --rule: #303338;
     --code-bg: #1f2124;
     --accent: #74c39a;
+    --fail: #d97a7a;
   }
 }
 
@@ -785,6 +794,31 @@ nav#toc a:hover { text-decoration: underline; }
   content: " (hidden -- click to show)";
   font-weight: 400;
   color: var(--muted);
+}
+
+figure.eval-pair {
+  margin: 1.25rem 0;
+  padding: 0;
+  border-left: 3px solid var(--rule);
+}
+
+figure.eval-pair > pre { margin: 0; border-radius: 0; }
+figure.eval-pair > pre + pre { border-top: 1px solid var(--rule); }
+
+figure.eval-pair figcaption {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  font-size: 0.8em;
+  color: var(--muted);
+  padding: 0.3rem 1rem 0;
+}
+
+figure.eval-pair.failed { border-left-color: var(--fail); }
+figure.eval-pair.failed figcaption { color: var(--fail); }
+
+.eval-provenance {
+  font-size: 0.8em;
+  color: var(--muted);
+  padding: 0 1rem 0.5rem;
 }
 "##;
 ```

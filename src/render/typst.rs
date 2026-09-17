@@ -23,6 +23,7 @@
 
 use crate::data::table::{self, TableData};
 use crate::diag::Diags;
+use crate::eval::result::{self, Pair};
 use crate::md::{Align, Block, Document, Frontmatter, InfoString, Inline, List, Value};
 use std::fmt::Write as _;
 
@@ -77,11 +78,32 @@ fn humanize_key(key: &str) -> String {
     }
 }
 
+/// A named `Code` block immediately followed by its recorded eval
+/// result (decision 46) is recognized here, before `block` ever sees
+/// it, and consumed as one unit -- three `Block`s in `items`, one
+/// `#block(...)` in the output. Anything else falls through to `block`
+/// exactly as before. Filtered before joining, not rendered-then-
+/// discarded: a hidden block (decision 48), paired or not, contributes
+/// no blank-line separator either, the same as if it were never in
+/// `items` at all.
 fn blocks(items: &[Block], diags: &mut Diags) -> String {
-    // Filtered before joining, not rendered-then-discarded: a hidden
-    // block contributes no blank-line separator either, the same as if
-    // it were never in `items` at all.
-    let rendered: Vec<String> = items.iter().filter_map(|b| block(b, diags)).collect();
+    let mut rendered = Vec::new();
+    let mut i = 0;
+    while i < items.len() {
+        if let Block::Code { info, text, line, .. } = &items[i] {
+            if let Some(pair) = result::recognize_pair(items, i) {
+                if !info.weave_hidden() {
+                    rendered.push(eval_pair(info, text, *line, &pair, diags));
+                }
+                i += 3;
+                continue;
+            }
+        }
+        if let Some(s) = block(&items[i], diags) {
+            rendered.push(s);
+        }
+        i += 1;
+    }
     rendered.join("\n")
 }
 
@@ -99,6 +121,39 @@ fn block(b: &Block, diags: &mut Diags) -> Option<String> {
         Block::Passthrough { text, .. } => format!("{}\n", escape_typst(text)),
         Block::Table { aligns, header, rows, .. } => table_block(aligns, header, rows),
     })
+}
+
+/// The `#block(stroke: ...)` decision 46 wraps a source block and its
+/// recorded output in. `failed` alone picks the stroke color and the
+/// caption text -- one flag, not two independent things that could
+/// disagree.
+fn eval_pair(source_info: &InfoString, source_text: &str, source_line: u32, pair: &Pair, diags: &mut Diags) -> String {
+    let color = if pair.failed { "red" } else { "gray" };
+    let caption = if pair.failed { "Output (failed)" } else { "Output" };
+    let mut body = code_or_data_table(source_info, source_text, source_line, diags);
+    let _ = write!(body, "\n#text(size: 9pt, fill: {color})[{caption}]\n\n");
+    body.push_str(&code_or_data_table(pair.output_info, pair.output_text, pair.output_line, diags));
+    if let Some(p) = provenance_text(pair) {
+        let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n", escape_typst(&p));
+    }
+    format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]\n")
+}
+
+/// `produces`/`reads` (decision 33), when either is non-empty, is the
+/// only way a reader of typeset output can see what a `db=` block's
+/// run actually touched.
+fn provenance_text(pair: &Pair) -> Option<String> {
+    if pair.produces.is_empty() && pair.reads.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !pair.produces.is_empty() {
+        parts.push(format!("writes: {}", pair.produces.join(", ")));
+    }
+    if !pair.reads.is_empty() {
+        parts.push(format!("reads: {}", pair.reads.join(", ")));
+    }
+    Some(parts.join(" -- "))
 }
 
 fn list(l: &List, diags: &mut Diags) -> String {
@@ -451,6 +506,49 @@ mod tests {
     #[test]
     fn weave_other_value_is_shown_normally() {
         let (out, _) = render_doc("```sh weave=summary\necho hi\n```\n");
+        assert!(out.contains("echo hi"), "{out}");
+    }
+
+    #[test]
+    fn a_recorded_result_renders_as_one_paired_block() {
+        let src = "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("dankg:result"), "{out}");
+        assert!(out.contains("#block(stroke: (left: 2pt + gray)"), "{out}");
+        assert!(out.contains("echo hi"), "{out}");
+        assert!(out.contains("Output"), "{out}");
+        assert!(out.contains("hi\n```"), "{out}");
+    }
+
+    #[test]
+    fn a_failed_result_uses_a_red_stroke_and_caption() {
+        let src = "```sh name=a\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("#block(stroke: (left: 2pt + red)"), "{out}");
+        assert!(out.contains("Output (failed)"), "{out}");
+    }
+
+    #[test]
+    fn produces_and_reads_render_as_a_provenance_line() {
+        let src = "```sql db=w name=a\nselect 1;\n```\n\n<!-- dankg:result name=a hash=0000000000000001 produces=orders reads=customers -->\n\n```\nn\n1\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("writes: orders"), "{out}");
+        assert!(out.contains("reads: customers"), "{out}");
+    }
+
+    #[test]
+    fn a_hidden_source_hides_its_paired_result_too() {
+        let src = "```sh name=a weave=hidden\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(!out.contains("dankg:result"), "{out}");
+        assert!(!out.contains("#block(stroke"), "{out}");
+    }
+
+    #[test]
+    fn a_named_block_with_no_recorded_result_renders_unpaired() {
+        let (out, _) = render_doc("```sh name=a\necho hi\n```\n");
+        assert!(!out.contains("#block(stroke"), "{out}");
         assert!(out.contains("echo hi"), "{out}");
     }
 }

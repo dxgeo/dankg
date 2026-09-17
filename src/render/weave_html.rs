@@ -14,6 +14,7 @@
 
 use crate::data::table::{self, TableData};
 use crate::diag::Diags;
+use crate::eval::result::{self, Pair};
 use crate::graph::slug::Slugger;
 use crate::md::{Align, Block, Document, InfoString, Inline, List};
 use crate::render::assets;
@@ -108,9 +109,25 @@ fn toc_link(out: &mut String, (_, inlines, line): (u8, &[Inline], u32), slugs: &
     let _ = write!(out, "<a href=\"#{slug}\">{}</a>", escape(&Inline::plain(inlines)));
 }
 
+/// A named `Code` block immediately followed by its recorded eval
+/// result (decision 46) is recognized here, before the ordinary
+/// per-block walk ever sees it, and consumed as one unit -- three
+/// `Block`s in `items`, one `<figure>` in `out`. Anything else falls
+/// through to `block` exactly as before.
 fn blocks(out: &mut String, items: &[Block], slugs: &HashMap<u32, String>, diags: &mut Diags) {
-    for b in items {
-        block(out, b, slugs, diags);
+    let mut i = 0;
+    while i < items.len() {
+        if let Block::Code { info, text, line, .. } = &items[i] {
+            if let Some(pair) = result::recognize_pair(items, i) {
+                if !info.weave_hidden() {
+                    eval_pair(out, info, text, *line, &pair, diags);
+                }
+                i += 3;
+                continue;
+            }
+        }
+        block(out, &items[i], slugs, diags);
+        i += 1;
     }
 }
 
@@ -137,6 +154,39 @@ fn block(out: &mut String, b: &Block, slugs: &HashMap<u32, String>, diags: &mut 
         }
         Block::Table { aligns, header, rows, .. } => table_block(out, aligns, header, rows),
     }
+}
+
+/// The `<figure>` decision 46 wraps a source block and its recorded
+/// output in. `failed` alone drives both the caption text and the
+/// extra `failed` class `WEAVE_CSS` keys its border/caption color off
+/// of -- one flag, not two independent things that could disagree.
+fn eval_pair(out: &mut String, source_info: &InfoString, source_text: &str, source_line: u32, pair: &Pair, diags: &mut Diags) {
+    let class = if pair.failed { "eval-pair failed" } else { "eval-pair" };
+    let _ = writeln!(out, "<figure class=\"{class}\">");
+    code_or_data_table(out, source_info, source_text, source_line, diags);
+    let caption = if pair.failed { "Output (failed)" } else { "Output" };
+    let _ = writeln!(out, "<figcaption>{caption}</figcaption>");
+    code_or_data_table(out, pair.output_info, pair.output_text, pair.output_line, diags);
+    provenance(out, pair);
+    out.push_str("</figure>\n");
+}
+
+/// `produces`/`reads` (decision 33), when either is non-empty, is the
+/// only way a reader of typeset output can see what a `db=` block's
+/// run actually touched -- the block's own source rarely names its
+/// target table directly, since `dankg eval` usually infers this.
+fn provenance(out: &mut String, pair: &Pair) {
+    if pair.produces.is_empty() && pair.reads.is_empty() {
+        return;
+    }
+    let mut parts = Vec::new();
+    if !pair.produces.is_empty() {
+        parts.push(format!("writes: {}", pair.produces.join(", ")));
+    }
+    if !pair.reads.is_empty() {
+        parts.push(format!("reads: {}", pair.reads.join(", ")));
+    }
+    let _ = writeln!(out, "<p class=\"eval-provenance\">{}</p>", escape(&parts.join(" -- ")));
 }
 
 fn list(out: &mut String, l: &List, slugs: &HashMap<u32, String>, diags: &mut Diags) {
@@ -433,6 +483,51 @@ mod tests {
     #[test]
     fn weave_other_value_is_shown_normally() {
         let (out, _) = render_doc("```sh weave=summary\necho hi\n```\n");
+        assert!(out.contains("echo hi"), "{out}");
+    }
+
+    #[test]
+    fn a_recorded_result_renders_as_one_paired_figure() {
+        let src = "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("dankg:result"), "{out}");
+        assert!(out.contains("<figure class=\"eval-pair\">"), "{out}");
+        assert!(out.contains("<figcaption>Output</figcaption>"), "{out}");
+        let fig_start = out.find("<figure").unwrap();
+        let fig_end = out.find("</figure>").unwrap();
+        assert!(out[fig_start..fig_end].contains("echo hi"), "{out}");
+        assert!(out[fig_start..fig_end].contains(">hi\n<"), "{out}");
+    }
+
+    #[test]
+    fn a_failed_result_gets_the_failed_class_and_caption() {
+        let src = "```sh name=a\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("<figure class=\"eval-pair failed\">"), "{out}");
+        assert!(out.contains("<figcaption>Output (failed)</figcaption>"), "{out}");
+    }
+
+    #[test]
+    fn produces_and_reads_render_as_a_provenance_line() {
+        let src = "```sql db=w name=a\nselect 1;\n```\n\n<!-- dankg:result name=a hash=0000000000000001 produces=orders reads=customers -->\n\n```\nn\n1\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("writes: orders"), "{out}");
+        assert!(out.contains("reads: customers"), "{out}");
+    }
+
+    #[test]
+    fn a_hidden_source_hides_its_paired_result_too() {
+        let src = "```sh name=a weave=hidden\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(!out.contains("dankg:result"), "{out}");
+        assert!(!out.contains("<figure"), "{out}");
+    }
+
+    #[test]
+    fn a_named_block_with_no_recorded_result_renders_unpaired() {
+        let (out, _) = render_doc("```sh name=a\necho hi\n```\n");
+        assert!(!out.contains("<figure"), "{out}");
         assert!(out.contains("echo hi"), "{out}");
     }
 
