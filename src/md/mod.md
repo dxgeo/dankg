@@ -219,8 +219,9 @@ pub struct InfoString {
 }
 
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
-pub const KNOWN_ATTRS: &[&str] =
-    &["db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key", "protocol"];
+pub const KNOWN_ATTRS: &[&str] = &[
+    "db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key", "protocol", "weave",
+];
 
 impl InfoString {
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -304,6 +305,17 @@ impl InfoString {
     /// `select: ` would be misread as a control line instead of shown.
     pub fn protocol_lines(&self) -> bool {
         self.get("protocol") == Some("lines")
+    }
+
+    /// Whether `dankg weave` should drop this block (and its paired
+    /// eval result, if it has one) from the rendered document entirely.
+    /// `weave=hidden` is the only recognized value; anything else is
+    /// silently `false`, the same "ignore, don't reject" stance
+    /// `protocol_lines()` already takes. Weave-only: `dankg tangle` and
+    /// `dankg eval` never look at this attribute, so a hidden block
+    /// still tangles and still evaluates exactly as before.
+    pub fn weave_hidden(&self) -> bool {
+        self.get("weave") == Some("hidden")
     }
 }
 ```
@@ -449,6 +461,26 @@ mod tests {
 
         let info = InfoString { lang: Some("sh".into()), ..Default::default() };
         assert!(!info.protocol_lines());
+    }
+
+    #[test]
+    fn weave_hidden_is_true_only_for_the_recognized_value() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "hidden".into())],
+            ..Default::default()
+        };
+        assert!(info.weave_hidden());
+
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "other".into())],
+            ..Default::default()
+        };
+        assert!(!info.weave_hidden(), "an unrecognized value is ignored, not rejected");
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert!(!info.weave_hidden());
     }
 
     #[test]

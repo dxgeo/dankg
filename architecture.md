@@ -286,7 +286,11 @@ A fenced code block tagged `csv`, `tsv`, or `json` renders as a table too, built
 
 **Rationale:** DanKG's own eval blocks already produce table-shaped output (`duckdb -csv`). Content-sniffing would make weave's output depend on a heuristic nobody asked for, the same reasoning that already keeps `dankg eval` from inferring a block's language from its output. Tagging an eval result fence with its own output format automatically is deferred: `eval::result::write_back` has no config key today that records what format a command's output is in. Teaching it one is a separate feature.
 
-# Terminology
+## Decision 48: `weave=hidden` drops a block from woven output
+
+A fenced code block tagged `weave=hidden` produces nothing in either weave backend -- not a placeholder, not a collapsed toggle, absent as if it were never in the document. `weave` joins `KNOWN_ATTRS` alongside `db`/`path`/`protocol`; `InfoString::weave_hidden()` reads it the same loose way `protocol_lines()` already reads `protocol=lines` -- `hidden` is the one recognized value, anything else is silently ignored rather than rejected. The attribute is weave-only: `dankg tangle` and `dankg eval` never look at it, so a hidden block still tangles and still evaluates exactly as it would without the tag.
+
+**Rationale:** A block worth keeping in the source -- readable in an editor, tangled into a real file, evaluated for its result -- is not always a block worth showing a reader of the woven document, and forcing an author to delete or comment it out to get it out of the page would cost the source its own value. A separate attribute, rather than overloading an existing one, keeps tangle's and eval's own scope untouched: neither command gained a reason to care what a reader of the *rendered* document sees.
 
 - root :: The directory defining one knowledge base. Everything under it is in
   the corpus. Everything outside is not. Never called a "vault".

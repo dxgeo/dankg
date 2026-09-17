@@ -78,29 +78,27 @@ fn humanize_key(key: &str) -> String {
 }
 
 fn blocks(items: &[Block], diags: &mut Diags) -> String {
-    let mut out = String::new();
-    for (i, b) in items.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(&block(b, diags));
-    }
-    out
+    // Filtered before joining, not rendered-then-discarded: a hidden
+    // block contributes no blank-line separator either, the same as if
+    // it were never in `items` at all.
+    let rendered: Vec<String> = items.iter().filter_map(|b| block(b, diags)).collect();
+    rendered.join("\n")
 }
 
-fn block(b: &Block, diags: &mut Diags) -> String {
-    match b {
+fn block(b: &Block, diags: &mut Diags) -> Option<String> {
+    Some(match b {
         Block::Heading { level, inlines, .. } => {
             let eq = "=".repeat((*level).clamp(1, 6) as usize);
             format!("{eq} {}\n", inline_text(inlines))
         }
         Block::Paragraph { inlines, .. } => format!("{}\n", inline_text(inlines)),
+        Block::Code { info, .. } if info.weave_hidden() => return None,
         Block::Code { info, text, line, .. } => code_or_data_table(info, text, *line, diags),
         Block::List(l) => list(l, diags),
         Block::ThematicBreak { .. } => "#line(length: 100%)\n".to_string(),
         Block::Passthrough { text, .. } => format!("{}\n", escape_typst(text)),
         Block::Table { aligns, header, rows, .. } => table_block(aligns, header, rows),
-    }
+    })
 }
 
 fn list(l: &List, diags: &mut Diags) -> String {
@@ -440,5 +438,19 @@ mod tests {
     fn ordinary_code_block_is_a_raw_block() {
         let (out, _) = render_doc("```rust\nfn f() {}\n```\n");
         assert!(out.contains("```rust\nfn f() {}\n```\n"));
+    }
+
+    #[test]
+    fn weave_hidden_code_block_produces_nothing() {
+        let (out, _) = render_doc("text\n\n```sh weave=hidden\necho hi\n```\n\nmore\n");
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(out.contains("text\n"), "{out}");
+        assert!(out.contains("more\n"), "{out}");
+    }
+
+    #[test]
+    fn weave_other_value_is_shown_normally() {
+        let (out, _) = render_doc("```sh weave=summary\necho hi\n```\n");
+        assert!(out.contains("echo hi"), "{out}");
     }
 }

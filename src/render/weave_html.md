@@ -135,6 +135,12 @@ The same block set `render::typst` walks (weave's own decision 41: the
 whole document, not just named/top-level blocks), emitted as HTML
 instead of Typst markup.
 
+A code block tagged `weave=hidden` (decision 48) produces nothing at
+all here -- not a placeholder, not a collapsed toggle. It is a
+weave-only rendering hint: `dankg tangle` and `dankg eval` never look
+at it, so a hidden block still tangles and still evaluates exactly as
+it would without the tag.
+
 ```rust name=blocks_and_block path=render/weave_html.rs
 fn blocks(out: &mut String, items: &[Block], slugs: &HashMap<u32, String>, diags: &mut Diags) {
     for b in items {
@@ -151,7 +157,11 @@ fn block(out: &mut String, b: &Block, slugs: &HashMap<u32, String>, diags: &mut 
         Block::Paragraph { inlines, .. } => {
             let _ = writeln!(out, "<p>{}</p>", inline_html(inlines));
         }
-        Block::Code { info, text, line, .. } => code_or_data_table(out, info, text, *line, diags),
+        Block::Code { info, text, line, .. } => {
+            if !info.weave_hidden() {
+                code_or_data_table(out, info, text, *line, diags);
+            }
+        }
         Block::List(l) => list(out, l, slugs, diags),
         Block::ThematicBreak { .. } => out.push_str("<hr>\n"),
         // Outside the subset. Escaped, not raw: an unparsed construct
@@ -477,6 +487,20 @@ mod tests {
         let (out, _) = render_doc("```rust\nfn f() {}\n```\n");
         assert!(out.contains("<code class=\"language-rust\">"));
         assert!(out.contains("fn f() {}"));
+    }
+
+    #[test]
+    fn weave_hidden_code_block_produces_nothing() {
+        let (out, _) = render_doc("text\n\n```sh weave=hidden\necho hi\n```\n\nmore\n");
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(out.contains("<p>text</p>"), "{out}");
+        assert!(out.contains("<p>more</p>"), "{out}");
+    }
+
+    #[test]
+    fn weave_other_value_is_shown_normally() {
+        let (out, _) = render_doc("```sh weave=summary\necho hi\n```\n");
+        assert!(out.contains("echo hi"), "{out}");
     }
 
     #[test]
