@@ -382,6 +382,11 @@ pub(crate) fn corpus_graph_if_needed(path: &str, files: Files) -> Result<(Files,
 /// relative order.
 pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> Result<RunSummary, String> {
     let (root, entry_file) = locate(path);
+    // Decision 49: the spawned process's own working directory, so a
+    // block's relative file access lands where its source file's own
+    // directory would suggest, not wherever `dankg` itself was invoked
+    // from. Computed before `root` moves into `Files::new` below.
+    let dir = root.join(resolve::dir_of(&entry_file));
     let mut diags = Diags::new("dankg");
     let mut files = Files::new(root);
     files.discover(&entry_file, &mut diags)?;
@@ -414,14 +419,14 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
         // targets (`eval::sql`). Neither signal alone is trustworthy --
         // see `infer_provenance`'s own doc comment.
         let before = eval_run::list_relations(&db, timeout)?;
-        let output = eval_run::run_db(&db, &code, timeout)?;
+        let output = eval_run::run_db(&db, &code, &dir, timeout)?;
         let after = eval_run::list_relations(&db, timeout)?;
         let (produces, reads) = infer_provenance(before, after, &code);
         (output, produces, reads)
     } else {
         let lang = eval_run::command_for(config, &chain)
             .ok_or_else(|| format!("`{name}` has no configured language"))?;
-        let output = eval_run::run(&lang, &code, timeout)?;
+        let output = eval_run::run(&lang, &code, &dir, timeout)?;
         (output, Vec::new(), Vec::new())
     };
 
