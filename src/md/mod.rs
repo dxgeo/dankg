@@ -185,7 +185,7 @@ pub struct InfoString {
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
 pub const KNOWN_ATTRS: &[&str] = &[
     "db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key", "protocol", "weave",
-    "caption",
+    "caption", "figure",
 ];
 
 impl InfoString {
@@ -315,6 +315,23 @@ impl InfoString {
     /// `str::split_whitespace` for exactly this reason.
     pub fn caption(&self) -> Option<&str> {
         self.get("caption")
+    }
+
+    /// Whether a captioned artifact (decision 54) renders inside the
+    /// pair's own block (`figure=inside`) or as a sibling after it
+    /// (`figure=outside`), overriding `dankg weave`'s own
+    /// `--figures-inside`/`--figures-outside` default (decision 56)
+    /// for this one block alone. `None` covers absence and any other
+    /// value, the same "one recognized value per side, otherwise
+    /// ignored" stance every `weave=` value already takes -- a
+    /// caller falls back to the document-wide default rather than
+    /// treating an unrecognized value as an error.
+    pub fn figure_outside(&self) -> Option<bool> {
+        match self.get("figure") {
+            Some("outside") => Some(true),
+            Some("inside") => Some(false),
+            _ => None,
+        }
     }
 }
 
@@ -516,6 +533,33 @@ mod tests {
 
         let info = InfoString { lang: Some("sh".into()), ..Default::default() };
         assert_eq!(info.caption(), None);
+    }
+
+    #[test]
+    fn figure_outside_reads_the_two_recognized_values() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("figure".into(), "outside".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.figure_outside(), Some(true));
+
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("figure".into(), "inside".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.figure_outside(), Some(false));
+
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("figure".into(), "sideways".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.figure_outside(), None, "an unrecognized value is ignored, not rejected");
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert_eq!(info.figure_outside(), None);
     }
 
     #[test]

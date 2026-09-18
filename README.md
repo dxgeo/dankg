@@ -449,14 +449,25 @@ A captioned artifact renders as a real figure, not a caption line
 beside raw content: a table's own caption sits above it, an image's
 own sits below, and the PDF backend numbers each automatically --
 "Table 1", "Figure 1" -- through Typst's own figure counter, not
-anything `dankg` counts itself. Whether that figure sits boxed
-together with its own pair, or stands apart from it, is a
-stylesheet's or template's own call, not `dankg`'s: HTML's own
-nested `<figure>` is already a plain element inside `figure.eval-pair`,
-stylesheet-reachable either way; Typst's own figure renders outside
-the pair's stroked block by default, with a template free to wrap it
-back in via `#show figure: it => block(stroke: ..., inset: ...)[#it]`
-if it wants the boxed look back.
+anything `dankg` counts itself.
+
+Whether that figure sits inside the pair's own block, or stands
+apart from it as a sibling, is `dankg weave`'s own call:
+`--figures-inside`/`--figures-outside` sets the document-wide
+default (`inside`, unless one is given), and one block's own
+`figure=inside`/`figure=outside` overrides it for that block's own
+artifact alone:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png figure=outside
+draw_chart(data, "chart.png")
+```
+````
+
+<!-- dankg:depends target=architecture.md#decision-56---figures-inside--figures-outside-with-a-per-block-figure-override quote="lets one block override that document-wide default for its own artifact alone" -->
+
+An uncaptioned artifact is not a real figure in either backend, so
+`figure=` changes nothing about it.
 
 `weave=hidden` drops both halves of a paired block together.
 `weave=source-hidden` and `weave=output-hidden` each drop only one,

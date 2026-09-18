@@ -81,7 +81,7 @@ reader passed an absolute path. `file_stem` never has that problem: it
 is never anything but a bare name.
 
 ```rust name=run path=weave.rs
-pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool) -> Result<Report, String> {
+pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_outside: bool) -> Result<Report, String> {
     let source = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let mut diags = Diags::new(path);
     let doc = Document::parse(&source, &mut diags);
@@ -101,8 +101,12 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool) -> Resul
     let (tables, images) = produced_artifacts(&doc, &entry_rel, &root, &mut diags);
 
     let report = match format {
-        Format::Html => render_html(&doc, &title, &config, &root, &tables, &images, output, &mut diags)?,
-        Format::Pdf => render_pdf(&doc, &title, &config, &root, &name, &tables, &images, output, toc, &mut diags)?,
+        Format::Html => {
+            render_html(&doc, &title, &config, &root, &tables, &images, output, figures_outside, &mut diags)?
+        }
+        Format::Pdf => render_pdf(
+            &doc, &title, &config, &root, &name, &tables, &images, output, toc, figures_outside, &mut diags,
+        )?,
     };
 
     diags.sort();
@@ -289,10 +293,11 @@ fn render_html(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     output: Option<&str>,
+    figures_outside: bool,
     diags: &mut Diags,
 ) -> Result<Report, String> {
     let extra_css = config.weave("html").and_then(|w| w.css).and_then(|rel| read_asset(root, &rel, "css", diags));
-    let rendered = weave_html::render(doc, title, extra_css.as_deref(), tables, images, diags);
+    let rendered = weave_html::render(doc, title, extra_css.as_deref(), tables, images, figures_outside, diags);
 
     let written = match output {
         Some(p) => {
@@ -339,6 +344,7 @@ fn render_pdf(
     images: &HashMap<usize, (Vec<u8>, String)>,
     output: Option<&str>,
     toc: bool,
+    figures_outside: bool,
     diags: &mut Diags,
 ) -> Result<Report, String> {
     let build_dir = root.join(".dankg").join("build").join("weave");
@@ -357,7 +363,7 @@ fn render_pdf(
         }
     }
 
-    let body = typst::render(doc, title, toc, tables, &copied_images, diags);
+    let body = typst::render(doc, title, toc, tables, &copied_images, figures_outside, diags);
     let weave_cfg = config.weave("pdf");
     let preamble =
         weave_cfg.as_ref().and_then(|w| w.template.clone()).and_then(|rel| read_asset(root, &rel, "template", diags));
@@ -436,7 +442,7 @@ mod tests {
     #[test]
     fn html_with_no_output_path_still_reports_none() {
         let dir = scratch(&[("a.md", "# H\n\ntext\n")]);
-        let report = run(dir.join("a.md").to_str().unwrap(), Format::Html, None, true).unwrap();
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Html, None, true, false).unwrap();
         assert!(report.output.is_none());
         assert!(report.typ_path.is_none());
     }
@@ -445,7 +451,7 @@ mod tests {
     fn html_with_an_output_path_writes_a_file() {
         let dir = scratch(&[("a.md", "# H\n\ntext\n")]);
         let out = dir.join("out.html");
-        let report = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true).unwrap();
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
         assert_eq!(report.output, Some(out.clone()));
         let content = fs::read_to_string(&out).unwrap();
         // The page's own title heading (from the file name, "a" -- no
@@ -459,7 +465,7 @@ mod tests {
     fn title_falls_back_to_the_file_name_with_no_frontmatter() {
         let dir = scratch(&[("notes.md", "text\n")]);
         let out = dir.join("out.html");
-        run(dir.join("notes.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true).unwrap();
+        run(dir.join("notes.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
         let content = fs::read_to_string(&out).unwrap();
         assert!(content.contains("<title>notes</title>"), "{content}");
     }
@@ -468,7 +474,7 @@ mod tests {
     fn frontmatter_title_wins_over_the_file_name() {
         let dir = scratch(&[("notes.md", "---\ntitle: Real Title\n---\ntext\n")]);
         let out = dir.join("out.html");
-        run(dir.join("notes.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true).unwrap();
+        run(dir.join("notes.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
         let content = fs::read_to_string(&out).unwrap();
         assert!(content.contains("<title>Real Title</title>"), "{content}");
     }
@@ -481,7 +487,7 @@ mod tests {
             ("a.md", "# H\n"),
         ]);
         let out = dir.join("out.html");
-        run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true).unwrap();
+        run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
         let content = fs::read_to_string(&out).unwrap();
         assert!(content.contains("color: red"), "{content}");
     }
@@ -490,14 +496,14 @@ mod tests {
     fn a_missing_css_file_warns_and_is_skipped_not_fatal() {
         let dir = scratch(&[(".dankg/config", "[weave.html]\ncss = nope.css\n"), ("a.md", "# H\n")]);
         let out = dir.join("out.html");
-        let report = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true);
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false);
         assert!(report.is_ok());
     }
 
     #[test]
     fn pdf_always_writes_the_typ_even_unconfigured() {
         let dir = scratch(&[("a.md", "# H\n\ntext\n")]);
-        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, true).unwrap();
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, true, false).unwrap();
         assert!(report.typ_path.as_ref().unwrap().exists());
         assert!(!report.pdf_written);
         assert!(report.output.is_none());
@@ -506,7 +512,7 @@ mod tests {
     #[test]
     fn pdf_typ_defaults_under_dankg_build_weave() {
         let dir = scratch(&[("a.md", "# H\n")]);
-        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, true).unwrap();
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, true, false).unwrap();
         assert_eq!(report.typ_path, Some(dir.join(".dankg/build/weave/a.typ")));
     }
 
@@ -517,7 +523,7 @@ mod tests {
             ("a.md", "# H\n"),
         ]);
         let out = dir.join("out.pdf");
-        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, Some(out.to_str().unwrap()), true).unwrap();
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, Some(out.to_str().unwrap()), true, false).unwrap();
         assert!(report.pdf_written);
         assert_eq!(report.output, Some(out.clone()));
         assert!(out.exists());
@@ -530,7 +536,7 @@ mod tests {
             ("template.typ", "#set page(margin: 2cm)"),
             ("a.md", "# H\n"),
         ]);
-        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, true).unwrap();
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, true, false).unwrap();
         let content = fs::read_to_string(report.typ_path.unwrap()).unwrap();
         let template_pos = content.find("#set page(margin: 2cm)").unwrap();
         let title_pos = content.find("= H").unwrap();
@@ -540,7 +546,7 @@ mod tests {
     #[test]
     fn a_missing_template_file_warns_and_the_typ_is_still_written() {
         let dir = scratch(&[(".dankg/config", "[weave.pdf]\ntemplate = nope.typ\n"), ("a.md", "# H\n")]);
-        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, true).unwrap();
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, true, false).unwrap();
         assert!(report.typ_path.unwrap().exists());
     }
 

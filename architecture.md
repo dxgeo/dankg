@@ -369,6 +369,15 @@ Decision 54's `#figure(...)` sat inside the same `#block(stroke: ...)` decision 
 <!-- dankg:depends target=#decision-46-a-recorded-eval-result-renders-paired-with-its-source quote="renders as one visual unit in both weave backends instead of three unrelated blocks" -->
 <!-- dankg:depends target=#decision-44-weave-pdf-via-typst quote="a plain-text prepend rather than a Typst" -->
 
+## Decision 56: `--figures-inside`/`--figures-outside`, with a per-block `figure=` override
+
+`dankg weave` gains a boolean pair, `--figures-inside`/`--figures-outside`, parsed in `cli::weave` exactly the way `--toc`/`--no-toc` already are (decision 44), defaulting to `inside` when neither is given -- decision 54's own original placement, restored as the default; decision 55's own placement is still reachable, now through `--figures-outside` rather than being unconditional. Unlike `--toc`, this is not `--format`-specific: decision 54 already gave both backends a captioned artifact's own real figure, so both backends get a real placement toggle here, not just Typst -- HTML's own nested `<figure>` can now genuinely sit as a DOM-level sibling after the pair's own outer `<figure>` closes, not only look that way through a stylesheet's own `order` trick. The resolved value threads down into both `render::html::render`/`render::typst::render` as `figures_outside: bool`, read at the one place each backend's own `eval_pair` builds a captioned artifact's figure. A new `figure` attribute, added to `KNOWN_ATTRS`, lets one block override that document-wide default for its own artifact alone: `figure=inside`/`figure=outside`, read through `InfoString::figure_outside() -> Option<bool>`, resolved as `info.figure_outside().unwrap_or(figures_outside)`. `figure=` on a block with no captioned artifact at all is inert, the same "meaningless here, ignored" stance `weave=output-hidden` already takes on an unpaired block.
+
+**Rationale:** Decision 55's own template-only lever worked, but only by asking a `[weave.pdf] template` to reconstruct decision 54's "inside" placement out of two independently-laid-out pieces -- a stroke color matched by hand to whichever of `gray`/`red` decision 46 happened to choose, and a negative `above` margin sized to Typst's own default block spacing, memorized rather than looked up. A `#show`/`#set` rule, or a CSS rule, can restyle an element it matches; neither can undo *structure* a renderer already committed to. Placement is structure, not style, so it belongs in the renderer's own hands, exposed as a real toggle -- a document-wide CLI default, with a per-block attribute free to override it, mirroring exactly the layering `weave=hidden` and its own per-block siblings (decisions 48/53) already established.
+
+<!-- dankg:depends target=#decision-55-a-captioned-figure-renders-outside-the-pairs-own-block-in-typst quote="nothing to unwrap a figure out of a box from the outside" -->
+<!-- dankg:depends target=#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="An artifact with no caption at all renders unwrapped" -->
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -2829,19 +2838,25 @@ sits first, an image's own sits last, the conventional
 caption-above-table, caption-below-figure split; a stylesheet can
 still reposition either.
 
-In Typst, that figure renders *outside* the pair's own stroked block
-by default (decision 55), as a sibling right after it, not nested
-inside. A `#show`/`#set` rule in `[weave.pdf] template` can restyle
-an element it matches, but it cannot strip a stroke a block already
-applied to its own body -- so a template that wants the old
-boxed-together look wraps the figure back in with its own
-`#show figure: it => block(stroke: ..., inset: ...)[#it]` rule.
-HTML needs no such default flip: its own nested `<figure>` already
-sits inside `figure.eval-pair` as a plain, stylesheet-reachable
-element, so a stylesheet alone already decides whether it looks
-boxed together or detached, with no renderer change either way. An
-uncaptioned artifact is not a real figure in either backend and
-keeps rendering inside the pair, exactly as before.
+Whether that figure sits inside the pair's own block, or as a
+sibling right after it, is `dankg weave`'s own call, not a
+template's (decision 56): `--figures-inside`/`--figures-outside`
+sets the document-wide default -- `inside`, decision 54's original
+placement, when neither is given -- and one block's own `figure=`
+attribute overrides it for its own artifact alone. Decision 55 first
+tried leaving this to a `[weave.pdf] template`'s own `#show`/`#set`
+rules, but a `#show` rule can only add structure around an element
+it matches, never remove structure the renderer already committed
+to; reconstructing "inside" from the template's own side needed a
+stroke color matched by hand and a negative margin sized to Typst's
+own default spacing. `--figures-outside` gives a template decision
+55's own placement back without either. HTML gains the identical
+toggle here for the first time: its own nested `<figure>` can now
+genuinely close as a sibling after the pair's own outer `<figure>`,
+not merely look detached through a stylesheet's own `order` trick.
+An uncaptioned artifact is not a real figure in either backend and
+keeps rendering inside the pair, exactly as before -- there is no
+figure for a placement choice to apply to.
 
 ## Hiding one half of a pair
 

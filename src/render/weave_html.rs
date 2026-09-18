@@ -33,6 +33,7 @@ pub fn render(
     extra_css: Option<&str>,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    figures_outside: bool,
     diags: &mut Diags,
 ) -> String {
     let slugs = heading_slugs(doc);
@@ -56,7 +57,7 @@ pub fn render(
 
     out.push_str("<main>\n");
     let _ = writeln!(out, "<h1>{}</h1>", escape(title));
-    blocks(&mut out, &doc.blocks, &slugs, tables, images, diags);
+    blocks(&mut out, &doc.blocks, &slugs, tables, images, figures_outside, diags);
     out.push_str("</main>\n</body>\n</html>\n");
     out
 }
@@ -127,6 +128,7 @@ fn blocks(
     slugs: &HashMap<u32, String>,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    figures_outside: bool,
     diags: &mut Diags,
 ) {
     let mut i = 0;
@@ -134,13 +136,23 @@ fn blocks(
         if let Block::Code { info, text, line, .. } = &items[i] {
             if let Some(pair) = result::recognize_pair(items, i) {
                 if !info.weave_hidden() {
-                    eval_pair(out, info, text, *line, &pair, tables.get(&i), images.get(&i), diags);
+                    eval_pair(
+                        out,
+                        info,
+                        text,
+                        *line,
+                        &pair,
+                        tables.get(&i),
+                        images.get(&i),
+                        figures_outside,
+                        diags,
+                    );
                 }
                 i += 3;
                 continue;
             }
         }
-        block(out, &items[i], slugs, tables, images, diags);
+        block(out, &items[i], slugs, tables, images, figures_outside, diags);
         i += 1;
     }
 }
@@ -151,6 +163,7 @@ fn block(
     slugs: &HashMap<u32, String>,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    figures_outside: bool,
     diags: &mut Diags,
 ) {
     match b {
@@ -169,7 +182,7 @@ fn block(
                 code_or_data_table(out, info, text, *line, diags);
             }
         }
-        Block::List(l) => list(out, l, slugs, tables, images, diags),
+        Block::List(l) => list(out, l, slugs, tables, images, figures_outside, diags),
         Block::ThematicBreak { .. } => out.push_str("<hr>\n"),
         // Outside the subset. Escaped, not raw: an unparsed construct
         // must never become unvalidated HTML.
@@ -185,14 +198,17 @@ fn block(
 /// extra `failed` class `WEAVE_CSS` keys its border/caption color off
 /// of -- one flag, not two independent things that could disagree.
 /// `table`/`image` (decisions 50/51), when present, are the source
-/// block's own `produces=file:` artifact, already read off disk --
-/// appended after the captured output, since stdout might be a log
-/// line while the real content lives in the file. A block declares at
-/// most one `produces=file:` today, so at most one of the two is ever
-/// `Some`. `weave=source-hidden`/`weave=output-hidden` (decision 53)
-/// each drop one of the figure's own two halves; a custom `caption=`
-/// (decision 52) only ever changes the *other* half's own text, since
-/// a half that is not rendered has no figcaption to override.
+/// block's own `produces=file:` artifact, already read off disk.
+/// A block declares at most one `produces=file:` today, so at most
+/// one of the two is ever `Some`. `weave=source-hidden`/
+/// `weave=output-hidden` (decision 53) each drop one of the figure's
+/// own two halves; a custom `caption=` (decision 52) only ever
+/// changes the *other* half's own text, since a half that is not
+/// rendered has no figcaption to override. An artifact's own nested
+/// `<figure>` either splices in before this outer `</figure>` closes,
+/// or gets appended after it, depending on `figure_outside`
+/// (decision 56) -- see `eval_pair_result`'s own doc comment for how
+/// that gets resolved.
 fn eval_pair(
     out: &mut String,
     source_info: &InfoString,
@@ -201,6 +217,7 @@ fn eval_pair(
     pair: &Pair,
     table: Option<&(String, String)>,
     image: Option<&(Vec<u8>, String)>,
+    figures_outside: bool,
     diags: &mut Diags,
 ) {
     let class = if pair.failed { "eval-pair failed" } else { "eval-pair" };
@@ -208,27 +225,37 @@ fn eval_pair(
     if !source_info.weave_source_hidden() {
         code_or_data_table(out, source_info, source_text, source_line, diags);
     }
+    let mut figure = String::new();
     if !source_info.weave_output_hidden() {
-        eval_pair_result(out, source_info, pair, table, image, source_line, diags);
+        eval_pair_result(out, &mut figure, source_info, pair, table, image, source_line, diags);
     }
-    out.push_str("</figure>\n");
+    if source_info.figure_outside().unwrap_or(figures_outside) {
+        out.push_str("</figure>\n");
+        out.push_str(&figure);
+    } else {
+        out.push_str(&figure);
+        out.push_str("</figure>\n");
+    }
 }
 
-/// The pair's own result half: the captured output, its artifact if
-/// any, and its provenance line. Split out of [`eval_pair`] only so
-/// `weave=output-hidden` (decision 53) has one call to skip rather
-/// than three. `table`/`image` each get their own real, nested
-/// `<figure>` -- `table-figure`/`image-figure` -- rather than a bare
-/// `<figcaption>` beside raw content, so a stylesheet has an actual
-/// element to key real captioning off of (decision 54): a table's own
-/// `<figcaption>` sits first, above its `<table>`, the conventional
-/// position; an image's own sits last, after its `<img>`, matching
-/// HTML's own rule that `<figcaption>` must be a `<figure>`'s first
-/// or last child. Neither position is enforced here -- a stylesheet
-/// still decides how it actually renders -- but the DOM order now
-/// matches the convention CSS would otherwise have to fight.
+/// The pair's own result half: the captured output and its
+/// provenance line go into `out`, inside the outer `<figure
+/// class="eval-pair">`, always. `table`/`image` each get their own
+/// real, nested `<figure>` -- `table-figure`/`image-figure` -- built
+/// into `figure` instead, regardless of where it ends up: [`eval_pair`]
+/// is the one place that decides whether `figure` gets spliced in
+/// before the outer `</figure>` closes, or appended after it as a
+/// sibling (decision 56), by resolving `source_info.figure_outside()`'s
+/// own `figure=inside`/`figure=outside` against `dankg weave`'s own
+/// document-wide `--figures-inside`/`--figures-outside` default.
+/// Building `figure` here regardless keeps this function ignorant of
+/// that choice entirely. A table's own `<figcaption>` sits first,
+/// above its `<table>`, the conventional position; an image's own
+/// sits last, after its `<img>`, matching HTML's own rule that a
+/// `<figcaption>` must be its `<figure>`'s first or last child.
 fn eval_pair_result(
     out: &mut String,
+    figure: &mut String,
     source_info: &InfoString,
     pair: &Pair,
     table: Option<&(String, String)>,
@@ -246,27 +273,27 @@ fn eval_pair_result(
     let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(&output_caption));
     code_or_data_table(out, pair.output_info, pair.output_text, pair.output_line, diags);
     if let Some((lang, content)) = table {
-        out.push_str("<figure class=\"table-figure\">\n");
+        figure.push_str("<figure class=\"table-figure\">\n");
         if let Some(label) = source_info.caption().or_else(|| source_info.produces()) {
-            let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(label));
+            let _ = writeln!(figure, "<figcaption>{}</figcaption>", escape(label));
         }
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
-        code_or_data_table(out, &info, content, source_line, diags);
-        out.push_str("</figure>\n");
+        code_or_data_table(figure, &info, content, source_line, diags);
+        figure.push_str("</figure>\n");
     }
     if let Some((bytes, resolved)) = image {
-        out.push_str("<figure class=\"image-figure\">\n");
+        figure.push_str("<figure class=\"image-figure\">\n");
         let _ = writeln!(
-            out,
+            figure,
             "<img src=\"data:{};base64,{}\" alt=\"{}\">",
             mime_for(resolved),
             base64_encode(bytes),
             escape_attr(resolved)
         );
         if let Some(label) = source_info.caption().or_else(|| source_info.produces()) {
-            let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(label));
+            let _ = writeln!(figure, "<figcaption>{}</figcaption>", escape(label));
         }
-        out.push_str("</figure>\n");
+        figure.push_str("</figure>\n");
     }
     provenance(out, pair);
 }
@@ -330,6 +357,7 @@ fn list(
     slugs: &HashMap<u32, String>,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    figures_outside: bool,
     diags: &mut Diags,
 ) {
     let tag = if l.ordered { "ol" } else { "ul" };
@@ -340,7 +368,7 @@ fn list(
     }
     for item in &l.items {
         out.push_str("<li>");
-        blocks(out, &item.blocks, slugs, tables, images, diags);
+        blocks(out, &item.blocks, slugs, tables, images, figures_outside, diags);
         out.push_str("</li>\n");
     }
     let _ = writeln!(out, "</{tag}>");
@@ -520,18 +548,19 @@ mod tests {
     }
 
     fn render_doc_with_tables(source: &str, tables: &HashMap<usize, (String, String)>) -> (String, Diags) {
-        render_doc_with_artifacts(source, tables, &HashMap::new())
+        render_doc_with_artifacts(source, tables, &HashMap::new(), false)
     }
 
     fn render_doc_with_artifacts(
         source: &str,
         tables: &HashMap<usize, (String, String)>,
         images: &HashMap<usize, (Vec<u8>, String)>,
+        figures_outside: bool,
     ) -> (String, Diags) {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, tables, images, &mut diags);
+        let out = render(&doc, "Title", None, tables, images, figures_outside, &mut diags);
         (out, diags)
     }
 
@@ -711,6 +740,61 @@ mod tests {
     }
 
     #[test]
+    fn a_produced_artifact_nests_inside_the_pairs_own_figure_by_default() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        // No `--figures-outside` and no `figure=` attribute: decision 56's
+        // own default is `inside`, decision 54's original nesting -- the
+        // nested figure must close before the pair's own outer figure does.
+        let nested_close = out.find("</figure>\n").unwrap();
+        let outer_close = out.rfind("</figure>\n").unwrap();
+        assert!(nested_close < outer_close, "{out}");
+    }
+
+    #[test]
+    fn figures_outside_moves_the_artifact_after_the_pairs_own_figure() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &tables, &HashMap::new(), true);
+        let outer_close = out.find("</figure>\n").unwrap();
+        let nested_start = out.find("<figure class=\"table-figure\">").unwrap();
+        assert!(outer_close < nested_start, "the outer figure must close before the nested one starts: {out}");
+    }
+
+    #[test]
+    fn a_block_level_figure_outside_overrides_the_document_default() {
+        let src = "```python name=a produces=file:data.csv figure=outside\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        let outer_close = out.find("</figure>\n").unwrap();
+        let nested_start = out.find("<figure class=\"table-figure\">").unwrap();
+        assert!(outer_close < nested_start, "{out}");
+    }
+
+    #[test]
+    fn a_block_level_figure_inside_overrides_a_figures_outside_default() {
+        let src = "```python name=a produces=file:data.csv figure=inside\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &tables, &HashMap::new(), true);
+        let nested_close = out.find("</figure>\n").unwrap();
+        let outer_close = out.rfind("</figure>\n").unwrap();
+        assert!(nested_close < outer_close, "{out}");
+    }
+
+    #[test]
+    fn figure_attribute_is_inert_without_a_captioned_artifact() {
+        let src = "```sh name=a figure=outside\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("echo hi"), "{out}");
+        assert!(!out.contains("table-figure") && !out.contains("image-figure"), "{out}");
+    }
+
+    #[test]
     fn a_json_artifact_that_is_not_table_shaped_falls_back_to_code() {
         let src = "```python name=a produces=file:data.json\nwrite_json()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n";
         let mut tables = HashMap::new();
@@ -819,7 +903,7 @@ mod tests {
         let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
         let mut images = HashMap::new();
         images.insert(0, (b"hi".to_vec(), "chart.png".to_string()));
-        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images);
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, false);
         assert!(out.contains("<img src=\"data:image/png;base64,aGk=\""), "{out}");
         assert!(out.contains("<figcaption>file:chart.png</figcaption>"), "{out}");
     }
@@ -829,7 +913,7 @@ mod tests {
         let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
         let mut images = HashMap::new();
         images.insert(0, (b"hi".to_vec(), "chart.png".to_string()));
-        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images);
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, false);
         assert!(out.contains("<figure class=\"image-figure\">"), "{out}");
         let fig_start = out.find("<figure class=\"image-figure\">").unwrap();
         let img = out[fig_start..].find("<img").unwrap() + fig_start;
@@ -862,7 +946,8 @@ mod tests {
     fn extra_css_is_appended_after_weave_css_not_swapped_in() {
         let mut diags = Diags::new("t.md");
         let doc = Document::parse("# H\n", &mut diags);
-        let out = render(&doc, "Title", Some("body { font-family: serif; }"), &HashMap::new(), &HashMap::new(), &mut diags);
+        let out =
+            render(&doc, "Title", Some("body { font-family: serif; }"), &HashMap::new(), &HashMap::new(), false, &mut diags);
         let style_start = out.find("<style>").unwrap();
         let style_end = out.find("</style>").unwrap();
         let style = &out[style_start..style_end];

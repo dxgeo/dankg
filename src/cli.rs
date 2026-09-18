@@ -75,14 +75,24 @@ pub enum Command {
     /// `paths: Vec<String>` variant above, `init` never reads an
     /// existing corpus, only ever writes into one place.
     Init { path: String },
-    /// `dankg weave <path> --format html|pdf [-o <file>] [--toc | --no-toc]`:
-    /// turns one markdown file into a readable document (plan-weave.md,
-    /// decisions 41-45). Exactly one path, the same single-target shape
-    /// `init` already uses -- weave never walks a corpus. `--toc`/`--no-toc`
-    /// only apply to `--format pdf`; HTML's own table of contents always
+    /// `dankg weave <path> --format html|pdf [-o <file>] [--toc | --no-toc]
+    /// [--figures-inside | --figures-outside]`: turns one markdown file
+    /// into a readable document (plan-weave.md, decisions 41-45).
+    /// Exactly one path, the same single-target shape `init` already
+    /// uses -- weave never walks a corpus. `--toc`/`--no-toc` only
+    /// apply to `--format pdf`; HTML's own table of contents always
     /// ships with its in-page toggle, so combining either with
-    /// `--format html` is a parse error.
-    Weave { path: String, format: WeaveFormat, output: Option<String>, toc: bool },
+    /// `--format html` is a parse error. `--figures-inside`/
+    /// `--figures-outside` (decision 56) apply to both formats, unlike
+    /// `--toc`: both backends give a captioned artifact a real figure
+    /// (decision 54), so both get a real placement toggle.
+    Weave {
+        path: String,
+        format: WeaveFormat,
+        output: Option<String>,
+        toc: bool,
+        figures_outside: bool,
+    },
     Help,
     Version,
 }
@@ -597,6 +607,7 @@ fn weave<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     let mut format: Option<WeaveFormat> = None;
     let mut output = None;
     let mut toc: Option<bool> = None;
+    let mut figures_outside: Option<bool> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -609,6 +620,8 @@ fn weave<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
             }
             "--toc" => toc = Some(true),
             "--no-toc" => toc = Some(false),
+            "--figures-inside" => figures_outside = Some(false),
+            "--figures-outside" => figures_outside = Some(true),
             "-h" | "--help" => return Ok(Command::Help),
             other if other.starts_with("--format=") => {
                 format = Some(WeaveFormat::parse(&other["--format=".len()..])?);
@@ -628,7 +641,13 @@ fn weave<I: Iterator<Item = String>>(mut args: I) -> Result<Command, String> {
     if format == WeaveFormat::Html && toc.is_some() {
         return Err("`--toc`/`--no-toc` only apply to `--format pdf`; HTML's own table of contents always ships with its in-page toggle".to_string());
     }
-    Ok(Command::Weave { path, format, output, toc: toc.unwrap_or(true) })
+    Ok(Command::Weave {
+        path,
+        format,
+        output,
+        toc: toc.unwrap_or(true),
+        figures_outside: figures_outside.unwrap_or(false),
+    })
 }
 
 #[cfg(test)]
@@ -1033,7 +1052,13 @@ mod tests {
     fn weave_collects_path_format_and_output() {
         assert_eq!(
             parse(args(&["weave", "a.md", "--format", "html"])).unwrap(),
-            Command::Weave { path: "a.md".into(), format: WeaveFormat::Html, output: None, toc: true }
+            Command::Weave {
+                path: "a.md".into(),
+                format: WeaveFormat::Html,
+                output: None,
+                toc: true,
+                figures_outside: false,
+            }
         );
         assert_eq!(
             parse(args(&["weave", "a.md", "--format=pdf", "-o", "a.pdf"])).unwrap(),
@@ -1042,6 +1067,7 @@ mod tests {
                 format: WeaveFormat::Pdf,
                 output: Some("a.pdf".into()),
                 toc: true,
+                figures_outside: false,
             }
         );
     }
@@ -1050,7 +1076,37 @@ mod tests {
     fn weave_toc_defaults_to_shown_and_no_toc_turns_it_off() {
         assert_eq!(
             parse(args(&["weave", "a.md", "--format", "pdf", "--no-toc"])).unwrap(),
-            Command::Weave { path: "a.md".into(), format: WeaveFormat::Pdf, output: None, toc: false }
+            Command::Weave {
+                path: "a.md".into(),
+                format: WeaveFormat::Pdf,
+                output: None,
+                toc: false,
+                figures_outside: false,
+            }
+        );
+    }
+
+    #[test]
+    fn weave_figures_outside_defaults_to_false_and_the_flag_turns_it_on() {
+        assert_eq!(
+            parse(args(&["weave", "a.md", "--format", "pdf", "--figures-outside"])).unwrap(),
+            Command::Weave {
+                path: "a.md".into(),
+                format: WeaveFormat::Pdf,
+                output: None,
+                toc: true,
+                figures_outside: true,
+            }
+        );
+        assert_eq!(
+            parse(args(&["weave", "a.md", "--format", "html", "--figures-inside"])).unwrap(),
+            Command::Weave {
+                path: "a.md".into(),
+                format: WeaveFormat::Html,
+                output: None,
+                toc: true,
+                figures_outside: false,
+            }
         );
     }
 

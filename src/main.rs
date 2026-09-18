@@ -75,8 +75,8 @@ fn main() -> ExitCode {
             report(tangle_cmd(&paths, &lang, output.as_deref(), cache))
         }
         Command::Init { path } => report(init_report(&path)),
-        Command::Weave { path, format, output, toc } => {
-            report(weave_cmd(&path, format, output.as_deref(), toc))
+        Command::Weave { path, format, output, toc, figures_outside } => {
+            report(weave_cmd(&path, format, output.as_deref(), toc, figures_outside))
         }
     }
 }
@@ -103,12 +103,12 @@ fn tangle_cmd(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -
 /// `dankg weave`: never automatic, the same principle as `tangle` (decision
 /// 9) -- and, like `tangle`, no confirm prompt either, since weave does not
 /// run the reader's program, only compiles a document.
-fn weave_cmd(path: &str, format: WeaveFormat, output: Option<&str>, toc: bool) -> Result<(), String> {
+fn weave_cmd(path: &str, format: WeaveFormat, output: Option<&str>, toc: bool, figures_outside: bool) -> Result<(), String> {
     let (weave_format, label) = match format {
         WeaveFormat::Html => (weave::Format::Html, "html"),
         WeaveFormat::Pdf => (weave::Format::Pdf, "pdf"),
     };
-    let report = weave::run(path, weave_format, output, toc)?;
+    let report = weave::run(path, weave_format, output, toc, figures_outside)?;
     match format {
         WeaveFormat::Html => {
             if let Some(p) = &report.output {
