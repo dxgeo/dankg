@@ -360,6 +360,15 @@ A `produces=file:` table (decision 50) or image (decision 51) with a caption -- 
 <!-- dankg:depends target=#decision-52-caption-overrides-a-pairs-own-synthesized-caption quote="a pair's own caption text was always synthesized" -->
 <!-- dankg:depends target=#decision-50-a-producesfile-csvtsvjson-artifact-renders-as-a-table quote="warns on stderr and adds nothing to the page" -->
 
+## Decision 55: A captioned figure renders outside the pair's own block, in Typst
+
+Decision 54's `#figure(...)` sat inside the same `#block(stroke: ...)` decision 46 wraps a pair's source and output in. That nesting made the figure's own box unconfigurable from a `[weave.pdf] template` alone: a `#show`/`#set` rule restyles an element it matches, but it cannot undo a stroke a block already applies to its own body -- there is nothing to unwrap a figure out of a box from the outside. `eval_pair` now appends a captioned artifact's `#figure(...)` after that block's own closing `]`, as a sibling, never inside it. An uncaptioned artifact is not a real figure (decision 54's own unwrapped-fallback case) and still renders inside the block, exactly as before -- there is no figure to place outside. HTML needs no matching change: its own nested `<figure class="table-figure">`/`<figure class="image-figure">` (decision 54) is already a stylesheet-reachable element inside `figure.eval-pair`'s own box, so a stylesheet alone, no renderer change, already decides whether it looks boxed together with the pair or detached from it.
+
+**Rationale:** Confirmed with the user: whether a produced figure sits inside the pair's own stroked box, or stands alone, should be the stylesheet's or template's own call, the same way `[weave.pdf] template`'s own `#show heading.where(...)` already restyles every heading with no `dankg` config key standing in for it. A `#show` rule can only add structure around an element it matches, never remove structure a renderer already wrapped it in. Changing which side of the wrap dankg's own default puts the figure on, and letting a template wrap it back in with its own `#show figure: it => block(stroke: ..., inset: ...)[#it]` rule if it wants the old look, is the only way to make this genuinely configurable from a template rather than from `dankg` itself.
+
+<!-- dankg:depends target=#decision-46-a-recorded-eval-result-renders-paired-with-its-source quote="renders as one visual unit in both weave backends instead of three unrelated blocks" -->
+<!-- dankg:depends target=#decision-44-weave-pdf-via-typst quote="a plain-text prepend rather than a Typst" -->
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -2819,6 +2828,20 @@ the PDF, through Typst's own counter. A table's own `<figcaption>`
 sits first, an image's own sits last, the conventional
 caption-above-table, caption-below-figure split; a stylesheet can
 still reposition either.
+
+In Typst, that figure renders *outside* the pair's own stroked block
+by default (decision 55), as a sibling right after it, not nested
+inside. A `#show`/`#set` rule in `[weave.pdf] template` can restyle
+an element it matches, but it cannot strip a stroke a block already
+applied to its own body -- so a template that wants the old
+boxed-together look wraps the figure back in with its own
+`#show figure: it => block(stroke: ..., inset: ...)[#it]` rule.
+HTML needs no such default flip: its own nested `<figure>` already
+sits inside `figure.eval-pair` as a plain, stylesheet-reachable
+element, so a stylesheet alone already decides whether it looks
+boxed together or detached, with no renderer change either way. An
+uncaptioned artifact is not a real figure in either backend and
+keeps rendering inside the pair, exactly as before.
 
 ## Hiding one half of a pair
 

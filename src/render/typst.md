@@ -274,14 +274,15 @@ fn block(
 /// recorded output in. `failed` alone picks the stroke color and the
 /// caption text -- one flag, not two independent things that could
 /// disagree. `table`/`image` (decisions 50/51), when present, are the
-/// source block's own `produces=file:` artifact, already resolved --
-/// appended after the captured output, since stdout might be a log
-/// line while the real content lives in the file. A block declares at
-/// most one `produces=file:` today, so at most one of the two is ever
-/// `Some`. `weave=source-hidden`/`weave=output-hidden` (decision 53)
-/// each drop one of the block's own two halves; a custom `caption=`
-/// (decision 52) only ever changes the *other* half's own text, since
-/// a half that is not rendered has no caption to override.
+/// source block's own `produces=file:` artifact, already resolved.
+/// A block declares at most one `produces=file:` today, so at most
+/// one of the two is ever `Some`. `weave=source-hidden`/
+/// `weave=output-hidden` (decision 53) each drop one of the block's
+/// own two halves; a custom `caption=` (decision 52) only ever
+/// changes the *other* half's own text, since a half that is not
+/// rendered has no caption to override. A captioned artifact's own
+/// `#figure(...)` (decision 55) is appended *after* this block closes,
+/// not inside it -- see `eval_pair_result`'s own doc comment for why.
 fn eval_pair(
     source_info: &InfoString,
     source_text: &str,
@@ -296,18 +297,34 @@ fn eval_pair(
     if !source_info.weave_source_hidden() {
         body.push_str(&code_or_data_table(source_info, source_text, source_line, diags));
     }
+    let mut figure = String::new();
     if !source_info.weave_output_hidden() {
-        eval_pair_result(&mut body, source_info, pair, table, image, source_line, diags);
+        eval_pair_result(&mut body, &mut figure, source_info, pair, table, image, source_line, diags);
     }
-    format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]\n")
+    let mut out = format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]\n");
+    out.push_str(&figure);
+    out
 }
 
-/// The pair's own result half: the captured output, its artifact if
-/// any, and its provenance line. Split out of [`eval_pair`] only so
-/// `weave=output-hidden` (decision 53) has one call to skip rather
-/// than three.
+/// The pair's own result half: the captured output and its
+/// provenance line go into `body`, inside decision 46's own stroked
+/// block, exactly as before. A captioned artifact (decision 54) goes
+/// into `figure` instead, appended by [`eval_pair`] as a sibling
+/// *after* that block closes (decision 55) -- outside it, by
+/// default. `#show`/`#set` cannot undo a stroke a block already
+/// applies to its own body; it can only restyle an element it
+/// matches. Emitting the figure outside is what leaves a `[weave.pdf]
+/// template` free to style it either way: plain by default, or
+/// wrapped back into a matching box with its own `#show figure: it =>
+/// block(stroke: ..., inset: ...)[#it]` rule, the same shape
+/// decision 44's own custom-template mechanism already gives a
+/// reader for everything else this module emits. An uncaptioned
+/// artifact is not a real figure at all (decision 54's own
+/// unwrapped-fallback case) and stays in `body`, inside the block,
+/// exactly as it always has -- there is no figure to place outside.
 fn eval_pair_result(
     body: &mut String,
+    figure: &mut String,
     source_info: &InfoString,
     pair: &Pair,
     table: Option<&(String, String)>,
@@ -331,7 +348,7 @@ fn eval_pair_result(
         match source_info.caption().or_else(|| source_info.produces()) {
             Some(label) => {
                 let _ = write!(
-                    body,
+                    figure,
                     "\n#figure(kind: table, caption: [{}])[\n{content_markup}]\n\n",
                     escape_typst(label)
                 );
@@ -344,7 +361,7 @@ fn eval_pair_result(
         match source_info.caption().or_else(|| source_info.produces()) {
             Some(label) => {
                 let _ = write!(
-                    body,
+                    figure,
                     "\n#figure(caption: [{}])[\n{image_markup}]\n\n",
                     escape_typst(label)
                 );
@@ -842,6 +859,29 @@ mod tests {
         tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
         let (out, _) = render_doc_with_tables(src, &tables);
         assert!(out.contains("#figure(kind: table, caption: [file:data.csv])["), "{out}");
+    }
+
+    #[test]
+    fn a_captioned_artifacts_figure_renders_outside_the_blocks_stroke() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        // `eval_pair` closes the block with a literal `]\n`, then appends
+        // `figure` verbatim -- this exact substring is that hand-off.
+        assert!(out.contains("]\n\n#figure(kind: table"), "{out}");
+    }
+
+    #[test]
+    fn an_uncaptioned_artifact_stays_inside_the_blocks_stroke() {
+        let src = "```python name=a\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        // No real figure exists to place outside the block, so the raw
+        // `#table(...)` must be the block's own last line before its `]`.
+        assert!(!out.contains("#figure("), "an uncaptioned artifact is not a real figure: {out}");
+        assert!(out.contains("#table(\n  columns: 2,\n  table.header([a], [b]),\n  [1], [2],\n)\n]\n"), "{out}");
     }
 
     #[test]

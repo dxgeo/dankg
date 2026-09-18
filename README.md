@@ -449,10 +449,14 @@ A captioned artifact renders as a real figure, not a caption line
 beside raw content: a table's own caption sits above it, an image's
 own sits below, and the PDF backend numbers each automatically --
 "Table 1", "Figure 1" -- through Typst's own figure counter, not
-anything `dankg` counts itself. A stylesheet can still reposition
-either backend's own caption -- `theme.css`'s own `table-figure`/
-`image-figure` classes for HTML, a `#show figure.where(...)` rule in
-`[weave.pdf] template` for Typst.
+anything `dankg` counts itself. Whether that figure sits boxed
+together with its own pair, or stands apart from it, is a
+stylesheet's or template's own call, not `dankg`'s: HTML's own
+nested `<figure>` is already a plain element inside `figure.eval-pair`,
+stylesheet-reachable either way; Typst's own figure renders outside
+the pair's stroked block by default, with a template free to wrap it
+back in via `#show figure: it => block(stroke: ..., inset: ...)[#it]`
+if it wants the boxed look back.
 
 `weave=hidden` drops both halves of a paired block together.
 `weave=source-hidden` and `weave=output-hidden` each drop only one,
@@ -476,6 +480,7 @@ Configuration below).
 <!-- dankg:depends target=architecture.md#captions quote="so a caption can carry its own spaces" -->
 <!-- dankg:depends target=architecture.md#hiding-one-half-of-a-pair quote="each drop exactly one, leaving the other exactly as it already renders" -->
 <!-- dankg:depends target=architecture.md#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="gives a reader genuine, automatic" -->
+<!-- dankg:depends target=architecture.md#decision-55-a-captioned-figure-renders-outside-the-pairs-own-block-in-typst quote="nothing to unwrap a figure out of a box from the outside" -->
 
 ### `init` — scaffold a new corpus
 
