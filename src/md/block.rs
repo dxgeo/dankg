@@ -198,21 +198,25 @@ fn gather_fence(lines: &[Line], start: usize, fence: FenceOpen, diags: &mut Diag
 
 /// Parse a fence info string. The first word is the language. The rest is
 /// DanKG `key=value` metadata. Unknown keys warn rather than being
-/// silently dropped.
+/// silently dropped. Tokenized through `cmd::split`, not
+/// `str::split_whitespace`, so a value can carry its own spaces when
+/// quoted (`caption="Quarterly revenue"`, decision 52) -- the same
+/// reason `dankg:depends`'s own `quote="..."` marker already tokenizes
+/// this way.
 fn parse_info(raw: &str, line: u32, diags: &mut Diags) -> InfoString {
     let mut info = InfoString::default();
-    let mut words = raw.split_whitespace();
+    let mut words = crate::cmd::split(raw).into_iter();
 
     if let Some(lang) = words.next() {
         if lang.contains('=') {
             // No language, straight into attributes.
-            handle_attr(&mut info, lang, line, diags);
+            handle_attr(&mut info, &lang, line, diags);
         } else {
-            info.lang = Some(lang.to_string());
+            info.lang = Some(lang);
         }
     }
     for word in words {
-        handle_attr(&mut info, word, line, diags);
+        handle_attr(&mut info, &word, line, diags);
     }
     info
 }
@@ -628,6 +632,14 @@ mod tests {
         assert_eq!(text, "print(1)\n");
         assert_eq!(*line, 1);
         assert_eq!(*end_line, 3, "the closing fence is line 3");
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn quoted_info_attr_value_keeps_its_own_spaces() {
+        let (b, d) = blocks("```python caption=\"Quarterly revenue\"\nprint(1)\n```\n");
+        let Block::Code { info, .. } = &b[0] else { panic!() };
+        assert_eq!(info.caption(), Some("Quarterly revenue"));
         assert!(d.is_empty());
     }
 

@@ -162,7 +162,10 @@ fn block(
             let _ = writeln!(out, "<p>{}</p>", inline_html(inlines));
         }
         Block::Code { info, text, line, .. } => {
-            if !info.weave_hidden() {
+            // A lone block has no separate output half, so
+            // `source-hidden` has nothing left to preserve and hides
+            // it too, the same as `hidden` (decision 53).
+            if !info.weave_hidden() && !info.weave_source_hidden() {
                 code_or_data_table(out, info, text, *line, diags);
             }
         }
@@ -186,7 +189,10 @@ fn block(
 /// appended after the captured output, since stdout might be a log
 /// line while the real content lives in the file. A block declares at
 /// most one `produces=file:` today, so at most one of the two is ever
-/// `Some`.
+/// `Some`. `weave=source-hidden`/`weave=output-hidden` (decision 53)
+/// each drop one of the figure's own two halves; a custom `caption=`
+/// (decision 52) only ever changes the *other* half's own text, since
+/// a half that is not rendered has no figcaption to override.
 fn eval_pair(
     out: &mut String,
     source_info: &InfoString,
@@ -199,21 +205,57 @@ fn eval_pair(
 ) {
     let class = if pair.failed { "eval-pair failed" } else { "eval-pair" };
     let _ = writeln!(out, "<figure class=\"{class}\">");
-    code_or_data_table(out, source_info, source_text, source_line, diags);
-    let caption = if pair.failed { "Output (failed)" } else { "Output" };
-    let _ = writeln!(out, "<figcaption>{caption}</figcaption>");
+    if !source_info.weave_source_hidden() {
+        code_or_data_table(out, source_info, source_text, source_line, diags);
+    }
+    if !source_info.weave_output_hidden() {
+        eval_pair_result(out, source_info, pair, table, image, source_line, diags);
+    }
+    out.push_str("</figure>\n");
+}
+
+/// The pair's own result half: the captured output, its artifact if
+/// any, and its provenance line. Split out of [`eval_pair`] only so
+/// `weave=output-hidden` (decision 53) has one call to skip rather
+/// than three. `table`/`image` each get their own real, nested
+/// `<figure>` -- `table-figure`/`image-figure` -- rather than a bare
+/// `<figcaption>` beside raw content, so a stylesheet has an actual
+/// element to key real captioning off of (decision 54): a table's own
+/// `<figcaption>` sits first, above its `<table>`, the conventional
+/// position; an image's own sits last, after its `<img>`, matching
+/// HTML's own rule that `<figcaption>` must be a `<figure>`'s first
+/// or last child. Neither position is enforced here -- a stylesheet
+/// still decides how it actually renders -- but the DOM order now
+/// matches the convention CSS would otherwise have to fight.
+fn eval_pair_result(
+    out: &mut String,
+    source_info: &InfoString,
+    pair: &Pair,
+    table: Option<&(String, String)>,
+    image: Option<&(Vec<u8>, String)>,
+    source_line: u32,
+    diags: &mut Diags,
+) {
+    let has_artifact = table.is_some() || image.is_some();
+    let output_caption = match source_info.caption() {
+        Some(c) if !has_artifact => {
+            if pair.failed { format!("{c} (failed)") } else { c.to_string() }
+        }
+        _ => (if pair.failed { "Output (failed)" } else { "Output" }).to_string(),
+    };
+    let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(&output_caption));
     code_or_data_table(out, pair.output_info, pair.output_text, pair.output_line, diags);
     if let Some((lang, content)) = table {
-        if let Some(produces) = source_info.produces() {
-            let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(produces));
+        out.push_str("<figure class=\"table-figure\">\n");
+        if let Some(label) = source_info.caption().or_else(|| source_info.produces()) {
+            let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(label));
         }
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
         code_or_data_table(out, &info, content, source_line, diags);
+        out.push_str("</figure>\n");
     }
     if let Some((bytes, resolved)) = image {
-        if let Some(produces) = source_info.produces() {
-            let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(produces));
-        }
+        out.push_str("<figure class=\"image-figure\">\n");
         let _ = writeln!(
             out,
             "<img src=\"data:{};base64,{}\" alt=\"{}\">",
@@ -221,9 +263,12 @@ fn eval_pair(
             base64_encode(bytes),
             escape_attr(resolved)
         );
+        if let Some(label) = source_info.caption().or_else(|| source_info.produces()) {
+            let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(label));
+        }
+        out.push_str("</figure>\n");
     }
     provenance(out, pair);
-    out.push_str("</figure>\n");
 }
 
 /// The MIME type a `data:` URI needs, from the artifact's own extension
@@ -653,6 +698,19 @@ mod tests {
     }
 
     #[test]
+    fn a_produced_table_gets_a_nested_figure_with_its_caption_above() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("<figure class=\"table-figure\">"), "{out}");
+        let fig_start = out.find("<figure class=\"table-figure\">").unwrap();
+        let cap = out.find("<figcaption>file:data.csv</figcaption>").unwrap();
+        let table_start = out[fig_start..].find("<table").unwrap() + fig_start;
+        assert!(fig_start < cap && cap < table_start, "caption must come before the table: {out}");
+    }
+
+    #[test]
     fn a_json_artifact_that_is_not_table_shaped_falls_back_to_code() {
         let src = "```python name=a produces=file:data.json\nwrite_json()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n";
         let mut tables = HashMap::new();
@@ -667,6 +725,71 @@ mod tests {
         let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
         let (out, _) = render_doc(src);
         assert!(!out.contains("<table"), "{out}");
+    }
+
+    #[test]
+    fn a_caption_overrides_the_artifact_figcaption_not_output() {
+        let src = "```python name=a produces=file:data.csv caption=\"Quarterly revenue\"\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("<figcaption>Quarterly revenue</figcaption>"), "{out}");
+        assert!(!out.contains("<figcaption>file:data.csv</figcaption>"), "{out}");
+        assert!(out.contains("<figcaption>Output</figcaption>"), "{out}");
+    }
+
+    #[test]
+    fn a_caption_with_no_artifact_overrides_output_and_keeps_failed() {
+        let src = "```sh name=a caption=Result\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("<figcaption>Result (failed)</figcaption>"), "{out}");
+        assert!(!out.contains("<figcaption>Output"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_keeps_the_output_but_drops_the_source() {
+        let src = "```sh name=a weave=source-hidden\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(out.contains("<figcaption>Output</figcaption>"), "{out}");
+        assert!(out.contains(">hi\n<"), "{out}");
+    }
+
+    #[test]
+    fn output_hidden_keeps_the_source_but_drops_everything_after() {
+        let src = "```sql db=w name=a weave=output-hidden\nselect 1;\n```\n\n<!-- dankg:result name=a hash=0000000000000001 produces=orders -->\n\n```\nn\n1\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("select 1;"), "{out}");
+        // The source's own fence carries a `language-sql` class; the
+        // captured output's fence carries none, so its absence is what
+        // "the output half is gone" comes down to.
+        assert!(!out.contains("<pre><code>"), "{out}");
+        assert!(!out.contains("<figcaption>"), "{out}");
+        assert!(!out.contains("writes: orders"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_hides_an_unpaired_block_entirely() {
+        let (out, _) = render_doc("```sh name=a weave=source-hidden\necho hi\n```\n");
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(!out.contains("<figure"), "{out}");
+    }
+
+    #[test]
+    fn output_hidden_is_a_noop_on_an_unpaired_block() {
+        let (out, _) = render_doc("```sh name=a weave=output-hidden\necho hi\n```\n");
+        assert!(out.contains("echo hi"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_or_output_hidden_keep_the_failed_class() {
+        let src = "```sh name=a weave=source-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("<figure class=\"eval-pair failed\">"), "{out}");
+
+        let src = "```sh name=a weave=output-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("<figure class=\"eval-pair failed\">"), "{out}");
     }
 
     #[test]
@@ -699,6 +822,19 @@ mod tests {
         let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images);
         assert!(out.contains("<img src=\"data:image/png;base64,aGk=\""), "{out}");
         assert!(out.contains("<figcaption>file:chart.png</figcaption>"), "{out}");
+    }
+
+    #[test]
+    fn a_produced_image_gets_a_nested_figure_with_its_caption_below() {
+        let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"hi".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images);
+        assert!(out.contains("<figure class=\"image-figure\">"), "{out}");
+        let fig_start = out.find("<figure class=\"image-figure\">").unwrap();
+        let img = out[fig_start..].find("<img").unwrap() + fig_start;
+        let cap = out.find("<figcaption>file:chart.png</figcaption>").unwrap();
+        assert!(fig_start < img && img < cap, "caption must come after the image: {out}");
     }
 
     #[test]

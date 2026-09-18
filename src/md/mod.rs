@@ -185,6 +185,7 @@ pub struct InfoString {
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
 pub const KNOWN_ATTRS: &[&str] = &[
     "db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key", "protocol", "weave",
+    "caption",
 ];
 
 impl InfoString {
@@ -280,6 +281,40 @@ impl InfoString {
     /// still tangles and still evaluates exactly as before.
     pub fn weave_hidden(&self) -> bool {
         self.get("weave") == Some("hidden")
+    }
+
+    /// Whether `dankg weave` should drop only this block's own source
+    /// from a recognized pair (decision 46), while still rendering its
+    /// output, artifact, and provenance. `weave=source-hidden` is the
+    /// only recognized value, read the same loose way `weave_hidden()`
+    /// already reads `hidden`. On a block with no recorded result,
+    /// there is no separate output for this to preserve, so a caller
+    /// treats it the same as `weave_hidden()` there -- decided by the
+    /// caller, not by this accessor.
+    pub fn weave_source_hidden(&self) -> bool {
+        self.get("weave") == Some("source-hidden")
+    }
+
+    /// Whether `dankg weave` should drop only a recognized pair's own
+    /// output half -- its captured result, any `produces=file:`
+    /// artifact, and its provenance line -- while still rendering the
+    /// source. `weave=output-hidden` is the only recognized value.
+    /// Meaningless on a block with no recorded result: there is no
+    /// separate output half to drop, so a caller renders such a block
+    /// exactly as if this were `false`.
+    pub fn weave_output_hidden(&self) -> bool {
+        self.get("weave") == Some("output-hidden")
+    }
+
+    /// A reader-authored caption (decision 52) overriding whichever
+    /// caption a recognized pair would otherwise synthesize: an
+    /// artifact's own `produces=file:PATH` echo when one is present,
+    /// otherwise the `Output`/`Output (failed)` label. Free text, so
+    /// unlike every other attribute here it may contain spaces --
+    /// `parse_info` tokenizes through `cmd::split` rather than
+    /// `str::split_whitespace` for exactly this reason.
+    pub fn caption(&self) -> Option<&str> {
+        self.get("caption")
     }
 }
 
@@ -434,6 +469,53 @@ mod tests {
 
         let info = InfoString { lang: Some("sh".into()), ..Default::default() };
         assert!(!info.weave_hidden());
+    }
+
+    #[test]
+    fn weave_source_hidden_is_true_only_for_the_recognized_value() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "source-hidden".into())],
+            ..Default::default()
+        };
+        assert!(info.weave_source_hidden());
+        assert!(!info.weave_hidden());
+        assert!(!info.weave_output_hidden());
+
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "hidden".into())],
+            ..Default::default()
+        };
+        assert!(!info.weave_source_hidden());
+    }
+
+    #[test]
+    fn weave_output_hidden_is_true_only_for_the_recognized_value() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "output-hidden".into())],
+            ..Default::default()
+        };
+        assert!(info.weave_output_hidden());
+        assert!(!info.weave_hidden());
+        assert!(!info.weave_source_hidden());
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert!(!info.weave_output_hidden());
+    }
+
+    #[test]
+    fn caption_is_read_raw_and_none_when_absent() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("caption".into(), "Quarterly revenue".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.caption(), Some("Quarterly revenue"));
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert_eq!(info.caption(), None);
     }
 
     #[test]

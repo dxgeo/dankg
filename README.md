@@ -434,6 +434,38 @@ print("wrote chart.png")
 ```
 ````
 
+A synthesized caption -- "Output", or a produced artifact's own raw
+`produces=file:PATH` -- can be overridden with `caption=`, free text
+unlike every other attribute here, so it may carry its own spaces
+when quoted:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png caption="Yearly release count"
+draw_chart(data, "chart.png")
+```
+````
+
+A captioned artifact renders as a real figure, not a caption line
+beside raw content: a table's own caption sits above it, an image's
+own sits below, and the PDF backend numbers each automatically --
+"Table 1", "Figure 1" -- through Typst's own figure counter, not
+anything `dankg` counts itself. A stylesheet can still reposition
+either backend's own caption -- `theme.css`'s own `table-figure`/
+`image-figure` classes for HTML, a `#show figure.where(...)` rule in
+`[weave.pdf] template` for Typst.
+
+`weave=hidden` drops both halves of a paired block together.
+`weave=source-hidden` and `weave=output-hidden` each drop only one,
+leaving the other exactly as it already renders -- a walkthrough
+that shows a chart without the code behind it, or a snippet worth
+showing without spoiling the answer it produces:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png weave=source-hidden
+draw_chart(data, "chart.png")
+```
+````
+
 `[weave.html] css` and `[weave.pdf] template`/`command` configure a
 stylesheet, a Typst preamble, and the compiler invocation (see
 Configuration below).
@@ -441,6 +473,9 @@ Configuration below).
 <!-- dankg:depends target=architecture.md#recorded-eval-output quote="A named `Code` block immediately followed by its own recorded" -->
 <!-- dankg:depends target=architecture.md#staleness quote="The rendered page itself never changes because of this" -->
 <!-- dankg:depends target=architecture.md#produced-artifacts quote="A recognized pair's source block may also declare" -->
+<!-- dankg:depends target=architecture.md#captions quote="so a caption can carry its own spaces" -->
+<!-- dankg:depends target=architecture.md#hiding-one-half-of-a-pair quote="each drop exactly one, leaving the other exactly as it already renders" -->
+<!-- dankg:depends target=architecture.md#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="gives a reader genuine, automatic" -->
 
 ### `init` — scaffold a new corpus
 

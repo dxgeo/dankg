@@ -334,6 +334,32 @@ For a recognized pair (decision 46) whose source block also declares `produces=f
 <!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
 <!-- dankg:depends target=#decision-43-weave-html-rendering quote="A woven HTML page is the one deliberate exception" -->
 
+## Decision 52: `caption=` overrides a pair's own synthesized caption
+
+A new `caption` key joins `KNOWN_ATTRS`. `InfoString::caption()` reads it raw, free text unlike every other attribute here, since `parse_info` now tokenizes a fence's whole info string through `cmd::split` rather than `str::split_whitespace` -- the same quote-aware scanner `dankg:depends`'s own `quote="..."` marker already relies on -- so a caption can carry its own spaces (`caption="Quarterly revenue"`). In a recognized pair (decision 46), it overrides whichever caption is the pair's own payload: the artifact's own figcaption/label when a `produces=file:` table or image (decisions 50/51) is present, otherwise the eval result's own `Output`/`Output (failed)` label, with `(failed)` still appended so that signal survives a custom caption. It replaces exactly one of the two, never both, so a pair with both a captured stdout line and a produced chart never repeats an identical caption twice. `dankg fmt`'s own `info_text` quotes a known attribute's value back on write-back whenever it contains whitespace; every other attribute's own value never does, so this changes nothing else about how `dankg fmt` already canonicalizes an info string.
+
+**Rationale:** Before this, a pair's own caption text was always synthesized -- `Output`/`Output (failed)`, or an artifact's own raw `produces=file:PATH` string echoed back verbatim, a path rather than a description. A reader-facing document deserves reader-facing prose there, the same way a photo's own caption is authored rather than generated from its filename.
+
+<!-- dankg:depends target=#decision-46-a-recorded-eval-result-renders-paired-with-its-source quote="renders as one visual unit in both weave backends instead of three unrelated blocks" -->
+<!-- dankg:depends target=src/depends.md#the-marker quote="so it is written quoted" -->
+
+## Decision 53: `weave=source-hidden` and `weave=output-hidden` split a pair's own two halves
+
+Two more recognized values join `weave=hidden` (decision 48), read the same loose way `weave_hidden()` already reads it: `weave=source-hidden` drops only the source's own rendering from a recognized pair (decision 46), leaving its output, artifact, and provenance exactly as they already render; `weave=output-hidden` drops that entire second half instead -- output, artifact, and provenance together -- leaving the source exactly as it already renders. Since `weave=` holds one value, the two are mutually exclusive by construction; hiding both halves at once is already `weave=hidden`, not a new combination. On a block with no recorded result, there is no second half for either value to act on: `source-hidden` falls back to `hidden`'s own "absent as if it were never in the document" (decision 48), since hiding a lone source with nothing left to show is indistinguishable from hiding the block outright; `output-hidden` is a no-op there, rendering the block exactly as if the attribute were absent. Neither value changes the pair's own `failed` class (HTML) or stroke color (Typst): whichever half is visible still carries the identical status signal it already would.
+
+**Rationale:** `weave=hidden` (decision 48) is all-or-nothing. A reader sometimes wants only one half: a walkthrough that shows a chart without the plotting code behind it, or a snippet worth showing without spoiling the answer it produces. Splitting the existing pair into its own two already-distinct halves -- source, and everything decision 46 already renders after it -- needed no new structure, only two more values of the attribute decision 48 already introduced for exactly this kind of weave-only rendering hint.
+
+<!-- dankg:depends target=#decision-48-weavehidden-drops-a-block-from-woven-output quote="absent as if it were never in the document" -->
+
+## Decision 54: A produced artifact renders as a real, captioned figure
+
+A `produces=file:` table (decision 50) or image (decision 51) with a caption -- reader-authored (decision 52) or the artifact's own `produces=file:PATH` echo -- wraps its content in a real figure in both backends, rather than a bare caption line beside raw content. In HTML, a nested `<figure class="table-figure">`/`<figure class="image-figure">` sits inside the pair's own outer `<figure class="eval-pair">`, with its `<figcaption>` placed first for a table and last for an image -- the only two positions HTML allows a `<figcaption>` to occupy in its own `<figure>`, and the conventional caption-above-table, caption-below-figure split. In Typst, the content is wrapped in `#figure(caption: [...])` -- `kind: table` explicit for a table, left to Typst's own inference for an image -- which gives a reader genuine, automatic "Table N"/"Figure N" numbering through Typst's own counter, not anything counted here. An artifact with no caption at all renders unwrapped, exactly as it did before decision 52 -- there is nothing for either backend to attach a figure to. Neither position nor numbering format is fixed by this decision: a stylesheet can still reposition either backend's own caption (HTML: CSS `order` inside a flex `<figure>`; Typst: `#show figure.where(kind: table): set figure.caption(position: top)` in `[weave.pdf] template`), and the numbering itself comes from a stylesheet's own CSS counter (HTML) or Typst's own default supplement text (Typst). This decision only gives each backend a real element to hang that styling off of.
+
+**Rationale:** Decision 52 made a produced artifact's own label reader-authored, but the markup around it stayed a bare line of text -- no real figure, no real caption element, nothing a stylesheet or a reader's own tooling could recognize as "this is a captioned figure" rather than an arbitrary line. Numbering compounds the gap: neither CSS nor Typst can count "the third thing styled like a caption" without a real element carrying that role. A real `<figure>`/`<figcaption>` pair, and a real Typst `#figure`, are also what a screen reader and Typst's own outline machinery already understand -- free correctness a hand-rolled caption line never had.
+
+<!-- dankg:depends target=#decision-52-caption-overrides-a-pairs-own-synthesized-caption quote="a pair's own caption text was always synthesized" -->
+<!-- dankg:depends target=#decision-50-a-producesfile-csvtsvjson-artifact-renders-as-a-table quote="warns on stderr and adds nothing to the page" -->
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -2770,6 +2796,47 @@ lives in the file. A missing or unreadable artifact warns on stderr
 and adds nothing to the page; any other extension adds nothing
 either, silently, the same never-content-sniff stance decision 45
 already takes.
+
+## Captions
+
+A recognized pair's own caption is normally synthesized: `Output`/
+`Output (failed)`, or an artifact's own raw `produces=file:PATH`
+string echoed back verbatim (decisions 50/51). Decision 52's
+`caption=` overrides whichever of those is the pair's own payload --
+the artifact's, when a table or image is present, otherwise the eval
+result's own label, with `(failed)` still appended so that signal
+survives a custom caption. It is free text, unlike every other
+attribute here: `parse_info` tokenizes a fence's whole info string
+through `cmd::split`, the same quote-aware scanner `dankg:depends`'s
+own `quote="..."` marker already relies on, so a caption can carry
+its own spaces (`caption="Quarterly revenue"`).
+
+A captioned artifact is a real figure, not a caption line beside raw
+content (decision 54): a nested `<figure class="table-figure">`/
+`<figure class="image-figure">` in HTML, `#figure(caption: [...])`
+in Typst -- genuine, automatically numbered "Table N"/"Figure N" in
+the PDF, through Typst's own counter. A table's own `<figcaption>`
+sits first, an image's own sits last, the conventional
+caption-above-table, caption-below-figure split; a stylesheet can
+still reposition either.
+
+## Hiding one half of a pair
+
+`weave=hidden` (above) drops both of a pair's own halves together.
+`weave=source-hidden` and `weave=output-hidden` (decision 53) each
+drop exactly one, leaving the other exactly as it already renders:
+`source-hidden` keeps the output, artifact, and provenance but drops
+the source; `output-hidden` keeps the source but drops everything
+after it. Since `weave=` holds one value, the two are mutually
+exclusive by construction -- hiding both halves is already
+`weave=hidden`. On a block with no recorded result, `source-hidden`
+falls back to `hidden`'s own "absent as if it were never in the
+document," since there is no separate output left to preserve;
+`output-hidden` is a no-op there, since there is no separate output
+half to drop.
+
+<!-- dankg:depends target=#decision-52-caption-overrides-a-pairs-own-synthesized-caption quote="It replaces exactly one of the two, never both" -->
+<!-- dankg:depends target=#decision-53-weavesource-hidden-and-weaveoutput-hidden-split-a-pairs-own-two-halves quote="Since `weave=` holds one value, the two are mutually exclusive by construction" -->
 
 ## HTML backend
 

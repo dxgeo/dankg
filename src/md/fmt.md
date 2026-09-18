@@ -249,7 +249,11 @@ fn code(info: &InfoString, text: &str, fence: char) -> String {
 /// Canonical info string: language, then known attributes in the order
 /// `KNOWN_ATTRS` declares them, then anything the parser did not recognise, in
 /// the order it was written. Unknown words are ignored everywhere else.
-/// Deleting them would make `fmt` lossy.
+/// Deleting them would make `fmt` lossy. A value containing whitespace
+/// (`caption=`, decision 52) is written back quoted, so re-parsing it
+/// through `parse_info`'s own `cmd::split` tokenizer round-trips to the
+/// identical value; every other known attribute never contains
+/// whitespace today, so this changes nothing about how they render.
 fn info_text(info: &InfoString) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(lang) = &info.lang {
@@ -257,7 +261,11 @@ fn info_text(info: &InfoString) -> String {
     }
     for key in KNOWN_ATTRS {
         if let Some(value) = info.get(key) {
-            parts.push(format!("{key}={value}"));
+            if value.contains(char::is_whitespace) {
+                parts.push(format!("{key}=\"{value}\""));
+            } else {
+                parts.push(format!("{key}={value}"));
+            }
         }
     }
     parts.extend(info.unknown.iter().cloned());
@@ -658,6 +666,14 @@ mod tests {
         assert_eq!(
             stable("```python timeout=5 name=x bogus=1\n```\n"),
             "```python name=x timeout=5 bogus=1\n```\n"
+        );
+    }
+
+    #[test]
+    fn a_caption_with_spaces_round_trips_quoted() {
+        assert_eq!(
+            stable("```python caption=\"Quarterly revenue\"\n```\n"),
+            "```python caption=\"Quarterly revenue\"\n```\n"
         );
     }
 

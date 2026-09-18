@@ -160,6 +160,16 @@ document at all. It is a weave-only rendering hint. `dankg tangle`
 and `dankg eval` never look at it. A hidden block still tangles and
 still evaluates exactly as it would without the tag.
 
+A recognized pair (decision 46) can also hide just one of its own two
+halves (decision 53). `weave=source-hidden` drops the source's own
+`code_or_data_table` call but renders its output, artifact, and
+provenance exactly as before. `weave=output-hidden` drops that entire
+second half -- output, artifact, and provenance together -- and
+renders the source exactly as before. Both read the same `weave=`
+attribute `weave_hidden()` already reads, so a block can only ever
+ask for one of the three: hiding both halves is already
+`weave=hidden`.
+
 A named `Code` block immediately followed by its own recorded
 `<!-- dankg:result ... -->` marker and output fence (decision 46)
 renders as one `#block(...)`-wrapped unit instead of three unrelated
@@ -182,6 +192,24 @@ below a `csv`/`json` fence's own inline content already goes through.
 A produced image (decision 51) is the same idea for `images`; the
 bytes themselves stay unused here, since `#image(...)` only ever
 needs the path `render_pdf` already copied the real file to.
+
+A reader-authored `caption=` (decision 52) overrides whichever
+caption is the pair's own payload: the artifact's, when a table or
+image is present, otherwise the eval result's own `Output`/`Output (failed)` label. It replaces one caption, never both, so a pair with
+both a captured stdout line and a produced chart never repeats the
+same caption twice.
+
+An artifact with a caption (decision 54) is wrapped in a real
+`#figure(caption: [...])` rather than a bare `#text(...)` line beside
+raw content -- `kind: table` for a table, left to Typst's own
+inference (a lone `#image(...)` body infers `kind: image`) for an
+image. This is what gives a reader genuine, automatic "Table N"/
+"Figure N" numbering: `#figure`'s own counter, not anything counted
+here. Position -- Typst's own default puts a figure's caption below
+its content for every kind -- is left to whatever `[weave.pdf] template` sets via `#show figure.where(kind: table): set figure.caption(position: top)`, the conventional table-above,
+figure-below split. An artifact with no caption at all (`caption()`
+and `produces()` both absent) renders its raw content unwrapped,
+exactly as before -- there is nothing for `#figure` to caption.
 
 ```rust name=blocks_and_block path=render/typst.rs
 /// A named `Code` block immediately followed by its recorded eval
@@ -230,7 +258,10 @@ fn block(
             format!("{eq} {}\n", inline_text(inlines))
         }
         Block::Paragraph { inlines, .. } => format!("{}\n", inline_text(inlines)),
-        Block::Code { info, .. } if info.weave_hidden() => return None,
+        // A lone block has no separate output half, so `source-hidden`
+        // has nothing left to preserve and hides it too, the same as
+        // `hidden` (decision 53).
+        Block::Code { info, .. } if info.weave_hidden() || info.weave_source_hidden() => return None,
         Block::Code { info, text, line, .. } => code_or_data_table(info, text, *line, diags),
         Block::List(l) => list(l, tables, images, diags),
         Block::ThematicBreak { .. } => "#line(length: 100%)\n".to_string(),
@@ -247,7 +278,10 @@ fn block(
 /// appended after the captured output, since stdout might be a log
 /// line while the real content lives in the file. A block declares at
 /// most one `produces=file:` today, so at most one of the two is ever
-/// `Some`.
+/// `Some`. `weave=source-hidden`/`weave=output-hidden` (decision 53)
+/// each drop one of the block's own two halves; a custom `caption=`
+/// (decision 52) only ever changes the *other* half's own text, since
+/// a half that is not rendered has no caption to override.
 fn eval_pair(
     source_info: &InfoString,
     source_text: &str,
@@ -258,27 +292,69 @@ fn eval_pair(
     diags: &mut Diags,
 ) -> String {
     let color = if pair.failed { "red" } else { "gray" };
-    let caption = if pair.failed { "Output (failed)" } else { "Output" };
-    let mut body = code_or_data_table(source_info, source_text, source_line, diags);
-    let _ = write!(body, "\n#text(size: 9pt, fill: {color})[{caption}]\n\n");
+    let mut body = String::new();
+    if !source_info.weave_source_hidden() {
+        body.push_str(&code_or_data_table(source_info, source_text, source_line, diags));
+    }
+    if !source_info.weave_output_hidden() {
+        eval_pair_result(&mut body, source_info, pair, table, image, source_line, diags);
+    }
+    format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]\n")
+}
+
+/// The pair's own result half: the captured output, its artifact if
+/// any, and its provenance line. Split out of [`eval_pair`] only so
+/// `weave=output-hidden` (decision 53) has one call to skip rather
+/// than three.
+fn eval_pair_result(
+    body: &mut String,
+    source_info: &InfoString,
+    pair: &Pair,
+    table: Option<&(String, String)>,
+    image: Option<&(Vec<u8>, String)>,
+    source_line: u32,
+    diags: &mut Diags,
+) {
+    let color = if pair.failed { "red" } else { "gray" };
+    let has_artifact = table.is_some() || image.is_some();
+    let output_caption = match source_info.caption() {
+        Some(c) if !has_artifact => {
+            if pair.failed { format!("{c} (failed)") } else { c.to_string() }
+        }
+        _ => (if pair.failed { "Output (failed)" } else { "Output" }).to_string(),
+    };
+    let _ = write!(body, "\n#text(size: 9pt, fill: {color})[{output_caption}]\n\n");
     body.push_str(&code_or_data_table(pair.output_info, pair.output_text, pair.output_line, diags));
     if let Some((lang, content)) = table {
-        if let Some(produces) = source_info.produces() {
-            let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n\n", escape_typst(produces));
-        }
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
-        body.push_str(&code_or_data_table(&info, content, source_line, diags));
+        let content_markup = code_or_data_table(&info, content, source_line, diags);
+        match source_info.caption().or_else(|| source_info.produces()) {
+            Some(label) => {
+                let _ = write!(
+                    body,
+                    "\n#figure(kind: table, caption: [{}])[\n{content_markup}]\n\n",
+                    escape_typst(label)
+                );
+            }
+            None => body.push_str(&content_markup),
+        }
     }
     if let Some((_, resolved)) = image {
-        if let Some(produces) = source_info.produces() {
-            let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n\n", escape_typst(produces));
+        let image_markup = format!("#image(\"assets/{}\")\n", escape_typst_string(resolved));
+        match source_info.caption().or_else(|| source_info.produces()) {
+            Some(label) => {
+                let _ = write!(
+                    body,
+                    "\n#figure(caption: [{}])[\n{image_markup}]\n\n",
+                    escape_typst(label)
+                );
+            }
+            None => body.push_str(&image_markup),
         }
-        let _ = write!(body, "#image(\"assets/{}\")\n", escape_typst_string(resolved));
     }
     if let Some(p) = provenance_text(pair) {
         let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n", escape_typst(&p));
     }
-    format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]\n")
 }
 
 /// `produces`/`reads` (decision 33), when either is non-empty, is the
@@ -760,6 +836,15 @@ mod tests {
     }
 
     #[test]
+    fn a_produced_table_is_wrapped_in_a_real_kind_table_figure() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("#figure(kind: table, caption: [file:data.csv])["), "{out}");
+    }
+
+    #[test]
     fn a_json_artifact_that_is_not_table_shaped_falls_back_to_code() {
         let src = "```python name=a produces=file:data.json\nwrite_json()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n";
         let mut tables = HashMap::new();
@@ -777,6 +862,68 @@ mod tests {
     }
 
     #[test]
+    fn a_caption_overrides_the_artifact_label_not_output() {
+        let src = "```python name=a produces=file:data.csv caption=\"Quarterly revenue\"\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("Quarterly revenue"), "{out}");
+        assert!(!out.contains("file:data.csv"), "{out}");
+        assert!(out.contains("Output"), "{out}");
+    }
+
+    #[test]
+    fn a_caption_with_no_artifact_overrides_output_and_keeps_failed() {
+        let src = "```sh name=a caption=Result\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("Result (failed)"), "{out}");
+        assert!(!out.contains("[Output"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_keeps_the_output_but_drops_the_source() {
+        let src = "```sh name=a weave=source-hidden\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(out.contains("Output"), "{out}");
+        assert!(out.contains("hi\n```"), "{out}");
+    }
+
+    #[test]
+    fn output_hidden_keeps_the_source_but_drops_everything_after() {
+        let src = "```sql db=w name=a weave=output-hidden\nselect 1;\n```\n\n<!-- dankg:result name=a hash=0000000000000001 produces=orders -->\n\n```\nn\n1\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("select 1;"), "{out}");
+        assert!(!out.contains("Output"), "{out}");
+        assert!(!out.contains("n\n1\n```"), "{out}");
+        assert!(!out.contains("writes: orders"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_hides_an_unpaired_block_entirely() {
+        let (out, _) = render_doc("```sh name=a weave=source-hidden\necho hi\n```\n");
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(!out.contains("#block(stroke"), "{out}");
+    }
+
+    #[test]
+    fn output_hidden_is_a_noop_on_an_unpaired_block() {
+        let (out, _) = render_doc("```sh name=a weave=output-hidden\necho hi\n```\n");
+        assert!(out.contains("echo hi"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_or_output_hidden_keep_the_red_stroke() {
+        let src = "```sh name=a weave=source-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("#block(stroke: (left: 2pt + red)"), "{out}");
+
+        let src = "```sh name=a weave=output-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("#block(stroke: (left: 2pt + red)"), "{out}");
+    }
+
+    #[test]
     fn a_produced_image_renders_as_an_image_reference() {
         let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
         let mut images = HashMap::new();
@@ -784,6 +931,16 @@ mod tests {
         let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images);
         assert!(out.contains("#image(\"assets/chart.png\")"), "{out}");
         assert!(out.contains("file:chart.png"), "{out}");
+    }
+
+    #[test]
+    fn a_produced_image_is_wrapped_in_a_real_figure_with_no_kind_override() {
+        let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images);
+        assert!(out.contains("#figure(caption: [file:chart.png])["), "{out}");
+        assert!(!out.contains("kind: table"), "an image figure infers its own kind, {out}");
     }
 
     #[test]
