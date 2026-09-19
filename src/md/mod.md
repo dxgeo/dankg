@@ -206,7 +206,7 @@ these three already reconstruct.
 /// The first word is the language. Everything after it is `key=value` DanKG
 /// metadata. Other markdown renderers ignore everything past the language.
 /// This way, files carrying DanKG attributes stay portable.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Eq, Default)]
 pub struct InfoString {
     pub lang: Option<String>,
     pub attrs: Vec<(String, String)>,
@@ -216,6 +216,29 @@ pub struct InfoString {
     /// Between `lang`, `attrs`, and this, the info string can be rebuilt
     /// without loss. This is why the raw text is not also stored.
     pub unknown: Vec<String>,
+}
+
+/// `attrs` compares as a set, not a sequence. Every real reader of an
+/// `InfoString` -- `get`, `weave_hidden`, `deps`, all of them -- looks an
+/// attribute up by key, never by position, so two orderings of the same
+/// key=value pairs already mean the same thing. A derived, position-
+/// sensitive `PartialEq` disagreed with that. It is what made
+/// `dankg fmt`'s own round-trip safety check (`fmt::verify`) refuse to
+/// write a file whenever canonicalizing attribute order was the only
+/// change.
+/// `info_text` performs exactly that reorder constantly: it always
+/// re-emits known attributes in `KNOWN_ATTRS`'s own declared order,
+/// regardless of how the author wrote them. `lang` and `unknown` stay
+/// position-sensitive. `unknown` in particular keeps whatever order the
+/// author wrote unrecognized words in, and `dankg fmt` must reproduce
+/// that order exactly when it rebuilds the info string from them.
+impl PartialEq for InfoString {
+    fn eq(&self, other: &Self) -> bool {
+        self.lang == other.lang
+            && self.unknown == other.unknown
+            && self.attrs.len() == other.attrs.len()
+            && self.attrs.iter().all(|kv| other.attrs.contains(kv))
+    }
 }
 
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
