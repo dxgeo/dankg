@@ -54,8 +54,22 @@ use crate::data::table::{self, TableData};
 use crate::diag::Diags;
 use crate::eval::result::{self, Pair};
 use crate::md::{Align, Block, Document, Frontmatter, InfoString, Inline, List, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+
+/// What `render` needs to resolve a citation against, decoupled from
+/// `weave.rs`'s own full `Bibliography` (decision 59) the same way
+/// `render_pdf`'s copied image path is decoupled from the image bytes
+/// (decision 51): this module only ever emits markup, never touches a
+/// filesystem or an entry's own fields beyond its key.
+pub struct BibliographySummary {
+    /// Every entry's own citation key -- checked before Typst's own compile
+    /// step would report the identical problem, redundantly but earlier.
+    pub valid_keys: HashSet<String>,
+    /// The path `#bibliography(...)` reads, root-relative to the `.typ`
+    /// file -- `render_pdf` has already written the real file there.
+    pub asset_path: String,
+}
 
 /// `title` becomes the cover page's own large centered heading, with the
 /// rest of the document's frontmatter printed beneath it. `#outline()`
@@ -79,13 +93,20 @@ pub fn render(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     figures_outside: bool,
+    bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
 ) -> String {
     let mut out = cover_page(title, &doc.frontmatter);
     if toc {
         out.push_str("#outline()\n\n");
     }
-    out.push_str(&blocks(&doc.blocks, tables, images, figures_outside, diags));
+    out.push_str(&blocks(&doc.blocks, tables, images, figures_outside, bibliography, diags));
+    // Unconditionally at the end, never at the `hayagriva` fence's own
+    // position (decision 59) -- the same fixed structural placement the
+    // cover page and outline above already get.
+    if let Some(bib) = bibliography {
+        let _ = write!(out, "\n#bibliography(\"{}\")\n", escape_typst_string(&bib.asset_path));
+    }
     out
 }
 ```
@@ -238,6 +259,7 @@ fn blocks(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     figures_outside: bool,
+    bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
 ) -> String {
     let mut rendered = Vec::new();
@@ -261,7 +283,7 @@ fn blocks(
                 continue;
             }
         }
-        if let Some(s) = block(&items[i], tables, images, figures_outside, diags) {
+        if let Some(s) = block(&items[i], tables, images, figures_outside, bibliography, diags) {
             rendered.push(s);
         }
         i += 1;
@@ -274,23 +296,24 @@ fn block(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     figures_outside: bool,
+    bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
 ) -> Option<String> {
     Some(match b {
         Block::Heading { level, inlines, .. } => {
             let eq = "=".repeat((*level).clamp(1, 6) as usize);
-            format!("{eq} {}\n", inline_text(inlines))
+            format!("{eq} {}\n", inline_text(inlines, bibliography))
         }
-        Block::Paragraph { inlines, .. } => format!("{}\n", inline_text(inlines)),
+        Block::Paragraph { inlines, .. } => format!("{}\n", inline_text(inlines, bibliography)),
         // A lone block has no separate output half, so `source-hidden`
         // has nothing left to preserve and hides it too, the same as
         // `hidden` (decision 53).
         Block::Code { info, .. } if info.weave_hidden() || info.weave_source_hidden() => return None,
         Block::Code { info, text, line, .. } => code_or_data_table(info, text, *line, diags),
-        Block::List(l) => list(l, tables, images, figures_outside, diags),
+        Block::List(l) => list(l, tables, images, figures_outside, bibliography, diags),
         Block::ThematicBreak { .. } => "#line(length: 100%)\n".to_string(),
         Block::Passthrough { text, .. } => format!("{}\n", escape_typst(text)),
-        Block::Table { aligns, header, rows, .. } => table_block(aligns, header, rows),
+        Block::Table { aligns, header, rows, .. } => table_block(aligns, header, rows, bibliography),
     })
 }
 
@@ -427,12 +450,13 @@ fn list(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     figures_outside: bool,
+    bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
 ) -> String {
     let marker = if l.ordered { "+" } else { "-" };
     let mut out = String::new();
     for item in &l.items {
-        let body = blocks(&item.blocks, tables, images, figures_outside, diags);
+        let body = blocks(&item.blocks, tables, images, figures_outside, bibliography, diags);
         for (i, line) in body.lines().enumerate() {
             if i == 0 {
                 out.push_str(marker);
@@ -516,13 +540,18 @@ this and `data_table_block` above call into. A GFM table and a
 `csv`-tagged block emit through one code path.
 
 ```rust name=table path=render/typst.rs
-fn table_block(aligns: &[Align], header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
+fn table_block(
+    aligns: &[Align],
+    header: &[Vec<Inline>],
+    rows: &[Vec<Vec<Inline>>],
+    bibliography: Option<&BibliographySummary>,
+) -> String {
     let columns = header.len();
-    let header_cells: Vec<String> = header.iter().map(|c| inline_text(c)).collect();
+    let header_cells: Vec<String> = header.iter().map(|c| inline_text(c, bibliography)).collect();
     let rows: Vec<Vec<String>> = rows
         .iter()
         .map(|r| {
-            let mut cells: Vec<String> = r.iter().map(|c| inline_text(c)).collect();
+            let mut cells: Vec<String> = r.iter().map(|c| inline_text(c, bibliography)).collect();
             cells.resize(columns, String::new());
             cells
         })
@@ -581,7 +610,7 @@ not in markup position. It needs the string escaper, not the markup
 one.
 
 ```rust name=inline_text path=render/typst.rs
-fn inline_text(inlines: &[Inline]) -> String {
+fn inline_text(inlines: &[Inline], bibliography: Option<&BibliographySummary>) -> String {
     let mut out = String::new();
     for i in inlines {
         match i {
@@ -589,19 +618,19 @@ fn inline_text(inlines: &[Inline]) -> String {
             Inline::Code(t) => out.push_str(&code_span(t)),
             Inline::Emph { inner, .. } => {
                 out.push('_');
-                out.push_str(&inline_text(inner));
+                out.push_str(&inline_text(inner, bibliography));
                 out.push('_');
             }
             Inline::Strong { inner, .. } => {
                 out.push('*');
-                out.push_str(&inline_text(inner));
+                out.push_str(&inline_text(inner, bibliography));
                 out.push('*');
             }
             Inline::Link { dest, text, .. } => {
                 out.push_str("#link(\"");
                 out.push_str(&escape_typst_string(dest));
                 out.push_str("\")[");
-                out.push_str(&inline_text(text));
+                out.push_str(&inline_text(text, bibliography));
                 out.push(']');
             }
             // Weave is single-file (decision 41): there is no corpus to
@@ -610,14 +639,25 @@ fn inline_text(inlines: &[Inline]) -> String {
             Inline::WikiLink { target, label } => {
                 out.push_str(&escape_typst(label.as_deref().unwrap_or(target)));
             }
-            // No bibliography is threaded through yet (decision 59 lands
-            // with the `bibliography()` pre-pass) -- every citation takes
-            // the "no bibliography configured" fallback for now: its own
-            // literal source text, escaped exactly like ordinary prose, so
-            // a bare `@key` never reaches the Typst compiler as real
-            // citation syntax with nothing to resolve it against.
-            Inline::Citation { keys, narrative } => {
+            // No bibliography configured at all: the literal source text,
+            // escaped exactly like ordinary prose, so a bare `@key` never
+            // reaches the Typst compiler as real citation syntax with
+            // nothing to resolve it against (decision 59).
+            Inline::Citation { keys, narrative } if bibliography.is_none() => {
                 out.push_str(&escape_typst(&citation_source(keys, *narrative)));
+            }
+            // A bibliography exists: real Typst citation syntax always goes
+            // out, resolved or not -- decision 44's own "let a real
+            // incompatibility surface as the compiler's own error" stance.
+            // `weave::bibliography`'s own pre-pass has already warned about
+            // an unresolved key, with a real line number this function has
+            // no access to; `valid_keys` is not consulted again here.
+            Inline::Citation { keys, narrative } => {
+                if *narrative {
+                    let _ = write!(out, "#cite(<{}>, form: \"prose\")", keys[0]);
+                } else {
+                    out.push_str(&keys.iter().map(|k| format!("@{k}")).collect::<Vec<_>>().join(" "));
+                }
             }
             Inline::SoftBreak => out.push(' '),
             Inline::HardBreak => out.push_str("#linebreak()\n"),
@@ -706,7 +746,7 @@ mod tests {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, tables, images, figures_outside, &mut diags);
+        let out = render(&doc, "Title", true, tables, images, figures_outside, None, &mut diags);
         (out, diags)
     }
 
@@ -724,7 +764,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), false, &mut diags);
+        let out = render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(!out.contains("#outline()"));
     }
 
@@ -736,7 +776,7 @@ mod tests {
             &mut d,
         );
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Author: Jane Doe"), "{cover}");
@@ -1080,6 +1120,61 @@ mod tests {
         let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
         let (out, _) = render_doc(src);
         assert!(!out.contains("#image("), "{out}");
+    }
+
+    fn render_doc_with_bibliography(source: &str, bib: Option<&BibliographySummary>) -> String {
+        let mut parse_diags = Diags::new("t.md");
+        let doc = Document::parse(source, &mut parse_diags);
+        let mut diags = Diags::new("t.md");
+        render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), false, bib, &mut diags)
+    }
+
+    fn bib(keys: &[&str]) -> BibliographySummary {
+        BibliographySummary {
+            valid_keys: keys.iter().map(|k| k.to_string()).collect(),
+            asset_path: "bibliography.yml".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_bracketed_citation_with_a_bibliography_emits_typst_shorthand() {
+        let out = render_doc_with_bibliography("[@a]\n", Some(&bib(&["a"])));
+        assert!(out.contains("@a"), "{out}");
+        assert!(!out.contains("\\@a"), "should not be escaped once a bibliography resolves it: {out}");
+    }
+
+    #[test]
+    fn multiple_keys_render_space_separated_relying_on_typst_s_own_merging() {
+        let out = render_doc_with_bibliography("[@a; @b]\n", Some(&bib(&["a", "b"])));
+        assert!(out.contains("@a @b"), "{out}");
+    }
+
+    #[test]
+    fn a_narrative_citation_emits_cite_with_prose_form() {
+        let out = render_doc_with_bibliography("@a argues\n", Some(&bib(&["a"])));
+        assert!(out.contains("#cite(<a>, form: \"prose\")"), "{out}");
+    }
+
+    #[test]
+    fn an_unresolved_key_still_emits_real_syntax_letting_typst_report_it() {
+        let out = render_doc_with_bibliography("[@missing]\n", Some(&bib(&["a"])));
+        assert!(out.contains("@missing"), "{out}");
+    }
+
+    #[test]
+    fn no_bibliography_configured_falls_back_to_literal_escaped_text() {
+        let out = render_doc_with_bibliography("[@a]\n", None);
+        assert!(out.contains("[\\@a]"), "{out}");
+        let out = render_doc_with_bibliography("@a argues\n", None);
+        assert!(out.contains("\\@a argues"), "{out}");
+    }
+
+    #[test]
+    fn a_bibliography_appends_one_call_at_the_document_s_end() {
+        let out = render_doc_with_bibliography("# H\n\n[@a]\n\nmore text\n", Some(&bib(&["a"])));
+        let call_pos = out.find("#bibliography(\"bibliography.yml\")").unwrap();
+        assert!(call_pos > out.rfind("more text").unwrap(), "{out}");
+        assert!(out.trim_end().ends_with("#bibliography(\"bibliography.yml\")"), "{out}");
     }
 }
 ```

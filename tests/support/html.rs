@@ -171,6 +171,16 @@ fn inlines_to(items: &[Inline], out: &mut String) {
                 }
                 out.push_str("]]");
             }
+            // Not a CommonMark construct either; round-trip it as written,
+            // the same as `WikiLink` above.
+            Inline::Citation { keys, narrative } => {
+                if *narrative {
+                    out.push_str(&escape_text(&format!("@{}", keys[0])));
+                } else {
+                    let body = keys.iter().map(|k| format!("@{k}")).collect::<Vec<_>>().join("; ");
+                    out.push_str(&escape_text(&format!("[{body}]")));
+                }
+            }
             Inline::SoftBreak => out.push('\n'),
             Inline::HardBreak => out.push_str("<br />\n"),
         }

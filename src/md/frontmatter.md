@@ -84,6 +84,14 @@ impl Frontmatter {
         self.scalar("title")
     }
 
+    /// A root-relative or file-relative path to an external Hayagriva
+    /// bibliography file (decision 58, `plan-weave-citations.md`), resolved
+    /// through `plan::resolve_artifact` the same way a `produces=file:`
+    /// artifact's own path already is.
+    pub fn bibliography(&self) -> Option<&str> {
+        self.scalar("bibliography")
+    }
+
     pub fn tags(&self) -> Vec<&str> {
         self.list("tags")
     }
@@ -342,6 +350,18 @@ mod tests {
         assert_eq!(rest, "# Body\n");
         assert_eq!(line, 5);
         assert!(d.is_empty());
+    }
+
+    #[test]
+    fn bibliography_reads_the_new_key() {
+        let (fm, ..) = parse("---\nbibliography: refs.yml\n---\n# Body\n");
+        assert_eq!(fm.bibliography(), Some("refs.yml"));
+    }
+
+    #[test]
+    fn bibliography_is_absent_with_no_such_key() {
+        let (fm, ..) = parse("---\ntitle: T\n---\n# Body\n");
+        assert_eq!(fm.bibliography(), None);
     }
 
     #[test]

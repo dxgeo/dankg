@@ -62,12 +62,90 @@ fn rendered_typst_actually_compiles() {
     assert!(parse_diags.is_empty(), "fixture should parse cleanly: {:?}", parse_diags.items());
 
     let mut diags = Diags::new("t.md");
-    let typ = typst::render(&doc, "Weave Smoke Test", true, &HashMap::new(), &HashMap::new(), false, &mut diags);
+    let typ = typst::render(&doc, "Weave Smoke Test", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
     assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
 
     let dir = std::env::temp_dir().join(format!("dankg-typst-smoke-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("scratch dir");
+    let typ_path = dir.join("doc.typ");
+    let pdf_path = dir.join("doc.pdf");
+    fs::write(&typ_path, &typ).expect("write .typ");
+
+    let output = match typst_compile(&typ_path, &pdf_path) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("skipping: `typst` not runnable ({e})");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+
+    assert!(
+        output.status.success(),
+        "typst compile failed:\n-- .typ --\n{typ}\n-- stderr --\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(pdf_path.exists(), "typst reported success but wrote no PDF");
+    assert!(fs::metadata(&pdf_path).unwrap().len() > 0, "PDF is empty");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A bracketed single citation, a bracketed multi-key one, and a narrative
+/// citation, against a real Hayagriva file on disk -- decision 59
+/// (`plan-weave-citations.md`). Confirms `#cite(<key>, form: "prose")` and
+/// `#bibliography(...)` are real, compilable Typst syntax, not just strings
+/// this crate's own emitter happens to be internally consistent about.
+const BIB_SOURCE: &str = r#"# Citations smoke test
+
+A bracketed citation [@netwok2019] and a multi-key one [@netwok2019; @smith2020].
+
+@smith2020 argues this works.
+"#;
+
+const BIB_YAML: &str = r#"netwok2019:
+  type: article
+  title: A Paper
+  author: Smith, John
+  date: 2019
+smith2020:
+  type: article
+  title: Another Paper
+  author: Smith, Jane
+  date: 2020
+"#;
+
+#[test]
+fn rendered_citations_and_bibliography_actually_compile() {
+    let mut parse_diags = Diags::new("t.md");
+    let doc = Document::parse(BIB_SOURCE, &mut parse_diags);
+    assert!(parse_diags.is_empty(), "fixture should parse cleanly: {:?}", parse_diags.items());
+
+    let dir = std::env::temp_dir().join(format!("dankg-typst-bib-smoke-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("scratch dir");
+    fs::write(dir.join("bibliography.yml"), BIB_YAML).expect("write bibliography.yml");
+
+    let summary = typst::BibliographySummary {
+        valid_keys: ["netwok2019", "smith2020"].iter().map(|s| s.to_string()).collect(),
+        asset_path: "bibliography.yml".to_string(),
+    };
+
+    let mut diags = Diags::new("t.md");
+    let typ = typst::render(
+        &doc,
+        "Citations Smoke Test",
+        false,
+        &HashMap::new(),
+        &HashMap::new(),
+        false,
+        Some(&summary),
+        &mut diags,
+    );
+    assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
+    assert!(typ.contains("#bibliography(\"bibliography.yml\")"), "{typ}");
+
     let typ_path = dir.join("doc.typ");
     let pdf_path = dir.join("doc.pdf");
     fs::write(&typ_path, &typ).expect("write .typ");

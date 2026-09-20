@@ -16,15 +16,17 @@ own single-file path already take for the identical reason (decision
 
 use crate::cmd;
 use crate::config::Config;
+use crate::data::bib::{self, BibEntry};
 use crate::diag::Diags;
 use crate::eval::files::Files;
 use crate::eval::session::corpus_graph_if_needed;
 use crate::eval::{plan, result};
 use crate::graph::build::{file_stem, strip_extension};
 use crate::graph::index;
-use crate::md::Document;
+use crate::md::{Block, Document, Inline};
+use crate::render::typst::BibliographySummary;
 use crate::render::{typst, weave_html};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -99,13 +101,15 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
     let entry_rel = abs_path.strip_prefix(&root).map(index::to_slash).unwrap_or_else(|_| path.to_string());
     warn_stale_pairs(&doc, path, &entry_rel, &root, &config, &mut diags);
     let (tables, images) = produced_artifacts(&doc, &entry_rel, &root, &mut diags);
+    let bib = bibliography(&doc, &entry_rel, &root, &mut diags);
 
     let report = match format {
         Format::Html => {
             render_html(&doc, &title, &config, &root, &tables, &images, output, figures_outside, &mut diags)?
         }
         Format::Pdf => render_pdf(
-            &doc, &title, &config, &root, &name, &tables, &images, output, toc, figures_outside, &mut diags,
+            &doc, &title, &config, &root, &name, &tables, &images, bib.as_ref(), output, toc, figures_outside,
+            &mut diags,
         )?,
     };
 
@@ -262,6 +266,207 @@ fn image_ext(path: &str) -> Option<&'static str> {
 }
 ```
 
+A document's bibliography (decision 58/59, `plan-weave-citations.md`)
+comes from at most one `hayagriva`-tagged fence, a frontmatter
+`bibliography:` file, or both together. `bibliography` is the pre-pass
+that locates and merges them, then walks every inline in the whole
+document -- headings, paragraphs, list items, table cells, the same
+full-document reach decision 41 already gives weave -- collecting each
+`Inline::Citation`'s own keys in first-appearance order. That order
+*is* the numbering both renderers use; nothing counts it a second
+time. `None` when neither source is configured, in which case a
+`[@key]`/bare `@key` in the source falls back to its own literal text
+in both renderers, never speculative citation markup with nothing to
+resolve it against.
+
+The external file's entries load first; the fence's own entries load
+second and win on a duplicate key -- the same "last wins" convention
+`md/frontmatter.rs`'s own duplicate-key handling already established.
+A key cited in the document but absent from every parsed entry warns
+at that citation's own block -- a heading or a paragraph's own `line`,
+the finest position the AST tracks for an inline. A second
+`hayagriva` fence warns and is ignored; nothing here has a use case
+yet for more than one anchor point.
+
+The merged raw Hayagriva text -- simple concatenation, external file
+first -- is handed back for `render_pdf` to write to disk unchanged.
+Typst reads that file itself and does its own full-schema formatting.
+A real YAML reader treats a later duplicate top-level key as the one
+that wins -- the same "fence wins" outcome dankg's own parsed
+`entries` map already computes. The raw text needs no byte-level
+merge of its own to agree with it.
+
+<!-- dankg:depends target=../architecture.md#decision-41-weave-scope quote="Weave never executes anything." -->
+<!-- dankg:depends target=../src/md/frontmatter.md#markdown-frontmatter quote="Unsupported input warns with its line number and is skipped, never guessed at." -->
+
+```rust name=bibliography path=weave.rs
+pub struct Bibliography {
+    /// Every parsed entry, external file first, fence second and winning a
+    /// duplicate key -- keyed by its own citation key.
+    pub entries: HashMap<String, BibEntry>,
+    /// Cited keys in first-appearance order across the whole document.
+    /// This *is* the numbering a rendered references list uses.
+    pub order: Vec<String>,
+    /// The merged raw Hayagriva text, written to disk for Typst to read
+    /// directly -- `render::typst` never touches an entry's own fields.
+    pub raw: String,
+}
+
+fn bibliography(doc: &Document, entry_rel: &str, root: &Path, diags: &mut Diags) -> Option<Bibliography> {
+    let mut fences = Vec::new();
+    find_hayagriva_fences(&doc.blocks, &mut fences);
+    for &(_, line) in fences.iter().skip(1) {
+        diags.warn(line, "more than one `hayagriva` fence in one document; only the first is used");
+    }
+    let fence = fences.into_iter().next();
+
+    let external = doc.frontmatter.bibliography().and_then(|path| {
+        let resolved = plan::resolve_artifact(entry_rel, path)?;
+        match fs::read_to_string(root.join(&resolved)) {
+            Ok(content) => Some((resolved, content)),
+            Err(e) => {
+                diags.warn(0, format!("bibliography={path} could not be read ({e}); ignored"));
+                None
+            }
+        }
+    });
+
+    if fence.is_none() && external.is_none() {
+        return None;
+    }
+
+    let mut entries: HashMap<String, BibEntry> = HashMap::new();
+    let mut raw = String::new();
+
+    if let Some((resolved, content)) = &external {
+        let mut ext_diags = Diags::new(resolved.as_str());
+        for e in bib::parse(content, &mut ext_diags) {
+            entries.insert(e.key.clone(), e);
+        }
+        diags.absorb(ext_diags);
+        raw.push_str(content);
+    }
+
+    if let Some((text, fence_line)) = fence {
+        let mut fence_diags = Diags::new(entry_rel);
+        let fence_entries = bib::parse(text, &mut fence_diags);
+        // Relative to the fence's own content (decision 58's own module
+        // boundary: a reusable parser knows nothing about its caller's
+        // position) -- remapped here, the one place that position is
+        // actually known.
+        for d in fence_diags.items() {
+            let mut remapped = d.clone();
+            remapped.line += fence_line;
+            diags.add(remapped);
+        }
+        for e in fence_entries {
+            if entries.contains_key(&e.key) {
+                diags.warn(
+                    fence_line,
+                    format!(
+                        "bibliography key `{}` is defined in both the external file and the fence; the fence wins",
+                        e.key
+                    ),
+                );
+            }
+            entries.insert(e.key.clone(), e);
+        }
+        if !raw.is_empty() {
+            raw.push('\n');
+        }
+        raw.push_str(text);
+    }
+
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    let mut slices = Vec::new();
+    walk_inlines(&doc.blocks, &mut slices);
+    for (line, inlines) in slices {
+        collect_citation_keys(inlines, line, &entries, &mut seen, &mut order, diags);
+    }
+
+    Some(Bibliography { entries, order, raw })
+}
+
+/// At most one is used; a second warns at its own caller. Recurses into a
+/// list item's own blocks, the same full-document reach every walk here
+/// gives weave -- a fence has no reason to live only at the top level.
+fn find_hayagriva_fences<'a>(blocks: &'a [Block], out: &mut Vec<(&'a str, u32)>) {
+    for b in blocks {
+        match b {
+            Block::Code { info, text, line, .. } if info.lang.as_deref() == Some("hayagriva") => {
+                out.push((text.as_str(), *line));
+            }
+            Block::List(l) => {
+                for item in &l.items {
+                    find_hayagriva_fences(&item.blocks, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every inline-bearing block, paired with the enclosing block's own
+/// `line` -- the finest position the AST tracks for one of its inlines,
+/// used to attribute an unresolved citation to at least the right block
+/// rather than nowhere at all.
+fn walk_inlines<'a>(blocks: &'a [Block], out: &mut Vec<(u32, &'a [Inline])>) {
+    for b in blocks {
+        match b {
+            Block::Heading { inlines, line, .. } | Block::Paragraph { inlines, line, .. } => {
+                out.push((*line, inlines));
+            }
+            Block::Table { header, rows, line, .. } => {
+                for cell in header {
+                    out.push((*line, cell));
+                }
+                for row in rows {
+                    for cell in row {
+                        out.push((*line, cell));
+                    }
+                }
+            }
+            Block::List(l) => {
+                for item in &l.items {
+                    walk_inlines(&item.blocks, out);
+                }
+            }
+            Block::Code { .. } | Block::ThematicBreak { .. } | Block::Passthrough { .. } => {}
+        }
+    }
+}
+
+fn collect_citation_keys(
+    inlines: &[Inline],
+    line: u32,
+    entries: &HashMap<String, BibEntry>,
+    seen: &mut HashSet<String>,
+    order: &mut Vec<String>,
+    diags: &mut Diags,
+) {
+    for i in inlines {
+        match i {
+            Inline::Citation { keys, .. } => {
+                for k in keys {
+                    if !entries.contains_key(k) {
+                        diags.warn(line, format!("citation key `{k}` is not in the bibliography"));
+                    }
+                    if seen.insert(k.clone()) {
+                        order.push(k.clone());
+                    }
+                }
+            }
+            Inline::Emph { inner, .. } | Inline::Strong { inner, .. } => {
+                collect_citation_keys(inner, line, entries, seen, order, diags)
+            }
+            Inline::Link { text, .. } => collect_citation_keys(text, line, entries, seen, order, diags),
+            Inline::Text(_) | Inline::Code(_) | Inline::WikiLink { .. } | Inline::SoftBreak | Inline::HardBreak => {}
+        }
+    }
+}
+```
+
 `[weave.html] css` and `[weave.pdf] template` are both a path to a
 local file, read once and handed to the renderer -- CSS as a parameter
 `weave_html::render` appends after `WEAVE_CSS`, a Typst template as a
@@ -342,6 +547,7 @@ fn render_pdf(
     name: &str,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    bibliography: Option<&Bibliography>,
     output: Option<&str>,
     toc: bool,
     figures_outside: bool,
@@ -363,7 +569,24 @@ fn render_pdf(
         }
     }
 
-    let body = typst::render(doc, title, toc, tables, &copied_images, figures_outside, diags);
+    // The identical copy-before-compile shape `images` already gets
+    // (decision 51): `render::typst` never touches a filesystem. The
+    // merged raw text goes to disk here, before `typst::render` is asked
+    // to emit a `#bibliography(...)` call pointing at it.
+    let bib_summary = bibliography.and_then(|bib| {
+        let dest = build_dir.join("bibliography.yml");
+        match fs::create_dir_all(&build_dir).and_then(|()| fs::write(&dest, &bib.raw)) {
+            Ok(()) => {
+                Some(BibliographySummary { valid_keys: bib.entries.keys().cloned().collect(), asset_path: "bibliography.yml".to_string() })
+            }
+            Err(e) => {
+                diags.warn(0, format!("could not write bibliography.yml into the build directory ({e}); not rendered"));
+                None
+            }
+        }
+    });
+
+    let body = typst::render(doc, title, toc, tables, &copied_images, figures_outside, bib_summary.as_ref(), diags);
     let weave_cfg = config.weave("pdf");
     let preamble =
         weave_cfg.as_ref().and_then(|w| w.template.clone()).and_then(|rel| read_asset(root, &rel, "template", diags));
@@ -702,6 +925,115 @@ mod tests {
         assert_eq!(image_ext("chart.jpeg"), Some("jpg"));
         assert_eq!(image_ext("chart.svg"), Some("svg"));
         assert_eq!(image_ext("data.csv"), None);
+    }
+
+    fn doc(source: &str) -> Document {
+        Document::parse(source, &mut Diags::new("t.md"))
+    }
+
+    #[test]
+    fn bibliography_is_none_when_neither_source_is_configured() {
+        let d = doc("# H\n\n[@key]\n");
+        let mut diags = Diags::new("t.md");
+        assert!(bibliography(&d, "t.md", Path::new("."), &mut diags).is_none());
+    }
+
+    #[test]
+    fn bibliography_from_a_hayagriva_fence_alone() {
+        let d = doc("```hayagriva\nnetwok2019:\n  title: A Paper\n```\n\n[@netwok2019]\n");
+        let mut diags = Diags::new("t.md");
+        let bib = bibliography(&d, "t.md", Path::new("."), &mut diags).unwrap();
+        assert!(bib.entries.contains_key("netwok2019"));
+        assert_eq!(bib.order, vec!["netwok2019".to_string()]);
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn bibliography_from_a_frontmatter_file_alone() {
+        let dir = scratch(&[
+            ("refs.yml", "netwok2019:\n  title: A Paper\n"),
+            ("a.md", "---\nbibliography: refs.yml\n---\n\n[@netwok2019]\n"),
+        ]);
+        let d = doc(&fs::read_to_string(dir.join("a.md")).unwrap());
+        let mut diags = Diags::new("a.md");
+        let bib = bibliography(&d, "a.md", &dir, &mut diags).unwrap();
+        assert!(bib.entries.contains_key("netwok2019"));
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn bibliography_merges_both_sources_fence_wins_a_duplicate_key() {
+        let dir = scratch(&[
+            ("refs.yml", "a:\n  title: External\n"),
+            ("doc.md", "---\nbibliography: refs.yml\n---\n\n```hayagriva\na:\n  title: Fence\n```\n\n[@a]\n"),
+        ]);
+        let d = doc(&fs::read_to_string(dir.join("doc.md")).unwrap());
+        let mut diags = Diags::new("doc.md");
+        let bib = bibliography(&d, "doc.md", &dir, &mut diags).unwrap();
+        assert_eq!(bib.entries["a"].title.as_deref(), Some("Fence"));
+        assert_eq!(diags.count(crate::diag::Level::Warn), 1);
+    }
+
+    #[test]
+    fn citation_order_spans_headings_and_list_items() {
+        let d = doc("```hayagriva\na:\n  title: A\nb:\n  title: B\n```\n\n## [@b]\n\n- [@a]\n");
+        let mut diags = Diags::new("t.md");
+        let bib = bibliography(&d, "t.md", Path::new("."), &mut diags).unwrap();
+        assert_eq!(bib.order, vec!["b".to_string(), "a".to_string()]);
+    }
+
+    #[test]
+    fn a_cited_key_absent_from_every_entry_warns() {
+        let d = doc("```hayagriva\na:\n  title: A\n```\n\n[@missing]\n");
+        let mut diags = Diags::new("t.md");
+        let bib = bibliography(&d, "t.md", Path::new("."), &mut diags).unwrap();
+        assert_eq!(diags.count(crate::diag::Level::Warn), 1);
+        assert!(bib.order.contains(&"missing".to_string()));
+    }
+
+    #[test]
+    fn an_uncited_entry_never_appears_in_the_ordered_list() {
+        let d = doc("```hayagriva\na:\n  title: A\nb:\n  title: B\n```\n\n[@a]\n");
+        let mut diags = Diags::new("t.md");
+        let bib = bibliography(&d, "t.md", Path::new("."), &mut diags).unwrap();
+        assert_eq!(bib.order, vec!["a".to_string()]);
+        assert!(bib.entries.contains_key("b"));
+    }
+
+    #[test]
+    fn a_second_hayagriva_fence_warns_and_is_ignored() {
+        let d = doc("```hayagriva\na:\n  title: A\n```\n\n```hayagriva\nb:\n  title: B\n```\n\n[@a]\n");
+        let mut diags = Diags::new("t.md");
+        let bib = bibliography(&d, "t.md", Path::new("."), &mut diags).unwrap();
+        assert!(bib.entries.contains_key("a"));
+        assert!(!bib.entries.contains_key("b"));
+        assert_eq!(diags.count(crate::diag::Level::Warn), 1);
+    }
+
+    #[test]
+    fn render_pdf_writes_bibliography_yml_matching_the_merged_raw_text() {
+        let dir = scratch(&[("a.md", "```hayagriva\na:\n  title: A\n```\n\n[@a]\n")]);
+        run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, false, false).unwrap();
+        let written = fs::read_to_string(dir.join(".dankg/build/weave/bibliography.yml")).unwrap();
+        assert_eq!(written, "a:\n  title: A\n");
+    }
+
+    #[test]
+    fn render_pdf_typ_emits_a_bibliography_call_and_a_real_citation() {
+        let dir = scratch(&[("a.md", "```hayagriva\na:\n  title: A\n```\n\n[@a]\n")]);
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, false, false).unwrap();
+        let typ = fs::read_to_string(report.typ_path.unwrap()).unwrap();
+        assert!(typ.contains("#bibliography(\"bibliography.yml\")"), "{typ}");
+        assert!(typ.contains("@a"), "{typ}");
+    }
+
+    #[test]
+    fn render_pdf_with_no_bibliography_emits_no_bibliography_call() {
+        let dir = scratch(&[("a.md", "# H\n\n[@a]\n")]);
+        let report = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, None, false, false).unwrap();
+        let typ = fs::read_to_string(report.typ_path.unwrap()).unwrap();
+        assert!(!typ.contains("#bibliography("), "{typ}");
+        assert!(!dir.join(".dankg/build/weave/bibliography.yml").exists());
     }
 }
 ```
