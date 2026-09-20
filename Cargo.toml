@@ -1,6 +1,6 @@
 [package]
 name = "dankg"
-version = "0.8.4"
+version = "0.8.5"
 edition = "2024"
 description = "A plaintext knowledge grapher"
 license = "GPL-3.0-or-later"
