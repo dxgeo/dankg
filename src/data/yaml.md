@@ -1,0 +1,690 @@
+# Data yaml
+
+`plan-weave-citations.md` (decision 58) needs a bibliography reader for
+Hayagriva's own YAML file format. Hayagriva's real shape needs two
+things a flat, two-level field matcher cannot give it: a block mapping
+or sequence nested to any depth, and an inline flow form (`[a, b]`,
+`{a: b}`) written on one line. This module is the generic layer that
+handles both, with no notion of Hayagriva's own field names at all.
+`data::bib` (decision 58, next) is the schema layer built on top of the
+tree this module produces.
+
+`YamlNode` is bounded on purpose (decision 1: no parsing crate for
+either layer) -- it supports exactly the constructs Hayagriva's own
+file format actually uses: block and flow collections, quoted and bare
+scalars, and `#` comments. It does not support anchors or aliases
+(`&x`/`*x`), tags (`!!str`), multi-document markers (`---`/`...`), or
+merge keys (`<<:`). None of these are part of Hayagriva's own spec. An
+author who writes one anyway gets a warning by line and that construct
+is dropped -- the rest of the document is kept, the same "warn and
+drop, never guess" stance `md/frontmatter.rs` already holds.
+
+<!-- dankg:depends target=../../architecture.md#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
+<!-- dankg:depends target=table.md#data-table quote="Two hand-rolled readers, no parsing crate for either" -->
+
+```rust name=module_doc path=data/yaml.rs
+//! A generic, bounded YAML-subset tree parser -- decision 58
+//! (`plan-weave-citations.md`). No notion of Hayagriva's own field names;
+//! `data::bib` is the schema layer built on top of `YamlNode`.
+//!
+//! Supports block and flow collections, quoted and bare scalars, and `#`
+//! comments -- exactly what Hayagriva's own file format uses. Anchors,
+//! aliases, tags, multi-document markers, and merge keys are not part of
+//! that format. None of them are supported here: an author who writes one
+//! gets a warning by line and that construct dropped, never guessed at.
+
+use crate::diag::Diags;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum YamlNode {
+    Scalar(String),
+    Seq(Vec<YamlNode>),
+    Map(Vec<(String, YamlNode)>),
+}
+```
+
+## Preprocessing: lines, indentation, comments
+
+The parser works over one preprocessed line list, not the raw text.
+Each kept line records its own 1-based line number (for diagnostics),
+its indentation (a count of leading spaces), and its content with any
+trailing comment already stripped and trailing whitespace already
+trimmed. A blank line or a comment-only line is dropped before the
+block parser ever sees it -- both are always legal and never warn. A
+line whose indentation mixes in a tab is dropped with a warning; this
+codebase's YAML subset only ever indents with spaces.
+
+```rust name=preprocess path=data/yaml.rs
+struct PLine {
+    line: u32,
+    indent: usize,
+    text: String,
+}
+
+fn preprocess(text: &str, diags: &mut Diags) -> Vec<PLine> {
+    let mut out = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = (i + 1) as u32;
+        let leading_spaces = raw.chars().take_while(|&c| c == ' ').count();
+        if raw.chars().nth(leading_spaces) == Some('\t') {
+            diags.warn(line, "tab indentation is not supported, ignored");
+            continue;
+        }
+        let content = &raw[leading_spaces..];
+        let stripped = strip_comment(content);
+        let trimmed = stripped.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "---" || trimmed == "..." {
+            diags.warn(line, "document markers (`---`/`...`) are not supported, ignored");
+            continue;
+        }
+        out.push(PLine { line, indent: leading_spaces, text: trimmed.to_string() });
+    }
+    out
+}
+
+/// A `#` never starts a comment inside a quoted string. Outside one, it
+/// starts a comment only at the very start of the content or right after
+/// whitespace -- what keeps a URL fragment like `page#3` from being read as
+/// a comment.
+fn strip_comment(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let (mut in_dq, mut in_sq) = (false, false);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_dq {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            in_dq = c != '"';
+        } else if in_sq {
+            if c == '\'' {
+                if chars.get(i + 1) == Some(&'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_sq = false;
+            }
+        } else {
+            match c {
+                '"' => in_dq = true,
+                '\'' => in_sq = true,
+                '#' if i == 0 || chars[i - 1].is_whitespace() => {
+                    return chars[..i].iter().collect();
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    chars.iter().collect()
+}
+```
+
+## The block parser
+
+`parse_block` dispatches on the first line's own shape: a line
+starting with `-` (alone, or followed by a space) starts a sequence;
+anything else starts a mapping. Both consume lines from the same
+shared index as they recurse. This way, a nested block's own lines are
+never double-counted by its parent.
+
+```rust name=block_parser path=data/yaml.rs
+pub fn parse(text: &str, diags: &mut Diags) -> YamlNode {
+    let lines = preprocess(text, diags);
+    if lines.is_empty() {
+        return YamlNode::Map(Vec::new());
+    }
+    let base = lines[0].indent;
+    let mut idx = 0;
+    let node = parse_block(&lines, &mut idx, base, diags);
+    if idx < lines.len() {
+        diags.warn(lines[idx].line, "unexpected content after the top-level value, ignored");
+    }
+    node
+}
+
+fn parse_block(lines: &[PLine], idx: &mut usize, base: usize, diags: &mut Diags) -> YamlNode {
+    if is_dash(&lines[*idx].text) {
+        parse_seq(lines, idx, base, diags)
+    } else {
+        parse_map(lines, idx, base, diags)
+    }
+}
+
+fn is_dash(text: &str) -> bool {
+    text == "-" || text.starts_with("- ")
+}
+```
+
+A mapping line's own key ends at the first top-level `:` -- one
+outside any quoted string, followed by whitespace or the end of the
+line. That last condition is what keeps a value like
+`url: http://example.com` from being misread as a second mapping: the
+colon inside the URL is never followed by whitespace. It is never a
+candidate for the split.
+
+```rust name=split_key_colon path=data/yaml.rs
+fn split_key_colon(s: &str) -> Option<(String, Option<String>)> {
+    let chars: Vec<char> = s.chars().collect();
+    let (mut in_dq, mut in_sq) = (false, false);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_dq {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            in_dq = c != '"';
+        } else if in_sq {
+            if c == '\'' {
+                if chars.get(i + 1) == Some(&'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_sq = false;
+            }
+        } else {
+            match c {
+                '"' => in_dq = true,
+                '\'' => in_sq = true,
+                ':' if chars.get(i + 1).map_or(true, |n| n.is_whitespace()) => {
+                    let key: String = chars[..i].iter().collect();
+                    let rest: String = chars[i + 1..].iter().collect();
+                    let rest = rest.trim().to_string();
+                    return Some((key.trim().to_string(), (!rest.is_empty()).then_some(rest)));
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+```
+
+A mapping entry's value is either the text already sitting after the
+colon on the same line, or -- when nothing follows -- a nested block
+read from the following, more deeply indented lines. `parse_map_entry`
+handles both, plus the two constructs this module refuses: a merge key
+(`<<:`) and an anchor, alias, or tag (a key or value starting with
+`&`, `*`, or `!`). Either one drops the whole entry, warns once, and
+still has to consume that entry's own nested lines -- `skip_nested`
+does that -- so a dropped key never desynchronizes the shared line
+index from the lines actually belonging to it.
+
+```rust name=parse_map_entry path=data/yaml.rs
+fn parse_map_entry(
+    text: &str,
+    line: u32,
+    base: usize,
+    lines: &[PLine],
+    idx: &mut usize,
+    diags: &mut Diags,
+) -> Option<(String, YamlNode)> {
+    let (raw_key, rest) = split_key_colon(text)?;
+    if raw_key == "<<" {
+        diags.warn(line, "merge keys (`<<:`) are not supported, ignored");
+        skip_nested(lines, idx, base, rest.is_none());
+        return None;
+    }
+    if starts_with_marker(&raw_key) {
+        diags.warn(line, "anchors, aliases, and tags are not supported, ignored");
+        skip_nested(lines, idx, base, rest.is_none());
+        return None;
+    }
+    let key = unquote(&raw_key);
+    let value = match rest {
+        Some(v) => parse_inline_value(&v, line, diags)?,
+        None if *idx < lines.len() && lines[*idx].indent > base => {
+            let child_base = lines[*idx].indent;
+            parse_block(lines, idx, child_base, diags)
+        }
+        None => YamlNode::Scalar(String::new()),
+    };
+    Some((key, value))
+}
+
+fn skip_nested(lines: &[PLine], idx: &mut usize, base: usize, has_nested: bool) {
+    if has_nested {
+        while *idx < lines.len() && lines[*idx].indent > base {
+            *idx += 1;
+        }
+    }
+}
+
+fn starts_with_marker(s: &str) -> bool {
+    matches!(s.chars().next(), Some('&') | Some('*') | Some('!'))
+}
+
+fn unquote(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    match chars.first() {
+        Some('"') => read_double_quoted(&chars, 0).map(|(v, _)| v).unwrap_or_else(|| s.to_string()),
+        Some('\'') => read_single_quoted(&chars, 0).map(|(v, _)| v).unwrap_or_else(|| s.to_string()),
+        _ => s.to_string(),
+    }
+}
+```
+
+A duplicate key within one mapping keeps the last value and warns --
+the same convention `md/frontmatter.rs` already established for its
+own duplicate keys.
+
+```rust name=parse_map path=data/yaml.rs
+fn parse_map(lines: &[PLine], idx: &mut usize, base: usize, diags: &mut Diags) -> YamlNode {
+    let mut pairs: Vec<(String, YamlNode)> = Vec::new();
+    while *idx < lines.len() && lines[*idx].indent == base {
+        if is_dash(&lines[*idx].text) {
+            diags.warn(lines[*idx].line, "a sequence item cannot appear where a mapping entry is expected, ignored");
+            *idx += 1;
+            continue;
+        }
+        let (line, text) = (lines[*idx].line, lines[*idx].text.clone());
+        if split_key_colon(&text).is_none() {
+            diags.warn(line, "mapping entry is not a `key: value` pair, ignored");
+            *idx += 1;
+            continue;
+        }
+        *idx += 1;
+        if let Some((key, value)) = parse_map_entry(&text, line, base, lines, idx, diags) {
+            insert_last_wins(&mut pairs, key, value, line, diags);
+        }
+    }
+    YamlNode::Map(pairs)
+}
+
+fn insert_last_wins(pairs: &mut Vec<(String, YamlNode)>, key: String, value: YamlNode, line: u32, diags: &mut Diags) {
+    match pairs.iter_mut().find(|(k, _)| *k == key) {
+        Some(existing) => {
+            diags.warn(line, format!("duplicate key `{key}`, last value wins"));
+            existing.1 = value;
+        }
+        None => pairs.push((key, value)),
+    }
+}
+```
+
+A sequence item is either a nested block (a dash with nothing else on
+its own line, followed by more deeply indented lines), an inline
+scalar or flow value, or -- Hayagriva's own compact shape for a
+structured person -- a mapping that starts on the dash's own line and
+continues on the following lines, each aligned to the column right
+after the dash. `child_base` is that column: `pl_indent` (the dash's
+own indentation) plus one for the dash itself plus however many spaces
+follow it.
+
+```rust name=parse_seq path=data/yaml.rs
+fn parse_seq(lines: &[PLine], idx: &mut usize, base: usize, diags: &mut Diags) -> YamlNode {
+    let mut items = Vec::new();
+    while *idx < lines.len() && lines[*idx].indent == base && is_dash(&lines[*idx].text) {
+        let (pl_line, pl_indent, pl_text) = (lines[*idx].line, lines[*idx].indent, lines[*idx].text.clone());
+        *idx += 1;
+        let rest = if pl_text == "-" { "" } else { &pl_text[1..] };
+        let after = rest.trim_start_matches(' ');
+        let spaces = rest.len() - after.len();
+
+        if after.is_empty() {
+            items.push(if *idx < lines.len() && lines[*idx].indent > base {
+                let child_base = lines[*idx].indent;
+                parse_block(lines, idx, child_base, diags)
+            } else {
+                YamlNode::Scalar(String::new())
+            });
+        } else if split_key_colon(after).is_some() {
+            let child_base = pl_indent + 1 + spaces;
+            let mut pairs = Vec::new();
+            if let Some((k, v)) = parse_map_entry(after, pl_line, child_base, lines, idx, diags) {
+                pairs.push((k, v));
+            }
+            while *idx < lines.len()
+                && lines[*idx].indent == child_base
+                && !is_dash(&lines[*idx].text)
+                && split_key_colon(&lines[*idx].text).is_some()
+            {
+                let (line, text) = (lines[*idx].line, lines[*idx].text.clone());
+                *idx += 1;
+                if let Some((k, v)) = parse_map_entry(&text, line, child_base, lines, idx, diags) {
+                    insert_last_wins(&mut pairs, k, v, line, diags);
+                }
+            }
+            items.push(YamlNode::Map(pairs));
+        } else if let Some(v) = parse_inline_value(after, pl_line, diags) {
+            items.push(v);
+        }
+    }
+    YamlNode::Seq(items)
+}
+```
+
+## Inline values: quoted scalars and flow collections
+
+An inline value is whatever text follows a mapping key's own colon, or
+a sequence item's own dash. `parse_inline_value` reads exactly one
+value and reports any leftover text on the same line, rather than
+silently truncating it -- an incomplete flow collection or a second
+value crammed onto one line is a real authoring mistake, not something
+worth guessing about.
+
+```rust name=parse_inline_value path=data/yaml.rs
+fn parse_inline_value(text: &str, line: u32, diags: &mut Diags) -> Option<YamlNode> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Some(YamlNode::Scalar(String::new()));
+    }
+    if starts_with_marker(t) {
+        diags.warn(line, "anchors, aliases, and tags are not supported, ignored");
+        return None;
+    }
+    let chars: Vec<char> = t.chars().collect();
+    let parsed = match chars[0] {
+        '[' => flow_seq(&chars, 0),
+        '{' => flow_map(&chars, 0),
+        '"' => read_double_quoted(&chars, 0).map(|(s, end)| (YamlNode::Scalar(s), end)),
+        '\'' => read_single_quoted(&chars, 0).map(|(s, end)| (YamlNode::Scalar(s), end)),
+        _ => return Some(YamlNode::Scalar(t.to_string())),
+    };
+    match parsed {
+        Some((node, end)) if chars[end..].iter().all(|c| c.is_whitespace()) => Some(node),
+        _ => {
+            diags.warn(line, "malformed flow or quoted value, ignored");
+            None
+        }
+    }
+}
+```
+
+The flow parser is a small recursive-descent reader over the same
+character slice, in the same shape as `data::table`'s own JSON reader:
+a comma-separated `[...]` sequence, a comma-separated `{key: value, ...}` mapping, and bare, single-, or double-quoted scalars as the leaf
+values either can hold.
+
+```rust name=flow_parser path=data/yaml.rs
+fn flow_seq(chars: &[char], pos: usize) -> Option<(YamlNode, usize)> {
+    let mut pos = skip_ws(chars, pos + 1);
+    let mut items = Vec::new();
+    if chars.get(pos) == Some(&']') {
+        return Some((YamlNode::Seq(items), pos + 1));
+    }
+    loop {
+        let (v, next) = flow_value(chars, pos)?;
+        items.push(v);
+        pos = skip_ws(chars, next);
+        match chars.get(pos) {
+            Some(',') => pos = skip_ws(chars, pos + 1),
+            Some(']') => return Some((YamlNode::Seq(items), pos + 1)),
+            _ => return None,
+        }
+    }
+}
+
+fn flow_map(chars: &[char], pos: usize) -> Option<(YamlNode, usize)> {
+    let mut pos = skip_ws(chars, pos + 1);
+    let mut pairs = Vec::new();
+    if chars.get(pos) == Some(&'}') {
+        return Some((YamlNode::Map(pairs), pos + 1));
+    }
+    loop {
+        let (key, next) = flow_key(chars, pos)?;
+        pos = skip_ws(chars, next);
+        if chars.get(pos) != Some(&':') {
+            return None;
+        }
+        pos = skip_ws(chars, pos + 1);
+        let (v, next) = flow_value(chars, pos)?;
+        pairs.push((key, v));
+        pos = skip_ws(chars, next);
+        match chars.get(pos) {
+            Some(',') => pos = skip_ws(chars, pos + 1),
+            Some('}') => return Some((YamlNode::Map(pairs), pos + 1)),
+            _ => return None,
+        }
+    }
+}
+
+fn flow_value(chars: &[char], pos: usize) -> Option<(YamlNode, usize)> {
+    match chars.get(pos)? {
+        '[' => flow_seq(chars, pos),
+        '{' => flow_map(chars, pos),
+        '"' => read_double_quoted(chars, pos).map(|(s, end)| (YamlNode::Scalar(s), end)),
+        '\'' => read_single_quoted(chars, pos).map(|(s, end)| (YamlNode::Scalar(s), end)),
+        _ => flow_token(chars, pos, &[',', ']', '}']).map(|(s, end)| (YamlNode::Scalar(s), end)),
+    }
+}
+
+fn flow_key(chars: &[char], pos: usize) -> Option<(String, usize)> {
+    match chars.get(pos)? {
+        '"' => read_double_quoted(chars, pos),
+        '\'' => read_single_quoted(chars, pos),
+        _ => flow_token(chars, pos, &[':']),
+    }
+}
+
+fn flow_token(chars: &[char], pos: usize, stop: &[char]) -> Option<(String, usize)> {
+    let mut end = pos;
+    while end < chars.len() && !stop.contains(&chars[end]) {
+        end += 1;
+    }
+    if end == pos {
+        return None;
+    }
+    let s: String = chars[pos..end].iter().collect();
+    Some((s.trim().to_string(), end))
+}
+
+fn skip_ws(chars: &[char], mut pos: usize) -> usize {
+    while matches!(chars.get(pos), Some(' ') | Some('\t')) {
+        pos += 1;
+    }
+    pos
+}
+```
+
+A double-quoted scalar honours backslash escapes; a single-quoted one
+honours only a doubled `''` as an escaped quote, YAML's own rule for
+that form. Neither may contain a literal newline -- both are read from
+one already-preprocessed line, where a comment past the closing quote,
+if any, has already been stripped.
+
+```rust name=quoted_scalars path=data/yaml.rs
+fn read_double_quoted(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut i = start + 1;
+    let mut s = String::new();
+    loop {
+        match *chars.get(i)? {
+            '"' => return Some((s, i + 1)),
+            '\n' => return None,
+            '\\' => {
+                i += 1;
+                match *chars.get(i)? {
+                    '"' => s.push('"'),
+                    '\\' => s.push('\\'),
+                    '/' => s.push('/'),
+                    'n' => s.push('\n'),
+                    't' => s.push('\t'),
+                    'r' => s.push('\r'),
+                    '0' => s.push('\0'),
+                    'u' => {
+                        let mut code = 0u32;
+                        for _ in 0..4 {
+                            i += 1;
+                            code = code * 16 + chars.get(i)?.to_digit(16)?;
+                        }
+                        s.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                    }
+                    c => s.push(c),
+                }
+                i += 1;
+            }
+            c => {
+                s.push(c);
+                i += 1;
+            }
+        }
+    }
+}
+
+fn read_single_quoted(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut i = start + 1;
+    let mut s = String::new();
+    loop {
+        match *chars.get(i)? {
+            '\'' if chars.get(i + 1) == Some(&'\'') => {
+                s.push('\'');
+                i += 2;
+            }
+            '\'' => return Some((s, i + 1)),
+            '\n' => return None,
+            c => {
+                s.push(c);
+                i += 1;
+            }
+        }
+    }
+}
+```
+
+## Tests
+
+```rust name=tests path=data/yaml.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diag::Diags;
+
+    fn parse_ok(text: &str) -> (YamlNode, Diags) {
+        let mut diags = Diags::new("t.yml");
+        let node = parse(text, &mut diags);
+        (node, diags)
+    }
+
+    fn map(pairs: Vec<(&str, YamlNode)>) -> YamlNode {
+        YamlNode::Map(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+
+    fn scalar(s: &str) -> YamlNode {
+        YamlNode::Scalar(s.to_string())
+    }
+
+    #[test]
+    fn nested_mappings_three_levels_deep() {
+        let (node, diags) = parse_ok("a:\n  b:\n    c: d\n");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(node, map(vec![("a", map(vec![("b", map(vec![("c", scalar("d"))]))]))]));
+    }
+
+    #[test]
+    fn a_block_sequence() {
+        let (node, diags) = parse_ok("- a\n- b\n");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(node, YamlNode::Seq(vec![scalar("a"), scalar("b")]));
+    }
+
+    #[test]
+    fn a_sequence_of_mappings_in_compact_form() {
+        let (node, diags) = parse_ok("author:\n  - name: Smith\n    given-name: John\n  - name: Doe\n");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(
+            node,
+            map(vec![(
+                "author",
+                YamlNode::Seq(vec![
+                    map(vec![("name", scalar("Smith")), ("given-name", scalar("John"))]),
+                    map(vec![("name", scalar("Doe"))]),
+                ])
+            )])
+        );
+    }
+
+    #[test]
+    fn inline_flow_sequence_and_mapping() {
+        let (node, diags) = parse_ok("a: [x, y]\nb: {c: d, e: f}\n");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(
+            node,
+            map(vec![
+                ("a", YamlNode::Seq(vec![scalar("x"), scalar("y")])),
+                ("b", map(vec![("c", scalar("d")), ("e", scalar("f"))])),
+            ])
+        );
+    }
+
+    #[test]
+    fn single_and_double_quoted_scalars_with_escapes() {
+        let (node, diags) = parse_ok("a: \"line\\nbreak\"\nb: 'it''s'\n");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(node, map(vec![("a", scalar("line\nbreak")), ("b", scalar("it's"))]));
+    }
+
+    #[test]
+    fn comment_stripped_outside_quotes_kept_inside() {
+        let (node, diags) = parse_ok("a: b # a comment\nc: \"# not a comment\"\n");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(node, map(vec![("a", scalar("b")), ("c", scalar("# not a comment"))]));
+    }
+
+    #[test]
+    fn anchor_alias_tag_and_document_marker_warn_and_drop_the_rest_kept() {
+        let (node, diags) = parse_ok("---\na: &x b\nc: *x\nd: !!str e\nf: g\n");
+        assert_eq!(diags.count(crate::diag::Level::Warn), 4);
+        assert_eq!(node, map(vec![("f", scalar("g"))]));
+    }
+
+    #[test]
+    fn merge_key_warns_and_drops_the_entry() {
+        let (node, diags) = parse_ok("<<: x\na: b\n");
+        assert_eq!(diags.count(crate::diag::Level::Warn), 1);
+        assert_eq!(node, map(vec![("a", scalar("b"))]));
+    }
+
+    #[test]
+    fn duplicate_key_warns_and_last_wins() {
+        let (node, diags) = parse_ok("a: b\na: c\n");
+        assert_eq!(diags.count(crate::diag::Level::Warn), 1);
+        assert_eq!(node, map(vec![("a", scalar("c"))]));
+    }
+
+    #[test]
+    fn tab_indentation_warns_and_the_line_is_dropped() {
+        let (node, diags) = parse_ok("a: b\n\tc: d\n");
+        assert_eq!(diags.count(crate::diag::Level::Warn), 1);
+        assert_eq!(node, map(vec![("a", scalar("b"))]));
+    }
+
+    #[test]
+    fn a_url_value_is_not_mistaken_for_a_second_key() {
+        let (node, diags) = parse_ok("url: http://example.com/x\n");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(node, map(vec![("url", scalar("http://example.com/x"))]));
+    }
+
+    #[test]
+    fn a_bare_scalar_person_string_in_a_sequence() {
+        let (node, diags) = parse_ok("author:\n  - Smith, John\n  - Doe, Jane\n");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(
+            node,
+            map(vec![("author", YamlNode::Seq(vec![scalar("Smith, John"), scalar("Doe, Jane")]))])
+        );
+    }
+
+    #[test]
+    fn empty_input_is_an_empty_mapping() {
+        let (node, diags) = parse_ok("");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(node, map(vec![]));
+    }
+
+    #[test]
+    fn a_dangling_key_with_no_value_is_an_empty_scalar() {
+        let (node, diags) = parse_ok("a:\nb: c\n");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+        assert_eq!(node, map(vec![("a", scalar("")), ("b", scalar("c"))]));
+    }
+}
+```
