@@ -61,7 +61,7 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
 
     let report = match format {
         Format::Html => {
-            render_html(&doc, &title, &config, &root, &tables, &images, output, figures_outside, &mut diags)?
+            render_html(&doc, &title, &config, &root, &tables, &images, bib.as_ref(), output, figures_outside, &mut diags)?
         }
         Format::Pdf => render_pdf(
             &doc, &title, &config, &root, &name, &tables, &images, bib.as_ref(), output, toc, figures_outside,
@@ -353,12 +353,15 @@ fn render_html(
     root: &Path,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    bibliography: Option<&Bibliography>,
     output: Option<&str>,
     figures_outside: bool,
     diags: &mut Diags,
 ) -> Result<Report, String> {
     let extra_css = config.weave("html").and_then(|w| w.css).and_then(|rel| read_asset(root, &rel, "css", diags));
-    let rendered = weave_html::render(doc, title, extra_css.as_deref(), tables, images, figures_outside, diags);
+    let html_bib = bibliography.map(|bib| weave_html::Bibliography { entries: &bib.entries, order: &bib.order });
+    let rendered =
+        weave_html::render(doc, title, extra_css.as_deref(), tables, images, figures_outside, html_bib.as_ref(), diags);
 
     let written = match output {
         Some(p) => {

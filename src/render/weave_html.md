@@ -24,6 +24,7 @@ follows, not code it calls.
 //! `<label>`, and a `:checked` sibling selector. No JavaScript exists
 //! for it to misfire.
 
+use crate::data::bib::{BibEntry, Person, SerialNumber};
 use crate::data::table::{self, TableData};
 use crate::diag::Diags;
 use crate::eval::result::{self, Pair};
@@ -32,6 +33,22 @@ use crate::md::{Align, Block, Document, InfoString, Inline, List};
 use crate::render::assets;
 use std::collections::HashMap;
 use std::fmt::Write as _;
+
+/// What HTML needs to render both citations and a real reference list --
+/// unlike `render::typst::BibliographySummary`, this keeps every entry's
+/// own fields, since there is no external compiler here to hand a real
+/// bibliography file to and defer formatting to (decision 59). Built from
+/// `weave::Bibliography`'s own two relevant fields at the call site, not a
+/// dependency on `weave` itself -- the same layering `data::bib`'s shared
+/// types already give both this module and `weave.rs` independently.
+pub struct Bibliography<'a> {
+    pub entries: &'a HashMap<String, BibEntry>,
+    /// Every cited key, resolved or not, in first-appearance order.
+    /// Numbering (both the in-text link and the reference list's own
+    /// `<li>`) counts only the resolved subset -- an unresolved key never
+    /// consumes a number, matching its own unlinked `[?]` in-text marker.
+    pub order: &'a [String],
+}
 
 /// `extra_css`, from `[weave.html] css` (decision 43), is appended after
 /// `WEAVE_CSS` inside the same `<style>` tag rather than replacing it.
@@ -46,6 +63,7 @@ pub fn render(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     figures_outside: bool,
+    bibliography: Option<&Bibliography>,
     diags: &mut Diags,
 ) -> String {
     let slugs = heading_slugs(doc);
@@ -69,7 +87,13 @@ pub fn render(
 
     out.push_str("<main>\n");
     let _ = writeln!(out, "<h1>{}</h1>", escape(title));
-    blocks(&mut out, &doc.blocks, &slugs, tables, images, figures_outside, diags);
+    blocks(&mut out, &doc.blocks, &slugs, tables, images, figures_outside, bibliography, diags);
+    // Unconditionally at the end, never at the `hayagriva` fence's own
+    // position (decision 59) -- the same fixed structural placement
+    // `render::typst`'s own `#bibliography(...)` call gets.
+    if let Some(bib) = bibliography {
+        reference_list_html(&mut out, bib);
+    }
     out.push_str("</main>\n</body>\n</html>\n");
     out
 }
@@ -220,6 +244,7 @@ fn blocks(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     figures_outside: bool,
+    bibliography: Option<&Bibliography>,
     diags: &mut Diags,
 ) {
     let mut i = 0;
@@ -243,7 +268,7 @@ fn blocks(
                 continue;
             }
         }
-        block(out, &items[i], slugs, tables, images, figures_outside, diags);
+        block(out, &items[i], slugs, tables, images, figures_outside, bibliography, diags);
         i += 1;
     }
 }
@@ -255,15 +280,16 @@ fn block(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     figures_outside: bool,
+    bibliography: Option<&Bibliography>,
     diags: &mut Diags,
 ) {
     match b {
         Block::Heading { level, inlines, line } => {
             let id = slugs.get(line).map(String::as_str).unwrap_or("");
-            let _ = writeln!(out, "<h{level} id=\"{id}\">{}</h{level}>", inline_html(inlines));
+            let _ = writeln!(out, "<h{level} id=\"{id}\">{}</h{level}>", inline_html(inlines, bibliography));
         }
         Block::Paragraph { inlines, .. } => {
-            let _ = writeln!(out, "<p>{}</p>", inline_html(inlines));
+            let _ = writeln!(out, "<p>{}</p>", inline_html(inlines, bibliography));
         }
         Block::Code { info, text, line, .. } => {
             // A lone block has no separate output half, so
@@ -273,14 +299,14 @@ fn block(
                 code_or_data_table(out, info, text, *line, diags);
             }
         }
-        Block::List(l) => list(out, l, slugs, tables, images, figures_outside, diags),
+        Block::List(l) => list(out, l, slugs, tables, images, figures_outside, bibliography, diags),
         Block::ThematicBreak { .. } => out.push_str("<hr>\n"),
         // Outside the subset. Escaped, not raw: an unparsed construct
         // must never become unvalidated HTML.
         Block::Passthrough { text, .. } => {
             let _ = writeln!(out, "<pre class=\"passthrough\">{}</pre>", escape(text));
         }
-        Block::Table { aligns, header, rows, .. } => table_block(out, aligns, header, rows),
+        Block::Table { aligns, header, rows, .. } => table_block(out, aligns, header, rows, bibliography),
     }
 }
 
@@ -449,6 +475,7 @@ fn list(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     figures_outside: bool,
+    bibliography: Option<&Bibliography>,
     diags: &mut Diags,
 ) {
     let tag = if l.ordered { "ol" } else { "ul" };
@@ -459,7 +486,7 @@ fn list(
     }
     for item in &l.items {
         out.push_str("<li>");
-        blocks(out, &item.blocks, slugs, tables, images, figures_outside, diags);
+        blocks(out, &item.blocks, slugs, tables, images, figures_outside, bibliography, diags);
         out.push_str("</li>\n");
     }
     let _ = writeln!(out, "</{tag}>");
@@ -521,14 +548,20 @@ row there reads as empty cells via `.get(i)` instead, since
 `TableData` itself is never padded either.
 
 ```rust name=table path=render/weave_html.rs
-fn table_block(out: &mut String, aligns: &[Align], header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) {
+fn table_block(
+    out: &mut String,
+    aligns: &[Align],
+    header: &[Vec<Inline>],
+    rows: &[Vec<Vec<Inline>>],
+    bibliography: Option<&Bibliography>,
+) {
     let columns = header.len();
     out.push_str("<table>\n<thead>\n<tr>\n");
     for (i, cell) in header.iter().enumerate() {
         out.push_str("<th");
         push_align(out, aligns.get(i).copied());
         out.push('>');
-        out.push_str(&inline_html(cell));
+        out.push_str(&inline_html(cell, bibliography));
         out.push_str("</th>\n");
     }
     out.push_str("</tr>\n</thead>\n<tbody>\n");
@@ -539,7 +572,7 @@ fn table_block(out: &mut String, aligns: &[Align], header: &[Vec<Inline>], rows:
             push_align(out, aligns.get(i).copied());
             out.push('>');
             if let Some(cell) = row.get(i) {
-                out.push_str(&inline_html(cell));
+                out.push_str(&inline_html(cell, bibliography));
             }
             out.push_str("</td>\n");
         }
@@ -582,7 +615,7 @@ fn data_table(out: &mut String, data: &TableData) {
 ## Inline HTML and escaping
 
 ```rust name=inline_html path=render/weave_html.rs
-fn inline_html(inlines: &[Inline]) -> String {
+fn inline_html(inlines: &[Inline], bibliography: Option<&Bibliography>) -> String {
     let mut out = String::new();
     for i in inlines {
         match i {
@@ -594,12 +627,12 @@ fn inline_html(inlines: &[Inline]) -> String {
             }
             Inline::Emph { inner, .. } => {
                 out.push_str("<em>");
-                out.push_str(&inline_html(inner));
+                out.push_str(&inline_html(inner, bibliography));
                 out.push_str("</em>");
             }
             Inline::Strong { inner, .. } => {
                 out.push_str("<strong>");
-                out.push_str(&inline_html(inner));
+                out.push_str(&inline_html(inner, bibliography));
                 out.push_str("</strong>");
             }
             Inline::Link { dest, title, text } => {
@@ -612,7 +645,7 @@ fn inline_html(inlines: &[Inline]) -> String {
                     out.push('"');
                 }
                 out.push('>');
-                out.push_str(&inline_html(text));
+                out.push_str(&inline_html(text, bibliography));
                 out.push_str("</a>");
             }
             // Weave is single-file (decision 41): there is no corpus to
@@ -621,18 +654,86 @@ fn inline_html(inlines: &[Inline]) -> String {
             Inline::WikiLink { target, label } => {
                 out.push_str(&escape(label.as_deref().unwrap_or(target)));
             }
-            // No bibliography is threaded through yet (decision 59 lands
-            // with the `bibliography()` pre-pass) -- every citation takes
-            // the "no bibliography configured" fallback for now: its own
-            // literal source text, escaped exactly like ordinary prose.
-            Inline::Citation { keys, narrative } => {
-                out.push_str(&escape(&citation_source(keys, *narrative)));
-            }
+            Inline::Citation { keys, narrative } => citation_html(&mut out, keys, *narrative, bibliography),
             Inline::SoftBreak => out.push('\n'),
             Inline::HardBreak => out.push_str("<br>\n"),
         }
     }
     out
+}
+
+/// No bibliography configured at all: the identical literal-text fallback
+/// `render::typst` gets, escaped exactly like ordinary prose (decision 59).
+/// `weave::bibliography`'s own pre-pass has already warned about an
+/// unresolved key with a real line number. An unresolved key here is
+/// still shown -- unlinked `[?]`, or the literal `@key` text for a
+/// narrative citation -- but not warned about a second time.
+fn citation_html(out: &mut String, keys: &[String], narrative: bool, bibliography: Option<&Bibliography>) {
+    let Some(bib) = bibliography else {
+        out.push_str(&escape(&citation_source(keys, narrative)));
+        return;
+    };
+    if narrative {
+        let key = &keys[0];
+        match bib.entries.get(key).and_then(narrative_citation_text) {
+            Some(text) => {
+                let _ = write!(out, "<a href=\"#ref-{}\">{text}</a>", escape_attr(key));
+            }
+            None => out.push_str(&escape(&citation_source(keys, true))),
+        }
+        return;
+    }
+    out.push_str("<span class=\"citation\">[");
+    let links: Vec<String> = keys
+        .iter()
+        .map(|k| match citation_position(bib, k) {
+            Some(n) => format!("<a href=\"#ref-{}\">{}</a>", escape_attr(k), n + 1),
+            None => "[?]".to_string(),
+        })
+        .collect();
+    out.push_str(&links.join(", "));
+    out.push_str("]</span>");
+}
+
+/// A cited key's position among the *resolved* cited keys only, in
+/// first-appearance order -- what both the in-text link and the reference
+/// list's own `<li>` number by. An unresolved key is excluded from the
+/// count entirely, not just unlinked: it never occupies a number another
+/// citation would otherwise have to skip over.
+fn citation_position(bib: &Bibliography, key: &str) -> Option<usize> {
+    if !bib.entries.contains_key(key) {
+        return None;
+    }
+    bib.order.iter().filter(|k| bib.entries.contains_key(k.as_str())).position(|k| k == key)
+}
+
+/// `Family (Year)`/`Family & Family (Year)`/`Family et al. (Year)` -- the
+/// identical family-name extraction and author-count join
+/// `reference_entry_html`'s own author line below uses. `None` when the
+/// entry has no author or no four-digit leading year to build one from;
+/// the caller falls back to the citation's own literal text in that case,
+/// the same as a key that never resolved at all.
+fn narrative_citation_text(entry: &BibEntry) -> Option<String> {
+    let year = entry.date.as_deref().and_then(leading_year)?;
+    let who = authors_display(&entry.authors)?;
+    Some(format!("{who} ({year})"))
+}
+
+fn authors_display(authors: &[Person]) -> Option<String> {
+    match authors {
+        [] => None,
+        [a] => Some(escape(&a.name)),
+        [a, b] => Some(format!("{} &amp; {}", escape(&a.name), escape(&b.name))),
+        [a, ..] => Some(format!("{} et al.", escape(&a.name))),
+    }
+}
+
+/// A date's own leading four-digit run -- Hayagriva dates are ISO-ish
+/// (`2020`, `2020-01`, `2020-01-15`), always year-first when a year is
+/// present at all.
+fn leading_year(date: &str) -> Option<String> {
+    let digits: String = date.chars().take_while(|c| c.is_ascii_digit()).collect();
+    (digits.len() == 4).then_some(digits)
 }
 
 /// A citation's own original source text -- `[@a; @b]` or `@key` -- shared
@@ -676,6 +777,184 @@ fn escape_attr(s: &str) -> String {
 }
 ```
 
+## The reference list
+
+HTML has no citation engine to defer to the way Typst's own
+`#bibliography(...)` does (decision 1 rules out a CSL/citeproc crate,
+and there is no external command to shell out to the way
+`typst compile`/`duckdb` get one, since this has to run inline during
+HTML rendering). So this is dankg's own complete field-by-field
+formatter instead of feature parity with Typst's -- one fixed,
+hand-built, non-configurable, non-CSL format, not an attempt at
+APA/MLA/Chicago accuracy and not varying by an entry's own `kind`.
+"Complete" means every field shows when present. Most fields are
+simply absent on most entries. One uniform order already produces a
+reasonable-looking entry regardless of what kind of source it is.
+
+Field order is fixed: authors, `(year)`, title, editors, any
+`affiliated` persons, the container chain (`parent`, walked outward),
+edition, location, organization, publisher, page-range/page-total,
+volume-total, chapter, time-range/runtime, language, genre, a
+serial-number, a `url` (with `url_date` alongside it), then
+archive/archive-location/call-number, and finally note/abstract as
+trailing free text. Every present part joins with `. `, the whole
+entry closed with one final period -- a plain sentence-like run, not a
+styled citation.
+
+```rust name=reference_list path=render/weave_html.rs
+fn reference_list_html(out: &mut String, bib: &Bibliography) {
+    out.push_str("<ol class=\"reference-list\">\n");
+    for key in bib.order.iter().filter(|k| bib.entries.contains_key(k.as_str())) {
+        let entry = &bib.entries[key];
+        let _ = writeln!(out, "<li id=\"ref-{}\">{}</li>", escape_attr(key), reference_entry_html(entry));
+    }
+    out.push_str("</ol>\n");
+}
+
+fn reference_entry_html(entry: &BibEntry) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    let authors = authors_display(&entry.authors);
+    let year = entry.date.as_deref().and_then(leading_year);
+    match (authors, year) {
+        (Some(a), Some(y)) => parts.push(format!("{a} ({y})")),
+        (Some(a), None) => parts.push(a),
+        (None, Some(y)) => parts.push(format!("({y})")),
+        (None, None) => {}
+    }
+    if let Some(t) = &entry.title {
+        parts.push(escape(t));
+    }
+    if !entry.editors.is_empty() {
+        let names: Vec<String> = entry.editors.iter().map(|p| escape(&p.name)).collect();
+        parts.push(format!("ed. {}", names.join(", ")));
+    }
+    for a in &entry.affiliated {
+        parts.push(format!("{}: {}", escape(a.role.as_deref().unwrap_or("contributor")), escape(&a.person.name)));
+    }
+    if let Some(chain) = container_chain_html(entry) {
+        parts.push(chain);
+    }
+    if let Some(v) = &entry.edition {
+        parts.push(format!("{} ed.", escape(v)));
+    }
+    if let Some(v) = &entry.location {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.organization {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.publisher {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.page_range {
+        parts.push(format!("pp. {}", escape(v)));
+    }
+    if let Some(v) = &entry.page_total {
+        parts.push(format!("{} pp.", escape(v)));
+    }
+    if let Some(v) = &entry.volume_total {
+        parts.push(format!("{} vols.", escape(v)));
+    }
+    if let Some(v) = &entry.chapter {
+        parts.push(format!("ch. {}", escape(v)));
+    }
+    if let Some(v) = &entry.time_range {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.runtime {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.language {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.genre {
+        parts.push(escape(v));
+    }
+    if let Some(sn) = entry.serial_number.as_ref().and_then(serial_number_html) {
+        parts.push(sn);
+    }
+    if let Some(u) = &entry.url {
+        let mut line = format!("<a href=\"{}\">{}</a>", escape_attr(u), escape(u));
+        if let Some(d) = &entry.url_date {
+            let _ = write!(line, " (accessed {})", escape(d));
+        }
+        parts.push(line);
+    }
+    if let Some(v) = &entry.archive {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.archive_location {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.call_number {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.note {
+        parts.push(escape(v));
+    }
+    if let Some(v) = &entry.abstract_ {
+        parts.push(escape(v));
+    }
+
+    format!("{}.", parts.join(". "))
+}
+
+/// Walks `parent` outward one step per level: the outermost ancestor's own
+/// title is the container's name (`In <i>Journal</i>`). The first
+/// `volume`/`issue` found at any level along the way (typically the issue,
+/// one level in from the journal) appends as `vol. N, no. M`. An entry
+/// with more than one `parent` -- Hayagriva allows a list -- shows the
+/// first chain as the primary container; any further entries in that list
+/// append as their own `also in: <title>`, one step of their own chain
+/// only, not walked further outward. This is dankg's own fixed
+/// simplification, not real CSL container logic (decision 59's own scope).
+fn container_chain_html(entry: &BibEntry) -> Option<String> {
+    let first = entry.parent.first()?;
+    let mut chain = vec![first];
+    let mut cur = first;
+    while let Some(next) = cur.parent.first() {
+        chain.push(next);
+        cur = next;
+    }
+    let outermost = *chain.last()?;
+    let title = outermost.title.as_deref()?;
+    let mut line = format!("In <i>{}</i>", escape(title));
+    if let Some(v) = chain.iter().find_map(|e| e.volume.as_deref()) {
+        let _ = write!(line, ", vol. {}", escape(v));
+    }
+    if let Some(v) = chain.iter().find_map(|e| e.issue.as_deref()) {
+        let _ = write!(line, ", no. {}", escape(v));
+    }
+    for extra in &entry.parent[1..] {
+        if let Some(t) = &extra.title {
+            let _ = write!(line, "; also in: {}", escape(t));
+        }
+    }
+    Some(line)
+}
+
+/// A `doi` renders as a real link (`https://doi.org/<doi>`); every other
+/// identifier Hayagriva's `serial-number` can carry is labeled plain text.
+fn serial_number_html(sn: &SerialNumber) -> Option<String> {
+    match sn {
+        SerialNumber::Plain(s) => Some(escape(s)),
+        SerialNumber::Structured { doi, isbn, issn, pmid, pmcid, arxiv, serial } => {
+            let mut parts = Vec::new();
+            if let Some(d) = doi {
+                parts.push(format!("<a href=\"https://doi.org/{}\">doi:{}</a>", escape_attr(d), escape(d)));
+            }
+            for (label, value) in [("isbn", isbn), ("issn", issn), ("pmid", pmid), ("pmcid", pmcid), ("arxiv", arxiv), ("serial", serial)] {
+                if let Some(v) = value {
+                    parts.push(format!("{label}: {}", escape(v)));
+                }
+            }
+            (!parts.is_empty()).then_some(parts.join(", "))
+        }
+    }
+}
+```
+
 ## Tests
 
 ```rust name=tests path=render/weave_html.rs
@@ -701,7 +980,7 @@ mod tests {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, tables, images, figures_outside, &mut diags);
+        let out = render(&doc, "Title", None, tables, images, figures_outside, None, &mut diags);
         (out, diags)
     }
 
@@ -1087,14 +1366,130 @@ mod tests {
     fn extra_css_is_appended_after_weave_css_not_swapped_in() {
         let mut diags = Diags::new("t.md");
         let doc = Document::parse("# H\n", &mut diags);
-        let out =
-            render(&doc, "Title", Some("body { font-family: serif; }"), &HashMap::new(), &HashMap::new(), false, &mut diags);
+        let out = render(
+            &doc,
+            "Title",
+            Some("body { font-family: serif; }"),
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            None,
+            &mut diags,
+        );
         let style_start = out.find("<style>").unwrap();
         let style_end = out.find("</style>").unwrap();
         let style = &out[style_start..style_end];
         let base_pos = style.find(":root {").unwrap();
         let extra_pos = style.find("font-family: serif").unwrap();
         assert!(base_pos < extra_pos, "custom CSS should come after WEAVE_CSS: {style}");
+    }
+
+    fn render_doc_with_bib(source: &str, yaml: &str, order: &[&str]) -> String {
+        let mut parse_diags = Diags::new("t.md");
+        let doc = Document::parse(source, &mut parse_diags);
+        let mut bib_diags = Diags::new("t.yml");
+        let entries: HashMap<String, BibEntry> =
+            crate::data::bib::parse(yaml, &mut bib_diags).into_iter().map(|e| (e.key.clone(), e)).collect();
+        let order: Vec<String> = order.iter().map(|s| s.to_string()).collect();
+        let bib = Bibliography { entries: &entries, order: &order };
+        let mut diags = Diags::new("t.md");
+        render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), false, Some(&bib), &mut diags)
+    }
+
+    #[test]
+    fn a_bracketed_citation_links_to_the_reference_with_the_right_ordinal() {
+        let out = render_doc_with_bib("[@a]\n", "a:\n  type: article\n  title: A\n", &["a"]);
+        assert!(out.contains("<a href=\"#ref-a\">1</a>"), "{out}");
+        assert!(out.contains("id=\"ref-a\""), "{out}");
+    }
+
+    #[test]
+    fn multiple_keys_in_one_bracket_render_one_group_with_both_links() {
+        let yaml = "a:\n  type: article\n  title: A\nb:\n  type: article\n  title: B\n";
+        let out = render_doc_with_bib("[@a; @b]\n", yaml, &["a", "b"]);
+        assert!(
+            out.contains("<span class=\"citation\">[<a href=\"#ref-a\">1</a>, <a href=\"#ref-b\">2</a>]</span>"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_narrative_citation_with_two_authors() {
+        let yaml = "a:\n  type: article\n  title: A\n  author:\n    - Smith, John\n    - Doe, Jane\n  date: 2020\n";
+        let out = render_doc_with_bib("@a argues\n", yaml, &["a"]);
+        assert!(out.contains("<a href=\"#ref-a\">Smith &amp; Doe (2020)</a>"), "{out}");
+    }
+
+    #[test]
+    fn a_narrative_citation_with_three_plus_authors() {
+        let yaml =
+            "a:\n  type: article\n  title: A\n  author:\n    - Smith, John\n    - Doe, Jane\n    - Lee, Kim\n  date: 2020\n";
+        let out = render_doc_with_bib("@a argues\n", yaml, &["a"]);
+        assert!(out.contains("<a href=\"#ref-a\">Smith et al. (2020)</a>"), "{out}");
+    }
+
+    #[test]
+    fn a_narrative_citation_whose_key_does_not_resolve_falls_back_unlinked() {
+        let out = render_doc_with_bib("@missing argues\n", "a:\n  type: article\n  title: A\n", &["missing"]);
+        assert!(out.contains("@missing"), "{out}");
+        assert!(!out.contains("<a href=\"#ref-missing\""), "{out}");
+    }
+
+    #[test]
+    fn no_bibliography_configured_shows_the_literal_source_text() {
+        let mut parse_diags = Diags::new("t.md");
+        let doc = Document::parse("[@a]\n\n@b argues\n", &mut parse_diags);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        assert!(out.contains("[@a]"), "{out}");
+        assert!(out.contains("@b argues"), "{out}");
+    }
+
+    #[test]
+    fn editor_and_affiliated_translator_both_render() {
+        let yaml = "a:\n  type: article\n  title: A\n  editor: Ed, One\n  affiliated:\n    - role: translator\n      names: Trans, Lee\n";
+        let out = render_doc_with_bib("[@a]\n", yaml, &["a"]);
+        assert!(out.contains("ed. Ed"), "{out}");
+        assert!(out.contains("translator: Trans"), "{out}");
+    }
+
+    #[test]
+    fn a_two_level_parent_chain_renders_the_container_line() {
+        let yaml =
+            "a:\n  type: article\n  title: A\n  parent:\n    title: Issue\n    volume: 3\n    issue: 2\n    parent:\n      title: Journal\n";
+        let out = render_doc_with_bib("[@a]\n", yaml, &["a"]);
+        assert!(out.contains("In <i>Journal</i>, vol. 3, no. 2"), "{out}");
+    }
+
+    #[test]
+    fn two_parent_entries_render_the_second_as_also_in() {
+        let yaml = "a:\n  type: article\n  title: A\n  parent:\n    - title: P1\n    - title: P2\n";
+        let out = render_doc_with_bib("[@a]\n", yaml, &["a"]);
+        assert!(out.contains("In <i>P1</i>"), "{out}");
+        assert!(out.contains("also in: P2"), "{out}");
+    }
+
+    #[test]
+    fn a_structured_serial_number_renders_a_doi_link_and_plain_isbn() {
+        let yaml = "a:\n  type: article\n  title: A\n  serial-number:\n    doi: 10.1/x\n    isbn: 123\n";
+        let out = render_doc_with_bib("[@a]\n", yaml, &["a"]);
+        assert!(out.contains("<a href=\"https://doi.org/10.1/x\">doi:10.1/x</a>"), "{out}");
+        assert!(out.contains("isbn: 123"), "{out}");
+    }
+
+    #[test]
+    fn a_url_with_an_access_date_renders_accessed() {
+        let yaml = "a:\n  type: article\n  title: A\n  url:\n    value: https://x\n    date: 2020-01-01\n";
+        let out = render_doc_with_bib("[@a]\n", yaml, &["a"]);
+        assert!(out.contains("<a href=\"https://x\">https://x</a> (accessed 2020-01-01)"), "{out}");
+    }
+
+    #[test]
+    fn an_uncited_entry_never_gets_an_li() {
+        let yaml = "a:\n  type: article\n  title: A\nb:\n  type: article\n  title: B\n";
+        let out = render_doc_with_bib("[@a]\n", yaml, &["a"]);
+        assert!(out.contains("id=\"ref-a\""), "{out}");
+        assert!(!out.contains("id=\"ref-b\""), "{out}");
     }
 }
 ```
