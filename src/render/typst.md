@@ -129,6 +129,9 @@ fn cover_page(title: &str, frontmatter: &Frontmatter) -> String {
     out.push_str("#align(center)[\n");
     out.push_str("#v(1fr)\n\n");
     let _ = write!(out, "#text(size: 28pt, weight: \"bold\")[{}]\n\n", escape_typst(title));
+    if let Some(author) = author_line(frontmatter) {
+        let _ = write!(out, "#text(size: 14pt)[{author}]\n\n");
+    }
     for line in frontmatter_lines(frontmatter) {
         let _ = write!(out, "#text(size: 12pt, fill: gray)[{line}]\n\n");
     }
@@ -138,29 +141,44 @@ fn cover_page(title: &str, frontmatter: &Frontmatter) -> String {
 }
 ```
 
-Every frontmatter entry but two prints as its own centered line, in
-frontmatter's own declared order: `title` (already the page's own
-large heading) and any `dankg.*` key, an internal hint -- decision
-27's `dankg.tangle.public`, say -- never meant for a reader. Nothing
-else is assumed about what a corpus author's frontmatter contains.
-DanKG's own frontmatter has no fixed schema (`md/frontmatter.rs`'s own
-"flat key: value subset"). The cover page does not invent one either:
+Three frontmatter keys never print as a generic labeled line, in
+frontmatter's own declared order otherwise: `title` (already the
+page's own large heading), `author` (its own unlabeled byline, right
+beneath the title), and any `dankg.*` key or `bibliography`, neither
+ever meant for a reader -- an internal hint (decision 27's
+`dankg.tangle.public`, say) or a directive naming a data file
+(decision 58), not reader-facing content either way. Nothing else is
+assumed about what a corpus author's frontmatter contains. DanKG's own
+frontmatter has no fixed schema (`md/frontmatter.rs`'s own "flat key:
+value subset"). The cover page does not invent one either:
 whatever key a reader wrote is whatever label they see.
 
 ```rust name=cover_frontmatter path=render/typst.rs
+const NON_GENERIC_FRONTMATTER_KEYS: &[&str] = &["title", "author", "bibliography"];
+
 fn frontmatter_lines(frontmatter: &Frontmatter) -> Vec<String> {
     frontmatter
         .entries
         .iter()
-        .filter(|(k, _)| k != "title" && !k.starts_with("dankg."))
-        .map(|(k, v)| {
-            let value = match v {
-                Value::Scalar(s) => escape_typst(s),
-                Value::List(items) => items.iter().map(|s| escape_typst(s)).collect::<Vec<_>>().join(", "),
-            };
-            format!("{}: {value}", humanize_key(k))
-        })
+        .filter(|(k, _)| !NON_GENERIC_FRONTMATTER_KEYS.contains(&k.as_str()) && !k.starts_with("dankg."))
+        .map(|(k, v)| format!("{}: {}", humanize_key(k), frontmatter_value_text(v)))
         .collect()
+}
+
+/// `author`'s own byline, joined the identical comma-separated way every
+/// other list-valued frontmatter key already is on this same page --
+/// `tags: [a, b]` reads as "Tags: a, b". `author: [a, b]` reads as "a,
+/// b" beneath the title the same way, not a different join convention
+/// of its own.
+fn author_line(frontmatter: &Frontmatter) -> Option<String> {
+    frontmatter.entries.iter().find(|(k, _)| k == "author").map(|(_, v)| frontmatter_value_text(v))
+}
+
+fn frontmatter_value_text(v: &Value) -> String {
+    match v {
+        Value::Scalar(s) => escape_typst(s),
+        Value::List(items) => items.iter().map(|s| escape_typst(s)).collect::<Vec<_>>().join(", "),
+    }
 }
 
 fn humanize_key(key: &str) -> String {
@@ -769,21 +787,46 @@ mod tests {
     }
 
     #[test]
-    fn frontmatter_prints_on_the_cover_page_not_title_or_internal_keys() {
+    fn frontmatter_prints_on_the_cover_page_not_title_author_or_internal_keys() {
         let mut d = Diags::new("t.md");
         let doc = Document::parse(
-            "---\ntitle: Ignored Here\nauthor: Jane Doe\ntags: [rust, typst]\ndankg.tangle.public: true\n---\n# H\n",
+            "---\ntitle: Ignored Here\nauthor: Jane Doe\ntags: [rust, typst]\nbibliography: refs.yml\ndankg.tangle.public: true\n---\n# H\n",
             &mut d,
         );
         let mut diags = Diags::new("t.md");
         let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
-        assert!(cover.contains("Author: Jane Doe"), "{cover}");
         assert!(cover.contains("Tags: rust, typst"), "{cover}");
         assert!(!cover.contains("Ignored Here"), "{cover}");
+        assert!(!cover.contains("Author"), "{cover}");
+        assert!(!cover.contains("Bibliography"), "{cover}");
+        assert!(!cover.contains("refs.yml"), "{cover}");
         assert!(!cover.contains("dankg.tangle.public"), "{cover}");
         assert!(!cover.contains("Public"), "{cover}");
+    }
+
+    #[test]
+    fn author_renders_as_an_unlabeled_byline_under_the_title() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\nauthor: Jane Doe\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("Jane Doe"), "{cover}");
+        assert!(!cover.contains("Author"), "{cover}");
+    }
+
+    #[test]
+    fn multiple_authors_join_with_commas_like_any_other_list_valued_key() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\nauthor: [Jane Doe, John Smith]\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("Jane Doe, John Smith"), "{cover}");
     }
 
     #[test]
