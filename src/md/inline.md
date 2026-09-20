@@ -32,6 +32,7 @@ enum Node {
     Strong(char, Vec<Node>),
     Link { dest: String, title: Option<String>, children: Vec<Node> },
     WikiLink { target: String, label: Option<String> },
+    Citation { keys: Vec<String>, narrative: bool },
     SoftBreak,
     HardBreak,
     /// A run of `*` or `_` not yet known to be emphasis.
@@ -96,6 +97,7 @@ impl<'a> Parser<'a> {
                 '\n' => self.line_break(),
                 '[' => self.open_bracket(),
                 ']' => self.close_bracket(),
+                '@' => self.citation_bare(),
                 '*' | '_' => self.delim_run(c),
                 _ => {
                     self.push_text(c);
@@ -188,6 +190,23 @@ impl<'a> Parser<'a> {
                 return;
             }
         }
+        if self.chars.get(self.pos + 1) == Some(&'@') {
+            if self.citation() {
+                return;
+            }
+            // Not a citation after all. The `@` is consumed as literal text
+            // right here, rather than left for the main dispatch loop --
+            // otherwise a just-failed bracketed attempt like `[@key` (no
+            // closing bracket) would let its own `@` be re-read as a bare
+            // narrative citation, producing a real `Citation` node wrapped
+            // in literal brackets instead of the fully literal text this
+            // malformed input is meant to fall back to.
+            self.nodes.push(Node::BracketOpen);
+            self.brackets.push(Bracket { idx: self.nodes.len() - 1, active: true });
+            self.push_text('@');
+            self.pos += 2;
+            return;
+        }
         self.nodes.push(Node::BracketOpen);
         self.brackets.push(Bracket { idx: self.nodes.len() - 1, active: true });
         self.pos += 1;
@@ -216,6 +235,88 @@ impl<'a> Parser<'a> {
         }
         false
     }
+
+    /// `[@key]` or `[@a; @b]` -- decision 57. `self.pos` is the `[`; the
+    /// `@` immediately after it has already been confirmed by the caller.
+    /// Anything not matching this exact grammar returns false, leaving the
+    /// bracket to fall through to ordinary markdown handling, the same
+    /// fallback an unterminated wikilink already gets.
+    fn citation(&mut self) -> bool {
+        let mut scan = self.pos + 1;
+        let mut keys = Vec::new();
+        loop {
+            if self.chars.get(scan) != Some(&'@') {
+                return false;
+            }
+            let key_start = scan + 1;
+            let mut end = key_start;
+            while self.chars.get(end).is_some_and(|&c| is_citation_key_char(c)) {
+                end += 1;
+            }
+            if end == key_start {
+                return false;
+            }
+            keys.push(self.chars[key_start..end].iter().collect::<String>());
+            scan = end;
+            while self.chars.get(scan) == Some(&' ') {
+                scan += 1;
+            }
+            match self.chars.get(scan) {
+                Some(']') => {
+                    self.nodes.push(Node::Citation { keys, narrative: false });
+                    self.pos = scan + 1;
+                    return true;
+                }
+                Some(';') => {
+                    scan += 1;
+                    while self.chars.get(scan) == Some(&' ') {
+                        scan += 1;
+                    }
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// A bare `@key`, with no surrounding brackets -- decision 57b. `@` is a
+    /// citation only when it is not immediately preceded by an alphanumeric
+    /// or `_` character, which is what keeps `user@example.com`'s own `@`
+    /// as ordinary text. An email's `@` always has a local part directly
+    /// beside it. A narrative citation's `@` never does. Trailing sentence
+    /// punctuation (`Cited by @smith2020.`) is trimmed back out of the key,
+    /// since `.` is itself a legal key character and nothing else bounds a
+    /// bare key the way `]` bounds a bracketed one.
+    fn citation_bare(&mut self) {
+        let before = self.pos.checked_sub(1).map(|i| self.chars[i]);
+        if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            self.push_text('@');
+            self.pos += 1;
+            return;
+        }
+        let start = self.pos + 1;
+        let mut end = start;
+        while self.chars.get(end).is_some_and(|&c| is_citation_key_char(c)) {
+            end += 1;
+        }
+        while end > start && matches!(self.chars[end - 1], '.' | ',' | ';' | ':') {
+            end -= 1;
+        }
+        if end == start {
+            self.push_text('@');
+            self.pos += 1;
+            return;
+        }
+        let key: String = self.chars[start..end].iter().collect();
+        self.nodes.push(Node::Citation { keys: vec![key], narrative: true });
+        self.pos = end;
+    }
+}
+
+/// Shared with the formatter, which has to escape a literal `@` in plain
+/// text whenever it would otherwise be read back as a bare citation --
+/// `can_open_close`'s own reason for being shared applies here too.
+pub(crate) fn is_citation_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-')
 }
 ```
 
@@ -608,6 +709,7 @@ fn to_inlines(nodes: Vec<Node>) -> Vec<Inline> {
                 Inline::Link { dest, title, text: to_inlines(children) }
             }
             Node::WikiLink { target, label } => Inline::WikiLink { target, label },
+            Node::Citation { keys, narrative } => Inline::Citation { keys, narrative },
             Node::SoftBreak => Inline::SoftBreak,
             Node::HardBreak => Inline::HardBreak,
             Node::DelimRun(ch, n) => {
@@ -750,6 +852,50 @@ mod tests {
                 label: Some("see here".into())
             }]
         );
+    }
+
+    fn cite(keys: &[&str], narrative: bool) -> Inline {
+        Inline::Citation { keys: keys.iter().map(|s| s.to_string()).collect(), narrative }
+    }
+
+    #[test]
+    fn bracketed_citation_single_key() {
+        assert_eq!(parse("[@netwok2019]"), vec![cite(&["netwok2019"], false)]);
+    }
+
+    #[test]
+    fn bracketed_citation_multiple_keys() {
+        assert_eq!(parse("[@a; @b]"), vec![cite(&["a", "b"], false)]);
+    }
+
+    #[test]
+    fn malformed_bracketed_citations_fall_back_to_literal_text() {
+        assert_eq!(parse("[@]"), vec![t("[@]")]);
+        assert_eq!(parse("[@key"), vec![t("[@key")]);
+        assert_eq!(parse("[@ke!y]"), vec![t("[@ke!y]")]);
+    }
+
+    #[test]
+    fn bare_citation_at_line_start_after_whitespace_and_after_paren() {
+        assert_eq!(parse("@smith2020 argues"), vec![cite(&["smith2020"], true), t(" argues")]);
+        assert_eq!(parse("see @smith2020"), vec![t("see "), cite(&["smith2020"], true)]);
+        assert_eq!(parse("(see @smith2020)"), vec![t("(see "), cite(&["smith2020"], true), t(")")]);
+    }
+
+    #[test]
+    fn an_email_address_is_not_a_citation() {
+        assert_eq!(parse("user@example.com"), vec![t("user@example.com")]);
+        assert_eq!(parse("foo_bar@x"), vec![t("foo_bar@x")]);
+    }
+
+    #[test]
+    fn trailing_sentence_punctuation_is_trimmed_out_of_a_bare_key() {
+        assert_eq!(parse("Cited by @smith2020."), vec![t("Cited by "), cite(&["smith2020"], true), t(".")]);
+    }
+
+    #[test]
+    fn two_adjacent_bare_citations_are_two_nodes_not_one() {
+        assert_eq!(parse("@a @b"), vec![cite(&["a"], true), t(" "), cite(&["b"], true)]);
     }
 
     #[test]

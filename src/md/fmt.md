@@ -382,6 +382,7 @@ impl Writer {
                 Inline::Strong { delim, inner } => self.wrap(*delim, 2, inner),
                 Inline::Link { dest, title, text } => self.link(dest, title.as_deref(), text),
                 Inline::WikiLink { target, label } => self.wikilink(target, label.as_deref()),
+                Inline::Citation { keys, narrative } => self.citation(keys, *narrative),
                 Inline::SoftBreak => self.newline(""),
                 // The backslash form, not two trailing spaces: trailing
                 // whitespace is exactly what normalizing is supposed to remove.
@@ -455,6 +456,16 @@ impl Writer {
                     if open || close {
                         self.out.push('\\');
                     }
+                }
+                // A literal `@` reads back as a bare citation (decision
+                // 57b) unless it is escaped, exactly when the parser's own
+                // `citation_bare` would otherwise trigger on it: not
+                // preceded by a word character, and followed by at least
+                // one real key character.
+                '@' if !(before.is_ascii_alphanumeric() || before == '_')
+                    && super::inline::is_citation_key_char(after) =>
+                {
+                    self.out.push('\\');
                 }
                 _ => {}
             }
@@ -532,6 +543,18 @@ impl Writer {
         };
         self.push(&body);
     }
+
+    /// A bare citation always holds exactly one key (decision 57b) --
+    /// there is no delimiter to bundle a second one the way `[@a; @b]`
+    /// does, so `narrative` never needs more than `keys[0]`.
+    fn citation(&mut self, keys: &[String], narrative: bool) {
+        let body = if narrative {
+            format!("@{}", keys[0])
+        } else {
+            format!("[{}]", keys.iter().map(|k| format!("@{k}")).collect::<Vec<_>>().join("; "))
+        };
+        self.push(&body);
+    }
 }
 ```
 
@@ -544,6 +567,8 @@ fn lead_char(i: &Inline) -> char {
         Inline::Code(_) => '`',
         Inline::Emph { delim, .. } | Inline::Strong { delim, .. } => *delim,
         Inline::Link { .. } | Inline::WikiLink { .. } => '[',
+        Inline::Citation { narrative: true, .. } => '@',
+        Inline::Citation { narrative: false, .. } => '[',
         Inline::SoftBreak | Inline::HardBreak => ' ',
     }
 }
@@ -774,6 +799,26 @@ mod tests {
     fn an_empty_document_stays_empty() {
         assert_eq!(f(""), "");
         assert_eq!(f("\n\n"), "");
+    }
+
+    #[test]
+    fn citations_round_trip() {
+        assert_eq!(stable("[@key]\n"), "[@key]\n");
+        assert_eq!(stable("[@a; @b]\n"), "[@a; @b]\n");
+        assert_eq!(stable("@key\n"), "@key\n");
+        assert_eq!(stable("Cited by @smith2020.\n"), "Cited by @smith2020.\n");
+    }
+
+    #[test]
+    fn an_escaped_at_sign_stays_escaped_so_it_never_becomes_a_citation() {
+        // Without the escape this would read back as a bare citation on the
+        // next parse, changing what the document means.
+        assert_eq!(stable("See \\@handle for updates.\n"), "See \\@handle for updates.\n");
+    }
+
+    #[test]
+    fn an_at_sign_in_an_email_address_needs_no_escaping() {
+        assert_eq!(stable("user@example.com\n"), "user@example.com\n");
     }
 }
 ```

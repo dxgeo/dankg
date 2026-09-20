@@ -448,11 +448,30 @@ fn inline_text(inlines: &[Inline]) -> String {
             Inline::WikiLink { target, label } => {
                 out.push_str(&escape_typst(label.as_deref().unwrap_or(target)));
             }
+            // No bibliography is threaded through yet (decision 59 lands
+            // with the `bibliography()` pre-pass) -- every citation takes
+            // the "no bibliography configured" fallback for now: its own
+            // literal source text, escaped exactly like ordinary prose, so
+            // a bare `@key` never reaches the Typst compiler as real
+            // citation syntax with nothing to resolve it against.
+            Inline::Citation { keys, narrative } => {
+                out.push_str(&escape_typst(&citation_source(keys, *narrative)));
+            }
             Inline::SoftBreak => out.push(' '),
             Inline::HardBreak => out.push_str("#linebreak()\n"),
         }
     }
     out
+}
+
+/// A citation's own original source text -- `[@a; @b]` or `@key` -- shared
+/// by every fallback path that has nothing to resolve a key against yet.
+fn citation_source(keys: &[String], narrative: bool) -> String {
+    if narrative {
+        format!("@{}", keys[0])
+    } else {
+        format!("[{}]", keys.iter().map(|k| format!("@{k}")).collect::<Vec<_>>().join("; "))
+    }
 }
 
 /// A code span needs a backtick run longer than any inside it, the same

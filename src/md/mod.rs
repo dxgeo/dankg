@@ -371,6 +371,10 @@ pub enum Inline {
     /// `[[target]]` or `[[target|label]]`. Not standard markdown. Resolved
     /// against the root rather than as a path.
     WikiLink { target: String, label: Option<String> },
+    /// `[@key]`/`[@a; @b]` (`narrative: false`), or a bare `@key`
+    /// (`narrative: true`) -- decisions 57/57b. Resolved against a
+    /// document's own bibliography by weave, not here.
+    Citation { keys: Vec<String>, narrative: bool },
     SoftBreak,
     HardBreak,
 }
@@ -394,6 +398,7 @@ impl Inline {
                 Inline::WikiLink { target, label } => {
                     out.push_str(label.as_deref().unwrap_or(target))
                 }
+                Inline::Citation { keys, .. } => out.push_str(&keys.join(", ")),
                 Inline::SoftBreak | Inline::HardBreak => out.push(' '),
             }
         }
