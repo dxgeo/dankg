@@ -274,7 +274,7 @@ A pipe table is no longer `Block::Passthrough`. A new `Block::Table { aligns, he
 
 ## Decision 44: Weave PDF via Typst
 
-`render::typst` emits Typst markup only -- a sibling to `render::dot`/`render::mermaid`, never a PDF generator. The document's title and its own frontmatter render on a dedicated cover page: title large and centered, `author` beneath it as its own unlabeled byline (comma-joined for a list of several), every remaining frontmatter entry beneath that as its own generic labeled line. `title`, `author`, `bibliography`, and any `dankg.*` key are excluded from that generic dump -- none of the four is reader-facing content. The whole page ends with `#pagebreak()`, before the outline and body. `weave::run` always writes the result to `.dankg/build/weave/<name>.typ`, then spawns a configured `[weave.pdf] command` (`typst compile {typ} {pdf}`) against it, the same `cmd::build` substitution-then-split every other configured command already goes through. Unconfigured, weave still writes the `.typ` and reports that no PDF was produced, the same graceful degradation an unconfigured `[tangle.*] command` already gets. `[weave.pdf] template` names a Typst file concatenated in front of the emitted cover page, verbatim, before the `.typ` is written -- a plain-text prepend rather than a Typst `#import`, since an `#import`'s own path resolves relative to the compiled `.typ`, not to the config that named it. Typst's own version is targeted by documentation (0.15.1, confirmed by `tests/typst.rs`'s own real-compile check), never pinned by a runtime `typst --version` check or an optional Cargo dependency.
+`render::typst` emits Typst markup only -- a sibling to `render::dot`/`render::mermaid`, never a PDF generator. The document's title and its own frontmatter render on a dedicated cover page: title large and centered, `author` beneath it as its own unlabeled byline (comma-joined for a list of several), `date` beneath that as a real Typst `datetime` -- `2026-09-18` reads as "September 18, 2026", built by Typst's own formatter, never a raw string -- and every remaining frontmatter entry beneath that as its own generic labeled line. `title`, `author`, `date`, `bibliography`, and any `dankg.*` key are excluded from that generic dump -- none of the five is reader-facing content. `Frontmatter::date_parts` parses `YYYY`/`YYYY-MM`/`YYYY-MM-DD`; anything else falls back to the same generic scalar-or-list text every other key gets, never silently dropped. The whole page ends with `#pagebreak()`, before the outline and body. `weave::run` always writes the result to `.dankg/build/weave/<name>.typ`, then spawns a configured `[weave.pdf] command` (`typst compile {typ} {pdf}`) against it, the same `cmd::build` substitution-then-split every other configured command already goes through. Unconfigured, weave still writes the `.typ` and reports that no PDF was produced, the same graceful degradation an unconfigured `[tangle.*] command` already gets. `[weave.pdf] template` names a Typst file concatenated in front of the emitted cover page, verbatim, before the `.typ` is written -- a plain-text prepend rather than a Typst `#import`, since an `#import`'s own path resolves relative to the compiled `.typ`, not to the config that named it. Typst's own version is targeted by documentation (0.15.1, confirmed by `tests/typst.rs`'s own real-compile check), never pinned by a runtime `typst --version` check or an optional Cargo dependency.
 
 **Rationale:** Zero crates stays intact the same way it does for `tangle`: DanKG never links a PDF library, only emits text and spawns an external command. A runtime version check has no precedent to justify its own maintenance cost. Pandoc's own Typst writer and Org-mode's LaTeX/`ox-typst` export backends solve the identical "emit markup, shell out to compile it" problem the identical way: document a target version, and let a real incompatibility surface as the compiler's own error. `duckdb` already gets exactly this treatment from `[db.*] command` in this codebase. The cover page exists because inlining the title directly in front of the outline and body, the first cut's own shape, visibly duplicated it whenever a file's frontmatter `title` matched its own first heading -- a pattern several static-site generators expect. A separate page has no such collision.
 
@@ -3084,16 +3084,28 @@ sibling selector. No JavaScript exists on the page for it to misfire.
 `--format html` defaults to stdout, the same as every other
 `--format`'s own default.
 
+`author`/`date` never render as raw frontmatter text beneath the page's
+own `<h1>`, the same non-literal treatment the PDF cover page gives
+them: `author` as an unlabeled `<p class="byline">`, `date` as a real
+formatted date -- "September 18, 2026", not "2026-09-18" -- built by
+this module's own hand-rolled month-name table (decision 1: no
+date-handling crate here either, the same constraint Typst's own
+`datetime` sidesteps only because Typst is doing the formatting
+there). Every other frontmatter key is left alone; this page has never
+dumped the rest of a document's frontmatter the way the PDF cover page
+does.
+
 ## PDF backend
 
 `render::typst` (decision 44) emits Typst markup only -- a sibling to
 `render::dot`/`render::mermaid`, never a PDF generator. The document's
 title and frontmatter render on a dedicated cover page first --
 title large and centered, `author` beneath it as its own unlabeled
-byline, every remaining entry beneath that as its own generic line.
-`title`, `author`, `bibliography`, and any `dankg.*` key are excluded
-from that generic dump. The page ends with `#pagebreak()` before the
-outline and body. `weave::run` always
+byline, `date` beneath that as a real Typst `datetime` (never a raw
+string), every remaining entry beneath that as its own generic line.
+`title`, `author`, `date`, `bibliography`, and any `dankg.*` key are
+excluded from that generic dump. The page ends with `#pagebreak()`
+before the outline and body. `weave::run` always
 writes `.dankg/build/weave/<name>.typ`, then spawns a configured
 `[weave.pdf] command` (typically `typst compile {typ} {pdf}`) against
 it. Unconfigured, weave still writes the `.typ` and reports that no

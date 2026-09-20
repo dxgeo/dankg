@@ -394,13 +394,18 @@ named, top-level ones `eval`/`tangle` narrow to, and never runs
 anything: it only typesets what is already there, including whatever
 `dankg eval` already recorded.
 
-The PDF backend gives the document its own cover page first: `title`
-large and centered, `author` beneath it as an unlabeled byline, then
-every other frontmatter entry as its own labeled line --
-`tags: [rust, typst]` reads as "Tags: rust, typst". `bibliography`
-and any `dankg.*` key never appear there; neither is meant for a
-reader. HTML has no cover page. Only `title` becomes the page's own
-`<title>` and `<h1>`.
+`author`/`date` frontmatter never render as raw text in either
+backend. The PDF backend gives the document its own cover page first:
+`title` large and centered, `author` beneath it as an unlabeled
+byline, `date` beneath that as a real Typst date -- `2026-09-18`
+becomes "September 18, 2026" -- then every other frontmatter entry as
+its own labeled line: `tags: [rust, typst]` reads as
+"Tags: rust, typst". `bibliography` and any `dankg.*` key never
+appear there; neither is meant for a reader. HTML has no cover page,
+but still gives `author`/`date` the same non-literal treatment right
+beneath its own `<h1>` -- an unlabeled byline, a formatted date --
+without dumping the rest of a document's frontmatter the way the PDF
+cover page does.
 
 A named block immediately followed by its own recorded
 `<!-- dankg:result ... -->` marker renders as one paired unit --

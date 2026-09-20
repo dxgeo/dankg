@@ -24,9 +24,15 @@ use std::process::Command;
 
 /// A document exercising every construct `render::typst` handles: headings,
 /// emphasis/strong/code spans, a link, a list, a thematic break, a GFM
-/// table with alignment and a ragged row, a `csv`-tagged block, and an
-/// ordinary code block.
-const SOURCE: &str = r#"# Weave smoke test
+/// table with alignment and a ragged row, a `csv`-tagged block, an
+/// ordinary code block, and frontmatter's own author byline and real
+/// Typst date on the cover page.
+const SOURCE: &str = r#"---
+title: Weave Smoke Test
+author: Jane Doe
+date: 2026-09-18
+---
+# Weave smoke test
 
 Some *emphasis*, **strong**, and `a code span`, plus a [link](https://example.com).
 

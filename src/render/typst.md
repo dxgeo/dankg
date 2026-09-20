@@ -132,6 +132,9 @@ fn cover_page(title: &str, frontmatter: &Frontmatter) -> String {
     if let Some(author) = author_line(frontmatter) {
         let _ = write!(out, "#text(size: 14pt)[{author}]\n\n");
     }
+    if let Some(date) = date_line(frontmatter) {
+        let _ = write!(out, "#text(size: 12pt, fill: gray)[{date}]\n\n");
+    }
     for line in frontmatter_lines(frontmatter) {
         let _ = write!(out, "#text(size: 12pt, fill: gray)[{line}]\n\n");
     }
@@ -141,20 +144,22 @@ fn cover_page(title: &str, frontmatter: &Frontmatter) -> String {
 }
 ```
 
-Three frontmatter keys never print as a generic labeled line, in
+Four frontmatter keys never print as a generic labeled line, in
 frontmatter's own declared order otherwise: `title` (already the
 page's own large heading), `author` (its own unlabeled byline, right
-beneath the title), and any `dankg.*` key or `bibliography`, neither
-ever meant for a reader -- an internal hint (decision 27's
-`dankg.tangle.public`, say) or a directive naming a data file
-(decision 58), not reader-facing content either way. Nothing else is
-assumed about what a corpus author's frontmatter contains. DanKG's own
-frontmatter has no fixed schema (`md/frontmatter.rs`'s own "flat key:
-value subset"). The cover page does not invent one either:
-whatever key a reader wrote is whatever label they see.
+beneath the title), `date` (its own unlabeled line beneath that, a
+real Typst date rather than raw text -- see below), and any `dankg.*`
+key or `bibliography`, neither ever meant for a reader -- an internal
+hint (decision 27's `dankg.tangle.public`, say) or a directive naming
+a data file (decision 58), not reader-facing content either way.
+Nothing else is assumed about what a corpus author's frontmatter
+contains. DanKG's own frontmatter has no fixed schema
+(`md/frontmatter.rs`'s own "flat key: value subset"). The cover page
+does not invent one either: whatever key a reader wrote is whatever
+label they see.
 
 ```rust name=cover_frontmatter path=render/typst.rs
-const NON_GENERIC_FRONTMATTER_KEYS: &[&str] = &["title", "author", "bibliography"];
+const NON_GENERIC_FRONTMATTER_KEYS: &[&str] = &["title", "author", "date", "bibliography"];
 
 fn frontmatter_lines(frontmatter: &Frontmatter) -> Vec<String> {
     frontmatter
@@ -172,6 +177,33 @@ fn frontmatter_lines(frontmatter: &Frontmatter) -> Vec<String> {
 /// of its own.
 fn author_line(frontmatter: &Frontmatter) -> Option<String> {
     frontmatter.entries.iter().find(|(k, _)| k == "author").map(|(_, v)| frontmatter_value_text(v))
+}
+
+/// `date`'s own line, a real Typst `datetime` reader-facing date rather
+/// than raw text -- `2026-09-18` reads as "September 18, 2026", built by
+/// Typst's own formatter (decision 1: no date-handling crate here to do
+/// it instead). `Frontmatter::date_parts` already rejected anything that
+/// is not `YYYY`/`YYYY-MM`/`YYYY-MM-DD`. That raw text still deserves a
+/// line of its own rather than silently disappearing. It falls back to
+/// the same generic scalar-or-list text every other key gets.
+fn date_line(frontmatter: &Frontmatter) -> Option<String> {
+    let value = frontmatter.entries.iter().find(|(k, _)| k == "date").map(|(_, v)| v)?;
+    match frontmatter.date_parts() {
+        Some((year, month, day)) => Some(typst_date_display(year, month, day)),
+        None => Some(frontmatter_value_text(value)),
+    }
+}
+
+fn typst_date_display(year: u32, month: Option<u32>, day: Option<u32>) -> String {
+    match (month, day) {
+        (Some(m), Some(d)) => format!(
+            "#datetime(year: {year}, month: {m}, day: {d}).display(\"[month repr:long] [day padding:none], [year]\")"
+        ),
+        (Some(m), None) => {
+            format!("#datetime(year: {year}, month: {m}, day: 1).display(\"[month repr:long] [year]\")")
+        }
+        (None, _) => year.to_string(),
+    }
 }
 
 fn frontmatter_value_text(v: &Value) -> String {
@@ -827,6 +859,62 @@ mod tests {
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Jane Doe, John Smith"), "{cover}");
+    }
+
+    #[test]
+    fn date_renders_as_a_real_typst_datetime_not_raw_text() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ndate: 2026-09-18\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(
+            cover.contains(
+                "#datetime(year: 2026, month: 9, day: 18).display(\"[month repr:long] [day padding:none], [year]\")"
+            ),
+            "{cover}"
+        );
+        assert!(!cover.contains("2026-09-18"), "{cover}");
+        assert!(!cover.contains("Date:"), "{cover}");
+    }
+
+    #[test]
+    fn a_year_and_month_date_omits_the_day() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ndate: 2026-09\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(
+            cover.contains("#datetime(year: 2026, month: 9, day: 1).display(\"[month repr:long] [year]\")"),
+            "{cover}"
+        );
+    }
+
+    #[test]
+    fn a_bare_year_renders_as_plain_text() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ndate: 2026\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("[2026]"), "{cover}");
+        assert!(!cover.contains("#datetime"), "{cover}");
+    }
+
+    #[test]
+    fn unparseable_date_text_falls_back_to_literal_text() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ndate: sometime next year\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("sometime next year"), "{cover}");
+        assert!(!cover.contains("#datetime"), "{cover}");
     }
 
     #[test]

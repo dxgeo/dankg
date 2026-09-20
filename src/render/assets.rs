@@ -665,6 +665,17 @@ h1, h2, h3, h4, h5, h6 {
   line-height: 1.25;
 }
 
+.byline {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  margin: -0.5rem 0 0;
+}
+
+.byline-date {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  color: var(--muted);
+  margin: 0 0 1.5rem;
+}
+
 a { color: var(--accent); }
 
 code, pre {

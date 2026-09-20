@@ -92,6 +92,16 @@ impl Frontmatter {
         self.scalar("bibliography")
     }
 
+    /// `date`'s own (year, month, day), when it matches one of
+    /// Hayagriva's own permissive date shapes -- `YYYY`, `YYYY-MM`, or
+    /// `YYYY-MM-DD`. `None` for anything else: a list value, or text
+    /// that does not parse as one of those three shapes. A renderer
+    /// wanting `date`'s own raw text either way still has `scalar("date")`
+    /// directly, the same accessor this one is built on.
+    pub fn date_parts(&self) -> Option<(u32, Option<u32>, Option<u32>)> {
+        parse_ymd(self.scalar("date")?)
+    }
+
     pub fn tags(&self) -> Vec<&str> {
         self.list("tags")
     }
@@ -117,6 +127,29 @@ impl Frontmatter {
     pub fn tangle_public(&self) -> bool {
         self.scalar("dankg.tangle.public") == Some("true")
     }
+}
+
+/// `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` -- each segment plain digits, month
+/// `1..=12` and day `1..=31` when present. A fourth segment, a
+/// non-numeric one, or an out-of-range month or day means this was never
+/// a date this function recognizes; the caller's own generic fallback
+/// takes it from there, the same "warn and drop, never guess" stance
+/// this module already holds everywhere else.
+fn parse_ymd(s: &str) -> Option<(u32, Option<u32>, Option<u32>)> {
+    let mut parts = s.split('-');
+    let year: u32 = parts.next()?.parse().ok()?;
+    let month: Option<u32> = parts.next().map(str::parse).transpose().ok()?;
+    let day: Option<u32> = parts.next().map(str::parse).transpose().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if month.is_some_and(|m| !(1..=12).contains(&m)) {
+        return None;
+    }
+    if day.is_some_and(|d| !(1..=31).contains(&d)) {
+        return None;
+    }
+    Some((year, month, day))
 }
 ```
 
@@ -362,6 +395,40 @@ mod tests {
     fn bibliography_is_absent_with_no_such_key() {
         let (fm, ..) = parse("---\ntitle: T\n---\n# Body\n");
         assert_eq!(fm.bibliography(), None);
+    }
+
+    #[test]
+    fn date_parts_reads_year_month_day() {
+        let (fm, ..) = parse("---\ndate: 2026-09-18\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), Some((2026, Some(9), Some(18))));
+    }
+
+    #[test]
+    fn date_parts_reads_year_and_month_alone() {
+        let (fm, ..) = parse("---\ndate: 2026-09\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), Some((2026, Some(9), None)));
+    }
+
+    #[test]
+    fn date_parts_reads_a_bare_year() {
+        let (fm, ..) = parse("---\ndate: 2026\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), Some((2026, None, None)));
+    }
+
+    #[test]
+    fn date_parts_is_none_for_an_out_of_range_month_or_day() {
+        let (fm, ..) = parse("---\ndate: 2026-13-01\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), None);
+        let (fm, ..) = parse("---\ndate: 2026-09-32\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), None);
+    }
+
+    #[test]
+    fn date_parts_is_none_for_unparseable_text_or_a_list() {
+        let (fm, ..) = parse("---\ndate: sometime next year\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), None);
+        let (fm, ..) = parse("---\ndate: [2026, 2027]\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), None);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::data::table::{self, TableData};
 use crate::diag::Diags;
 use crate::eval::result::{self, Pair};
 use crate::graph::slug::Slugger;
-use crate::md::{Align, Block, Document, InfoString, Inline, List};
+use crate::md::{Align, Block, Document, Frontmatter, InfoString, Inline, List, Value};
 use crate::render::assets;
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -44,6 +44,15 @@ pub struct Bibliography<'a> {
 /// -- a font, a color, the reading column's width -- without having to
 /// reimplement the CSS-only table-of-contents toggle or the table
 /// borders just to get back what they did not mean to lose.
+///
+/// `author`/`date` never render as raw frontmatter text beneath the
+/// `<h1>`, the same non-literal treatment `render::typst`'s own cover
+/// page gives them: `author` as an unlabeled byline, `date` as a real
+/// formatted date -- "September 18, 2026", not "2026-09-18" -- built by
+/// this module's own hand-rolled month-name table (decision 1: no
+/// date-handling crate here either). Every other frontmatter key is
+/// left alone; this page has never dumped the rest of a document's
+/// frontmatter the way the PDF cover page does, and still does not.
 pub fn render(
     doc: &Document,
     title: &str,
@@ -75,6 +84,12 @@ pub fn render(
 
     out.push_str("<main>\n");
     let _ = writeln!(out, "<h1>{}</h1>", escape(title));
+    if let Some(author) = author_line(&doc.frontmatter) {
+        let _ = writeln!(out, "<p class=\"byline\">{author}</p>");
+    }
+    if let Some(date) = date_line(&doc.frontmatter) {
+        let _ = writeln!(out, "<p class=\"byline-date\">{date}</p>");
+    }
     blocks(&mut out, &doc.blocks, &slugs, tables, images, figures_outside, bibliography, diags);
     // Unconditionally at the end, never at the `hayagriva` fence's own
     // position (decision 59) -- the same fixed structural placement
@@ -84,6 +99,58 @@ pub fn render(
     }
     out.push_str("</main>\n</body>\n</html>\n");
     out
+}
+
+/// `author`'s own byline, joined comma-separated for a list of several --
+/// the identical join `render::typst`'s own `author_line` uses, so a
+/// reader sees the same text in either format.
+fn author_line(frontmatter: &Frontmatter) -> Option<String> {
+    frontmatter.entries.iter().find(|(k, _)| k == "author").map(|(_, v)| frontmatter_value_html(v))
+}
+
+/// `date`'s own line: "September 18, 2026" when `Frontmatter::date_parts`
+/// recognizes the value, the identical scalar-or-list fallback text
+/// `author_line` uses when it does not -- unparseable text, or a list,
+/// still gets a line of its own rather than silently disappearing.
+fn date_line(frontmatter: &Frontmatter) -> Option<String> {
+    let value = frontmatter.entries.iter().find(|(k, _)| k == "date").map(|(_, v)| v)?;
+    match frontmatter.date_parts() {
+        Some((year, month, day)) => Some(format_date_html(year, month, day)),
+        None => Some(frontmatter_value_html(value)),
+    }
+}
+
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// `Frontmatter::date_parts` already validated `month` as `1..=12`.
+/// `MONTH_NAMES`'s own lookup never actually misses in practice. The
+/// `None` arm exists only to keep this a total function.
+fn format_date_html(year: u32, month: Option<u32>, day: Option<u32>) -> String {
+    match (month.and_then(|m| MONTH_NAMES.get((m - 1) as usize)), day) {
+        (Some(name), Some(d)) => format!("{name} {d}, {year}"),
+        (Some(name), None) => format!("{name} {year}"),
+        (None, _) => year.to_string(),
+    }
+}
+
+fn frontmatter_value_html(v: &Value) -> String {
+    match v {
+        Value::Scalar(s) => escape(s),
+        Value::List(items) => items.iter().map(|s| escape(s)).collect::<Vec<_>>().join(", "),
+    }
 }
 
 /// Every heading's own slug, keyed by source line, from one `Slugger`
@@ -840,6 +907,51 @@ mod tests {
         assert!(out.starts_with("<!doctype html>\n"));
         assert!(out.contains("<title>Title</title>"));
         assert!(out.contains("<h1>Title</h1>"));
+    }
+
+    #[test]
+    fn author_renders_as_an_unlabeled_byline() {
+        let (out, _) = render_doc("---\nauthor: Jane Doe\n---\n# H\n");
+        assert!(out.contains("<p class=\"byline\">Jane Doe</p>"), "{out}");
+        assert!(!out.contains("Author"), "{out}");
+    }
+
+    #[test]
+    fn multiple_authors_join_with_commas() {
+        let (out, _) = render_doc("---\nauthor: [Jane Doe, John Smith]\n---\n# H\n");
+        assert!(out.contains("<p class=\"byline\">Jane Doe, John Smith</p>"), "{out}");
+    }
+
+    #[test]
+    fn date_renders_as_a_formatted_date_not_raw_text() {
+        let (out, _) = render_doc("---\ndate: 2026-09-18\n---\n# H\n");
+        assert!(out.contains("<p class=\"byline-date\">September 18, 2026</p>"), "{out}");
+        assert!(!out.contains("2026-09-18"), "{out}");
+    }
+
+    #[test]
+    fn a_year_and_month_date_omits_the_day() {
+        let (out, _) = render_doc("---\ndate: 2026-09\n---\n# H\n");
+        assert!(out.contains("<p class=\"byline-date\">September 2026</p>"), "{out}");
+    }
+
+    #[test]
+    fn a_bare_year_renders_as_plain_text() {
+        let (out, _) = render_doc("---\ndate: 2026\n---\n# H\n");
+        assert!(out.contains("<p class=\"byline-date\">2026</p>"), "{out}");
+    }
+
+    #[test]
+    fn unparseable_date_text_falls_back_to_literal_text() {
+        let (out, _) = render_doc("---\ndate: sometime next year\n---\n# H\n");
+        assert!(out.contains("<p class=\"byline-date\">sometime next year</p>"), "{out}");
+    }
+
+    #[test]
+    fn no_author_or_date_means_no_byline_lines_at_all() {
+        let (out, _) = render_doc("# H\n");
+        assert!(!out.contains("<p class=\"byline\">"), "{out}");
+        assert!(!out.contains("<p class=\"byline-date\">"), "{out}");
     }
 
     #[test]
