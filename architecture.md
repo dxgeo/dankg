@@ -378,6 +378,204 @@ Decision 54's `#figure(...)` sat inside the same `#block(stroke: ...)` decision 
 <!-- dankg:depends target=#decision-55-a-captioned-figure-renders-outside-the-pairs-own-block-in-typst quote="nothing to unwrap a figure out of a box from the outside" -->
 <!-- dankg:depends target=#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="An artifact with no caption at all renders unwrapped" -->
 
+## Decision 57: `[@key]` inline citation syntax and `Inline::Citation`
+
+A new inline construct, recognized the same way `[[wikilink]]` is: a
+`[` immediately followed by `@` opens it, one or more citation keys
+separated by `;` and optional whitespace, closed by `]` --
+`[@netwok2019]` or `[@netwok2019; @smith2020]`. A key matches
+`[A-Za-z0-9_:.-]+`. Anything else inside the brackets, or a bracket
+that never closes, falls through to ordinary bracket-as-literal-text
+handling, the same fallback `close_bracket` already gives a bracket
+with no destination. A new `Inline::Citation { keys: Vec<String>, narrative: bool }` joins `Inline` in `md/mod.rs`, parsed in
+`md/inline.rs` by `citation()`, triggered from `open_bracket` the same
+way `wiki_link()` is, with `narrative: false`.
+
+`@key` is Typst's own native citation shorthand. `[@key]` is Pandoc's
+own bracketed form, one character different. Adopting it costs a
+reader nothing new to learn who already knows either tool.
+
+<!-- dankg:depends target=src/md/mod.md#markdown quote="`[[target]]` or `[[target|label]]`. Not standard markdown." -->
+<!-- dankg:depends target=src/md/inline.md#markdown-inline quote="fallback an unterminated wikilink already gets." -->
+
+## Decision 57b: A bare, unbracketed `@key` as a narrative citation
+
+Pandoc's own narrative-citation form -- `@key` with no surrounding
+brackets -- is also recognized, a second trigger in `citation()`
+alongside the bracketed one, guarded by one rule: the `@` is a
+citation only when it is not immediately preceded by
+`[A-Za-z0-9_]`. `user@example.com` stays ordinary text, because its
+`@` immediately follows the alphanumeric local part of an email
+address. `(see @smith2020)`, `@smith2020 argues`, and a `@key` at the
+very start of a line are all citations, because their `@` is preceded
+by punctuation, whitespace, or nothing at all. A bare key is matched
+with the identical `[A-Za-z0-9_:.-]+` charset as the bracketed form,
+greedily, then trimmed of any trailing `.`, `,`, `;`, or `:`. A bare
+citation always holds exactly one key; citing two together in one
+narrative mention still needs the bracketed form.
+
+`md/fmt.rs`'s own round-trip formatter gets one new escape rule to
+match: a literal `@` in plain text is escaped whenever it would
+otherwise be read back as a bare citation on the next parse -- not
+preceded by a word character, and followed by at least one real key
+character -- the same reasoning that already makes `[`/`]` always
+escape there.
+
+**Rationale:** the ambiguity between a bare citation and an email
+address turns entirely on what sits immediately to the left of the
+`@`, never on anything inside the key itself. That makes the
+lookbehind exact rather than a heuristic that could misfire.
+
+<!-- dankg:depends target=src/md/inline.md#markdown-inline quote="A narrative citation's `@` never does." -->
+
+## Decision 58: A `hayagriva`-tagged fence, or a frontmatter `bibliography:` path, as a document's bibliography source -- full Hayagriva schema fidelity
+
+A fenced code block tagged `hayagriva` is read for its data only by a
+new `data::bib::parse`. Rendering is untouched: like any lang tag
+`code_or_data_table` does not specifically recognize, it falls through
+to `code_block`'s own existing literal rendering in both backends,
+shown by default, hidden only if the author writes `weave=hidden`
+themselves (decision 48, unmodified). A document's frontmatter may
+additionally, or instead, name `bibliography: PATH`, a path resolved
+through `plan::resolve_artifact` and read off disk the same way a
+`produces=file:` table already is (decision 50). `Frontmatter` gains
+`bibliography() -> Option<&str>`, reading the new key through the
+existing `scalar()` accessor.
+
+Both sources converge on one `Vec<BibEntry>` before either renderer
+sees them, merged by `weave::bibliography`: the external file's
+entries load first, the inline fence's entries load second and win on
+a duplicate key, the same "last wins" convention `md/frontmatter.rs`'s
+own duplicate-key handling already established. At most one
+`hayagriva` fence is recognized per document; a second one warns and
+is ignored.
+
+Everything Hayagriva's own format supports parses, not a curated
+subset. Two layers make that bounded rather than a general YAML
+implementation: `data::yaml::parse` is a generic, indentation-driven
+tree parser (`YamlNode::Scalar`/`Seq`/`Map`) with no notion of
+Hayagriva's own field names -- block and flow collections, quoted and
+bare scalars, comments, and nothing else. Anchors/aliases, tags,
+multi-document markers, and merge keys are not part of Hayagriva's own
+spec. None of them are supported here. `data::bib::from_yaml` is the schema layer on top, walking that
+tree against Hayagriva's own documented field names into `BibEntry`,
+`Person`, `Affiliated`, and `SerialNumber`. An unsupported YAML
+construct warns by line and that node is dropped, the rest of the
+document kept; `data::bib`'s own diagnostics -- today, only an
+unrecognized field name -- report line 0 instead, since a `YamlNode`
+carries no position of its own once parsed. `KNOWN_FIELDS` is a reject
+list, not an allow list: an entry's own unrecognized key always warns,
+so a future Hayagriva field dankg does not yet know about shows up as
+a diagnostic rather than silent data loss.
+
+`author`/`editor` accept a bare scalar, a list of scalars, or a list
+mixing structured mapping items (`name`/`given-name`/`prefix`/`suffix`/`alias`); a scalar person string is `Family, Suffix, Given` or
+`Family, Given`, comma-split. `affiliated` is always a list of
+`{person, role}` pairs -- Hayagriva has no separate top-level
+`translator` field; a translator is an affiliated person with `role: translator`. `serial-number` is a bare scalar or a mapping of
+`doi`/`isbn`/`issn`/`pmid`/`pmcid`/`arxiv`/`serial`. `parent` is one
+mapping or a list of mappings, each recursively a full `BibEntry`,
+with no depth limit -- an issue's own `parent` names its journal, and
+so on outward.
+
+**Rationale:** the recursive two-layer split keeps `data::yaml`
+genuinely reusable and genuinely bounded -- exactly as general as
+Hayagriva's real file format needs and no further, the same discipline
+`md/frontmatter.rs` already holds at a shallower depth. It is also
+what keeps a future Hayagriva spec update cheap: a new field is one
+line in `data::bib`, never a change to `data::yaml`'s own grammar.
+
+<!-- dankg:depends target=src/data/yaml.md#data-yaml quote="handles both, with no notion of Hayagriva's own field names at all." -->
+<!-- dankg:depends target=src/data/bib.md#data-bib quote="This module is the only place in dankg that knows what `affiliated` or `serial-number` mean in Hayagriva's own file format." -->
+<!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
+
+## Decision 59: Citations and a references list render in both weave backends
+
+`weave::bibliography` is the pre-pass, run once before either
+renderer: locate the fence and/or the frontmatter file, parse and
+merge them (decision 58), then walk every inline in the whole
+document -- headings, paragraphs, list items, table cells, the same
+full-document reach decision 41 already gives weave -- collecting each
+`Inline::Citation`'s own keys in first-appearance order. That order is
+the numbering both renderers use; nothing counts it a second time. A
+cited key absent from every parsed entry warns at that citation's own
+enclosing block -- a heading or paragraph's own `line`, the finest
+position the AST tracks for one of its inlines. An uncited entry is
+simply never placed in either rendered list, matching Typst's own
+default `#bibliography(...)` behavior (never `full: true`).
+
+**Typst.** `render::typst::render` gains a `bibliography: Option<&BibliographySummary>` parameter carrying only what it needs --
+the set of valid keys and the resolved asset path -- decoupled from
+`weave::Bibliography` the same way a produced image's copied path is
+decoupled from its bytes (decision 51). `inline_text` gains an
+`Inline::Citation` arm: a non-narrative citation emits its keys
+space-separated, `@netwok2019 @smith2020`, relying on Typst's own
+adjacent-citation merging; a narrative citation emits `#cite(<key>, form: "prose")` instead, since `@key`'s own shorthand only ever
+produces Typst's default (non-prose) form. Real citation syntax goes
+out whether or not a key actually resolves -- decision 44's own "let a
+real incompatibility surface as the compiler's own error" stance;
+`weave::bibliography`'s own warning already covers the unresolved
+case, with a real line number `render::typst` has no access to, so
+nothing warns a second time here. `render::typst::render` appends one
+`#bibliography("bibliography.yml")` call after every body block,
+unconditionally, never at the `hayagriva` fence's own position.
+`render_pdf` writes the merged raw Hayagriva text to
+`.dankg/build/weave/bibliography.yml` before compiling, the identical
+copy-before-compile shape `images` already gets (decision 51). No
+bibliography configured at all: a `[@key]` or bare `@key` renders as
+its own literal source text, escaped exactly like ordinary prose.
+`escape_typst` already escapes a bare `@`. This needs no rule of its
+own beyond reconstructing the citation's own original text.
+
+**HTML.** `render::weave_html` gets its own `Bibliography` --
+`entries` and the cited-key `order`, the two fields it actually needs,
+not a dependency on `weave` itself. A non-narrative `Inline::Citation`
+renders `<span class="citation">[<a href="#ref-KEY">N</a>, ...]</span>`,
+one link per key, `[?]` unlinked for a key absent from every parsed
+entry; `N` is the key's own position among *resolved* cited keys only,
+so an unresolved key never consumes a number another citation would
+have to skip over. A narrative citation renders a fixed author-year
+link, `<a href="#ref-KEY">Smith (2020)</a>`, built from the resolved
+entry's own first author and date; an unresolved key, or one with no
+author or no four-digit leading year to build a link from, falls back
+to the citation's own literal text, unlinked. `<ol class="reference-list">` appends after every body block, one `<li id="ref-KEY">` per
+resolved cited key in citation order -- the browser's own list
+numbering *is* the citation numbering. Each entry's own text is one
+fixed, hand-built, non-CSL format, covering every field `BibEntry` can
+carry, each shown only when present, in one fixed order: authors, then
+`(year)`, title, editors, any `affiliated` persons, the container
+chain (`parent`, walked outward -- `In *Journal*, vol. N, no. M` for
+an issue-then-journal chain, any further `parent` entries appended as
+`also in: ...`), edition, location, organization, publisher,
+page-range/page-total, volume-total, chapter, time-range/runtime,
+language, genre, a `serial-number` (a `doi` as a real link, any other
+identifier as labeled text), a `url` with `url_date` beside it as
+`(accessed <date>)`, archive/archive-location/call-number, and finally
+note/abstract as trailing free text. The author-year formatter driving
+both the narrative-citation link and an entry's own author line uses
+the identical family-name extraction: two authors join as `Family & Family`, three or more as `Family et al.`. No bibliography configured
+at all: the identical literal-text fallback Typst gets.
+
+**Rationale:** Typst already owns real citation resolution and
+formatting once it has a file to read; dankg's own job there is
+narrow. HTML has no such engine to defer to. Decision 1 rules out a
+CSL/citeproc crate. There is no external command to shell out to
+either, the way `typst compile`/`duckdb` get one -- this has to run
+inline during HTML rendering, not as a spawnable post-process. HTML
+gets dankg's own complete field-by-field formatter instead of feature
+parity with Typst's. "Complete" here means every field shows when
+present, not that the format adapts per `kind` the way a real citation
+style would. One fixed reference-list entry format is the smallest
+thing that is still genuinely useful: a reader can find "\[3\]" in the
+list from the in-text link, which is the one property an un-styled
+reference list absolutely has to have.
+
+<!-- dankg:depends target=#decision-44-weave-pdf-via-typst quote="let a real incompatibility surface as the compiler's own error." -->
+<!-- dankg:depends target=#decision-50-a-producesfile-csvtsvjson-artifact-renders-as-a-table quote="misconfigured is reported, not fatal" -->
+<!-- dankg:depends target=src/weave.md#weave quote="That order *is* the numbering both renderers use; nothing counts it a second time." -->
+<!-- dankg:depends target=src/render/typst.md#render-typst quote="filesystem or an entry's own fields beyond its key." -->
+<!-- dankg:depends target=src/render/weave_html.md#render-weave-html quote="What HTML needs to render both citations and a real reference list" -->
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in

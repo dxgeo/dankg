@@ -485,6 +485,50 @@ draw_chart(data, "chart.png")
 stylesheet, a Typst preamble, and the compiler invocation (see
 Configuration below).
 
+A woven document can also carry real citations and a real references
+list. `[@key]` cites one entry, `[@a; @b]` cites several together; a
+bare `@key`, with no brackets, is a narrative citation, read as part
+of the sentence rather than set off in parentheses:
+
+```markdown
+The original result [@netwok2019] held for small graphs.
+@smith2020 later extended it to the general case.
+```
+
+Entries come from a `hayagriva`-tagged fence -- Typst's own native
+bibliography format -- an external file named by frontmatter
+`bibliography:`, or both together:
+
+````markdown
+---
+bibliography: refs.yml
+---
+
+```hayagriva
+netwok2019:
+  type: article
+  title: A Networked Result
+  author: Doe, Jane
+  date: 2019
+```
+````
+
+The fence renders exactly like any other fenced block -- its raw YAML
+shown by default, hidden only with `weave=hidden` -- since the tag
+only matters to weave's own bibliography pre-pass, not to rendering.
+Everything Hayagriva's own format supports parses: structured authors
+and editors, translators and other credited roles under `affiliated`,
+a `parent` chain for an article inside an issue inside a journal, and
+every remaining field (`doi`, `url`, `page-range`, and the rest).
+
+The PDF backend hands `@key`/`#cite(...)` straight to Typst, which
+resolves and formats the whole bibliography itself. The HTML backend
+has no such engine, so it renders its own fixed reference-list entry
+instead -- every field shown when present, numbered to match each
+in-text link. A citation with no bibliography configured at all, or
+whose key resolves to nothing, falls back to its own literal text
+rather than broken markup.
+
 <!-- dankg:depends target=architecture.md#recorded-eval-output quote="A named `Code` block immediately followed by its own recorded" -->
 <!-- dankg:depends target=architecture.md#staleness quote="The rendered page itself never changes because of this" -->
 <!-- dankg:depends target=architecture.md#produced-artifacts quote="A recognized pair's source block may also declare" -->
@@ -492,6 +536,8 @@ Configuration below).
 <!-- dankg:depends target=architecture.md#hiding-one-half-of-a-pair quote="each drop exactly one, leaving the other exactly as it already renders" -->
 <!-- dankg:depends target=architecture.md#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="gives a reader genuine, automatic" -->
 <!-- dankg:depends target=architecture.md#decision-55-a-captioned-figure-renders-outside-the-pairs-own-block-in-typst quote="nothing to unwrap a figure out of a box from the outside" -->
+<!-- dankg:depends target=architecture.md#decision-58-a-hayagriva-tagged-fence-or-a-frontmatter-bibliography-path-as-a-documents-bibliography-source----full-hayagriva-schema-fidelity quote="Everything Hayagriva's own format supports parses, not a curated" -->
+<!-- dankg:depends target=architecture.md#decision-59-citations-and-a-references-list-render-in-both-weave-backends quote="HTML has no such engine to defer to." -->
 
 ### `init` — scaffold a new corpus
 
