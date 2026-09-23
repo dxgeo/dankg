@@ -95,6 +95,27 @@ dankg graph notes/index.md --format mermaid
 point. That's what makes it a stable, scriptable surface. `--depth` and
 `--all` shape only the rendered formats: `html`, `dot`, and `mermaid`.
 
+A file that declares a frontmatter `title` gets that title as its own
+top-level node, and every heading in the file hangs off it. A leading
+heading repeating the title is absorbed rather than graphed twice, so
+`title: Hash` over `# Hash` is one node, not two. A file declaring no
+`title` is unchanged: its first heading is what `[text](file.md)`
+lands on.
+
+```markdown
+---
+title: Hash
+---
+
+# Hash
+
+## The hash
+```
+
+Two nodes: `src/hash#hash`, with `src/hash#the-hash` beneath it.
+
+<!-- dankg:depends target=architecture.md#decision-62-a-declared-frontmatter-title-is-the-documents-top-level-node quote="A file that declares no `title` keeps exactly the shape it has today" -->
+
 ### `tui` — explore the graph in a terminal
 
 ```sh

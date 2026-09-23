@@ -234,39 +234,42 @@ footer b { font-weight: 600; color: var(--fg); }
 <body>
 <header>
 <span class="root">tests/data/corpus</span>
-<span class="counts">7 of 7 node(s) drawn, 1 unresolved</span>
+<span class="counts">8 of 8 node(s) drawn, 1 unresolved</span>
 <span class="legend"><span><i class="contains"></i>contains</span><span><i></i>link</span><span><i class="dangling"></i>unresolved</span></span>
 <span class="controls"><button id="fit" type="button">fit</button><button id="reset" type="button">reset</button></span>
 </header>
 <main>
-<svg id="graph" class="canvas" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 404 284" preserveAspectRatio="xMidYMid meet" tabindex="0">
+<svg id="graph" class="canvas" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 284" preserveAspectRatio="xMidYMid meet" tabindex="0">
 <defs>
 <marker id="tip" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker>
 <marker id="tip-contains" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker>
 </defs>
 <g id="scene">
 <g id="edges">
-<path class="edge contains" data-key="notes/ideas#ideas notes/ideas#future contains" data-from="notes/ideas#ideas" data-to="notes/ideas#future" d="M112,60 L63,142 L62,224" marker-end="url(#tip-contains)"/>
-<path class="edge link" data-key="notes/ideas#ideas project#overview link" data-from="notes/ideas#ideas" data-to="project#overview" d="M112,60 L161,124"/>
-<path class="edge link dangling" data-key="project#code-eval nowhere#lost link" data-from="project#code-eval" data-to="nowhere#lost" d="M330,60 L330,124" marker-end="url(#tip)"/>
+<path class="edge contains" data-key="notes/ideas#ideas notes/ideas#future contains" data-from="notes/ideas#ideas" data-to="notes/ideas#future" d="M84,60 L62,142 L62,224" marker-end="url(#tip-contains)"/>
+<path class="edge link" data-key="notes/ideas#ideas project#overview link" data-from="notes/ideas#ideas" data-to="project#overview" d="M84,60 L161,124"/>
+<path class="edge link dangling" data-key="project#code-eval nowhere#lost link" data-from="project#code-eval" data-to="nowhere#lost" d="M310,160 L310,224" marker-end="url(#tip)"/>
+<path class="edge contains" data-key="project#dankg project#code-eval contains" data-from="project#dankg" data-to="project#code-eval" d="M288,60 L310,124" marker-end="url(#tip-contains)"/>
+<path class="edge contains" data-key="project#dankg project#overview contains" data-from="project#dankg" data-to="project#overview" d="M288,60 L161,124" marker-end="url(#tip-contains)"/>
 <path class="edge link" data-key="project#overview notes/ideas#future link" data-from="project#overview" data-to="notes/ideas#future" d="M161,160 L62,224" marker-end="url(#tip)"/>
 <path class="edge contains" data-key="project#overview project#constraints contains" data-from="project#overview" data-to="project#constraints" d="M161,160 L186,224" marker-end="url(#tip-contains)"/>
 <path class="edge link" data-key="project#constraints project#overview link" data-from="project#overview" data-to="project#constraints" d="M161,160 L186,224"/>
 </g>
 <g id="nodes">
-<g class="node" data-id="notes/ideas#ideas" data-rank="0" data-x="112" data-y="42" data-w="72"><title>notes/ideas.md:4</title><rect class="box" x="76" y="24" width="72" height="36"/><text class="label" x="112" y="42">Ideas</text><a class="src" href="notes/ideas.md" target="_blank" rel="noopener"><title>open notes/ideas.md:4</title><circle cx="148" cy="24" r="7"/><text x="148" y="24">↗</text></a></g>
-<g class="node" data-id="orphan#orphan" data-rank="0" data-x="214" data-y="42" data-w="76"><title>orphan.md:1</title><rect class="box" x="176" y="24" width="76" height="36"/><text class="label" x="214" y="42">orphan</text><a class="src" href="orphan.md" target="_blank" rel="noopener"><title>open orphan.md:1</title><circle cx="252" cy="24" r="7"/><text x="252" y="24">↗</text></a></g>
-<g class="node entry" data-id="project#code-eval" data-rank="0" data-x="330" data-y="42" data-w="100"><title>project.md:14</title><rect class="box" x="280" y="24" width="100" height="36"/><text class="label" x="330" y="42">Code Eval</text><a class="src" href="project.md" target="_blank" rel="noopener"><title>open project.md:14</title><circle cx="380" cy="24" r="7"/><text x="380" y="24">↗</text></a></g>
+<g class="node" data-id="notes/ideas#ideas" data-rank="0" data-x="84" data-y="42" data-w="72"><title>notes/ideas.md:4</title><rect class="box" x="48" y="24" width="72" height="36"/><text class="label" x="84" y="42">Ideas</text><a class="src" href="notes/ideas.md" target="_blank" rel="noopener"><title>open notes/ideas.md:4</title><circle cx="120" cy="24" r="7"/><text x="120" y="24">↗</text></a></g>
+<g class="node" data-id="orphan#orphan" data-rank="0" data-x="186" data-y="42" data-w="76"><title>orphan.md:1</title><rect class="box" x="148" y="24" width="76" height="36"/><text class="label" x="186" y="42">orphan</text><a class="src" href="orphan.md" target="_blank" rel="noopener"><title>open orphan.md:1</title><circle cx="224" cy="24" r="7"/><text x="224" y="24">↗</text></a></g>
+<g class="node entry" data-id="project#dankg" data-rank="0" data-x="288" data-y="42" data-w="72"><title>project.md:1</title><rect class="box" x="252" y="24" width="72" height="36"/><text class="label" x="288" y="42">DanKG</text><a class="src" href="project.md" target="_blank" rel="noopener"><title>open project.md:1</title><circle cx="324" cy="24" r="7"/><text x="324" y="24">↗</text></a></g>
 <g class="node entry" data-id="project#overview" data-rank="1" data-x="161" data-y="142" data-w="92"><title>project.md:5</title><rect class="box" x="115" y="124" width="92" height="36"/><text class="label" x="161" y="142">Overview</text><a class="src" href="project.md" target="_blank" rel="noopener"><title>open project.md:5</title><circle cx="207" cy="124" r="7"/><text x="207" y="124">↗</text></a></g>
-<g class="node unresolved" data-id="nowhere#lost" data-rank="1" data-x="330" data-y="142" data-w="72"><title>nowhere#lost (unresolved)</title><rect class="box" x="294" y="124" width="72" height="36"/><text class="label" x="330" y="142">lost</text></g>
+<g class="node entry" data-id="project#code-eval" data-rank="1" data-x="310" data-y="142" data-w="100"><title>project.md:14</title><rect class="box" x="260" y="124" width="100" height="36"/><text class="label" x="310" y="142">Code Eval</text><a class="src" href="project.md" target="_blank" rel="noopener"><title>open project.md:14</title><circle cx="360" cy="124" r="7"/><text x="360" y="124">↗</text></a></g>
 <g class="node" data-id="notes/ideas#future" data-rank="2" data-x="62" data-y="242" data-w="76"><title>notes/ideas.md:8</title><rect class="box" x="24" y="224" width="76" height="36"/><text class="label" x="62" y="242">Future</text><a class="src" href="notes/ideas.md" target="_blank" rel="noopener"><title>open notes/ideas.md:8</title><circle cx="100" cy="224" r="7"/><text x="100" y="224">↗</text></a></g>
 <g class="node entry" data-id="project#constraints" data-rank="2" data-x="186" data-y="242" data-w="116"><title>project.md:10</title><rect class="box" x="128" y="224" width="116" height="36"/><text class="label" x="186" y="242">Constraints</text><a class="src" href="project.md" target="_blank" rel="noopener"><title>open project.md:10</title><circle cx="244" cy="224" r="7"/><text x="244" y="224">↗</text></a></g>
+<g class="node unresolved" data-id="nowhere#lost" data-rank="2" data-x="310" data-y="242" data-w="72"><title>nowhere#lost (unresolved)</title><rect class="box" x="274" y="224" width="72" height="36"/><text class="label" x="310" y="242">lost</text></g>
 </g>
 </g>
 </svg>
 </main>
 <footer><span id="status"></span> — drag to pan, scroll to zoom, click a node to expand its neighbours, ↗ opens the source.</footer>
-<script type="application/json" id="dankg-meta">{"width": 404, "height": 284, "root": "tests/data/corpus", "edgeKeySep": " ", "geometry": {"nodeHeight": 36, "rankSep": 64, "nodeSep": 28, "margin": 24, "charWidth": 8, "labelPad": 28, "minWidth": 72, "maxWidth": 264}}
+<script type="application/json" id="dankg-meta">{"width": 384, "height": 284, "root": "tests/data/corpus", "edgeKeySep": " ", "geometry": {"nodeHeight": 36, "rankSep": 64, "nodeSep": 28, "margin": 24, "charWidth": 8, "labelPad": 28, "minWidth": 72, "maxWidth": 264}}
 </script>
 <script type="application/json" id="dankg-index">{
   "version": 2,
@@ -275,15 +278,18 @@ footer b { font-weight: 600; color: var(--fg); }
     {"id": "notes/ideas#future", "title": "Future", "file": "notes/ideas.md", "line": 8, "end_line": 8, "level": 2, "parent": "notes/ideas#ideas", "tags": [], "external": [], "resolved": true, "kind": "heading"},
     {"id": "nowhere#lost", "title": "lost", "file": "nowhere.md", "line": 0, "end_line": 0, "level": 0, "parent": null, "tags": [], "external": [], "resolved": false, "kind": "heading"},
     {"id": "orphan#orphan", "title": "orphan", "file": "orphan.md", "line": 1, "end_line": 1, "level": 0, "parent": null, "tags": [], "external": [], "resolved": true, "kind": "heading"},
-    {"id": "project#overview", "title": "Overview", "file": "project.md", "line": 5, "end_line": 13, "level": 1, "parent": null, "tags": ["rust", "graphs"], "external": ["https://example.com"], "resolved": true, "kind": "heading"},
+    {"id": "project#dankg", "title": "DanKG", "file": "project.md", "line": 1, "end_line": 18, "level": 0, "parent": null, "tags": ["rust", "graphs"], "external": [], "resolved": true, "kind": "heading"},
+    {"id": "project#overview", "title": "Overview", "file": "project.md", "line": 5, "end_line": 13, "level": 1, "parent": "project#dankg", "tags": ["rust", "graphs"], "external": ["https://example.com"], "resolved": true, "kind": "heading"},
     {"id": "project#constraints", "title": "Constraints", "file": "project.md", "line": 10, "end_line": 13, "level": 2, "parent": "project#overview", "tags": ["rust", "graphs"], "external": [], "resolved": true, "kind": "heading"},
-    {"id": "project#code-eval", "title": "Code Eval", "file": "project.md", "line": 14, "end_line": 18, "level": 1, "parent": null, "tags": ["rust", "graphs"], "external": [], "resolved": true, "kind": "heading"}
+    {"id": "project#code-eval", "title": "Code Eval", "file": "project.md", "line": 14, "end_line": 18, "level": 1, "parent": "project#dankg", "tags": ["rust", "graphs"], "external": [], "resolved": true, "kind": "heading"}
   ],
   "edges": [
     {"from": "notes/ideas#ideas", "to": "notes/ideas#future", "kind": "contains", "line": 0, "reciprocated": false},
     {"from": "notes/ideas#ideas", "to": "project#overview", "kind": "link", "line": 6, "reciprocated": true},
     {"from": "project#code-eval", "to": "nowhere#lost", "kind": "link", "line": 16, "reciprocated": false},
     {"from": "project#constraints", "to": "project#overview", "kind": "link", "line": 12, "reciprocated": true},
+    {"from": "project#dankg", "to": "project#code-eval", "kind": "contains", "line": 0, "reciprocated": false},
+    {"from": "project#dankg", "to": "project#overview", "kind": "contains", "line": 0, "reciprocated": false},
     {"from": "project#overview", "to": "notes/ideas#future", "kind": "link", "line": 8, "reciprocated": false},
     {"from": "project#overview", "to": "notes/ideas#ideas", "kind": "link", "line": 7, "reciprocated": true},
     {"from": "project#overview", "to": "project#constraints", "kind": "contains", "line": 0, "reciprocated": false},

@@ -28,9 +28,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAGIC: &str = "!dankg-cache";
-/// Bumped whenever the record format changes. An entry from another version is
-/// a miss, not an error. 2: a node row grew a `kind` field (block nodes).
-const VERSION: u32 = 2;
+/// Bumped whenever the record format changes, or whenever the same bytes
+/// would now build different nodes. An entry from another version is a miss,
+/// not an error. 2: a node row grew a `kind` field (block nodes). 3: a
+/// declared frontmatter `title` became the file's own top-level node
+/// (decision 62), so an unchanged file's node set changed underneath an
+/// entry that still hashes as fresh.
+const VERSION: u32 = 3;
 /// Separates the items of a list field. `escape` guarantees it never survives
 /// inside one, so splitting on it is exact.
 const UNIT: char = '\u{1f}';

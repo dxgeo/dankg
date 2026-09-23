@@ -67,6 +67,16 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
     let mut stack: Vec<(u8, NodeId)> = Vec::new();
     let mut current: Option<NodeId> = None;
 
+    // A declared title is the document's own top-level node (decision 62),
+    // built here rather than waiting for orphan content to need an owner.
+    let mut absorbed: Option<u32> = None;
+    if let Some(title) = doc.frontmatter.title() {
+        absorbed = repeated_title_heading(doc, title);
+        let id = file_node(&key, path, doc, &mut nodes, &tags, &mut slugger);
+        stack.push((0, id.clone()));
+        current = Some(id);
+    }
+
     let mut visit = |block: &Block,
                      top_level: bool,
                      nodes: &mut Vec<Node>,
@@ -76,6 +86,16 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                      current: &mut Option<NodeId>| {
         match block {
             Block::Heading { level, inlines, line } => {
+                // The leading heading a declared title absorbed is not a node
+                // of its own. Its links belong to the title node standing in
+                // for it, which is already `current`.
+                if absorbed == Some(*line) {
+                    if let Some(owner) = current.clone() {
+                        let mut cursor = *line;
+                        collect_links(inlines, &owner, &mut cursor, links, nodes);
+                    }
+                    return;
+                }
                 let title = Inline::plain(inlines).trim().to_string();
                 let id = NodeId::new(&key, slugger.assign(&title));
 
@@ -121,7 +141,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                     // Content before the first heading belongs to the file, not
                     // to a heading that happens to come later.
                     None => {
-                        let id = file_node(&key, path, doc, nodes, &tags);
+                        let id = file_node(&key, path, doc, nodes, &tags, &mut slugger);
                         *current = Some(id.clone());
                         stack.push((0, id.clone()));
                         id
@@ -143,7 +163,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                 let owner = match current.clone() {
                     Some(id) => id,
                     None => {
-                        let id = file_node(&key, path, doc, nodes, &tags);
+                        let id = file_node(&key, path, doc, nodes, &tags, &mut slugger);
                         *current = Some(id.clone());
                         stack.push((0, id.clone()));
                         id
@@ -222,7 +242,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                 let owner = match current.clone() {
                     Some(id) => id,
                     None => {
-                        let id = file_node(&key, path, doc, nodes, &tags);
+                        let id = file_node(&key, path, doc, nodes, &tags, &mut slugger);
                         *current = Some(id.clone());
                         stack.push((0, id.clone()));
                         id
@@ -249,7 +269,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
 
     if nodes.is_empty() {
         // A file with no headings and no links still needs an address.
-        file_node(&key, path, doc, &mut nodes, &tags);
+        file_node(&key, path, doc, &mut nodes, &tags, &mut slugger);
     }
 
     set_extents(&mut nodes, line_count);
@@ -265,6 +285,7 @@ fn file_node(
     doc: &Document,
     nodes: &mut Vec<Node>,
     tags: &[String],
+    slugger: &mut Slugger,
 ) -> NodeId {
     if let Some(existing) = nodes.first() {
         if existing.level == 0 {
@@ -277,7 +298,7 @@ fn file_node(
         .title()
         .map(str::to_string)
         .unwrap_or_else(|| file_stem(key).to_string());
-    let id = NodeId::new(key, super::slug::slugify(&title));
+    let id = NodeId::new(key, slugger.assign(&title));
 
     let node = Node {
         id: id.clone(),
@@ -294,6 +315,24 @@ fn file_node(
     };
     nodes.insert(0, node);
     id
+}
+
+/// The line of the document's own leading heading when it repeats `title`.
+/// Exactly `weave::drop_repeated_title_heading`'s rule (decision 61): only
+/// the very first block qualifies, and only on an exact match once both
+/// sides are trimmed. `Inline::plain` is the same flattening a heading
+/// node's own title is derived with above, so a heading written
+/// `# *Hash*` matches a frontmatter `title: Hash` here exactly as it does
+/// there.
+fn repeated_title_heading(doc: &Document, title: &str) -> Option<u32> {
+    match doc.blocks.first() {
+        Some(Block::Heading { inlines, line, .. })
+            if Inline::plain(inlines).trim() == title.trim() =>
+        {
+            Some(*line)
+        }
+        _ => None,
+    }
 }
 
 /// Builds the `Relation` node for `id`, titled `title`. `level` reuses
@@ -589,6 +628,90 @@ mod tests {
         let f = build_src("a.md", "---\ntitle: My Notes\n---\ntext\n");
         assert_eq!(f.nodes[0].title, "My Notes");
         assert_eq!(f.nodes[0].id.slug, "my-notes");
+    }
+
+    #[test]
+    fn a_declared_title_is_the_top_level_node_of_a_heading_first_file() {
+        let f = build_src("a.md", "---\ntitle: My Notes\n---\n# Overview\n");
+        assert_eq!(f.nodes[0].level, 0, "the title node comes first");
+        assert_eq!(f.nodes[0].id.slug, "my-notes");
+        assert_eq!(f.nodes[1].title, "Overview");
+        assert_eq!(f.nodes[1].parent.as_ref().unwrap(), &f.nodes[0].id);
+    }
+
+    #[test]
+    fn a_declared_title_absorbs_a_leading_heading_that_repeats_it() {
+        let f = build_src("a.md", "---\ntitle: Hash\n---\n# Hash\n\n## The hash\n");
+        let ids: Vec<String> = f.nodes.iter().map(|n| n.id.to_string()).collect();
+        assert_eq!(ids, vec!["a#hash", "a#the-hash"], "one node, not two");
+        assert_eq!(f.nodes[0].level, 0);
+        assert_eq!(f.nodes[1].parent.as_ref().unwrap(), &f.nodes[0].id);
+    }
+
+    #[test]
+    fn an_absorbed_heading_leaves_no_self_loop() {
+        let f = build_src("a.md", "---\ntitle: Hash\n---\nintro\n\n# Hash\n");
+        assert!(
+            !f.containment.iter().any(|e| e.from == e.to),
+            "the file node used to contain itself: {:?}",
+            f.containment
+        );
+    }
+
+    #[test]
+    fn a_link_inside_an_absorbed_heading_belongs_to_the_title_node() {
+        let f = build_src("a.md", "---\ntitle: Hash\n---\n# [Hash](b.md)\n");
+        assert_eq!(f.nodes.len(), 1);
+        assert_eq!(f.links[0].from, f.nodes[0].id);
+    }
+
+    #[test]
+    fn a_leading_heading_carrying_more_than_the_title_is_not_absorbed() {
+        let f = build_src("a.md", "---\ntitle: Hash\n---\n# Hash [x](b.md)\n");
+        let ids: Vec<String> = f.nodes.iter().map(|n| n.id.to_string()).collect();
+        assert_eq!(ids, vec!["a#hash", "a#hash-x"], "`Hash x` is not `Hash`");
+    }
+
+    #[test]
+    fn only_the_very_first_block_is_absorbed() {
+        let f = build_src("a.md", "---\ntitle: Hash\n---\nintro\n\n# Hash\n");
+        let ids: Vec<String> = f.nodes.iter().map(|n| n.id.to_string()).collect();
+        assert_eq!(ids, vec!["a#hash", "a#hash-1"], "a later repeat is the author's own");
+    }
+
+    #[test]
+    fn a_leading_heading_saying_something_else_keeps_its_own_node() {
+        let f = build_src("a.md", "---\ntitle: Daily Log\n---\n# 2026-08-27\n");
+        let ids: Vec<String> = f.nodes.iter().map(|n| n.id.to_string()).collect();
+        assert_eq!(ids, vec!["a#daily-log", "a#2026-08-27"]);
+    }
+
+    #[test]
+    fn an_absorbed_heading_matches_through_its_own_emphasis() {
+        let f = build_src("a.md", "---\ntitle: Hash\n---\n# *Hash*\n");
+        assert_eq!(f.nodes.len(), 1, "`Inline::plain` flattens both sides alike");
+    }
+
+    #[test]
+    fn a_title_colliding_with_a_later_heading_takes_the_slug_first() {
+        let f = build_src("a.md", "---\ntitle: Notes\n---\n# Overview\n\n## Notes\n");
+        let ids: Vec<String> = f.nodes.iter().map(|n| n.id.to_string()).collect();
+        assert_eq!(ids, vec!["a#notes", "a#overview", "a#notes-1"]);
+    }
+
+    #[test]
+    fn a_file_with_no_declared_title_is_unchanged() {
+        let f = build_src("a.md", "# Overview\n\n## Two\n");
+        let ids: Vec<String> = f.nodes.iter().map(|n| n.id.to_string()).collect();
+        assert_eq!(ids, vec!["a#overview", "a#two"], "no synthetic node appears");
+        assert_eq!(f.nodes[0].level, 1);
+    }
+
+    #[test]
+    fn a_title_node_owns_the_whole_file() {
+        let f = build_src("a.md", "---\ntitle: Hash\n---\n# Hash\n\n## The hash\n\ntext\n");
+        assert_eq!(f.nodes[0].line, 1);
+        assert_eq!(f.nodes[0].end_line, 8, "every line of the file");
     }
 
     #[test]

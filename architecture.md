@@ -634,9 +634,11 @@ struct Edge {
 Extent is a line range rather than a byte range. The parser carries line numbers
 throughout. A line range is what diagnostics and editors both want.
 
-A file with no headings, or with links written above its first heading, gets a
-synthetic level-0 node named from its frontmatter title or file name, so that
-`[text](file.md)` always has something to land on.
+A file that declares a frontmatter `title` gets a synthetic level-0 node named
+from it, and every heading in the file hangs off that node (decision 62). A
+file that declares none still gets one when it has no headings at all, or when
+something is written above its first heading, named from the file name instead,
+so that `[text](file.md)` always has something to land on.
 
 ## Decision 60: `weave=source-hidden` drops the output half too, keeping only the artifact
 
@@ -731,6 +733,63 @@ question it answers -- where does this document's title live -- is a
 property of the document, not of the format it is typeset into.
 
 <!-- dankg:depends target=src/md/frontmatter.md#markdown-frontmatter quote="Unsupported input warns with its line number and is skipped, never guessed at." -->
+
+## Decision 62: A declared frontmatter `title` is the document's top-level node
+
+`graph/build.rs` has always had a synthetic level-0 file node, but it
+only ever built one lazily, from the orphan-content path: a paragraph,
+a table, or a named top-level block appearing *before* the first
+heading needed an owner, and the file node was that owner. A document
+opening straight into `# Heading` never reached the call, so its
+declared `title` was read and thrown away. `architecture.md` got
+`architecture#dankg-architecture` because it happens to open with a
+sentence; `src/hash.md` declared `title: Hash` and got nothing. Same
+key, same corpus, two shapes, decided by whether the author wrote a
+line of prose first.
+
+A declared `title` now builds that node up front, before the walk.
+Every heading in the file hangs off it, the way an `h1` in a
+prose-first document already did. A file that declares no `title`
+keeps exactly the shape it has today: the first heading is the entry
+node, and the lazy fallback still covers orphan content and a file
+with no headings at all. The node exists because the author declared
+a title, not because every file must have one.
+
+The document's own leading heading is absorbed when it repeats that
+title. The rule is `weave::drop_repeated_title_heading`'s, reused
+rather than reinvented: only the very first block qualifies, and only
+on an exact match once both sides are trimmed by the same
+`Inline::plain` flattening a heading node's own title comes from. So
+`title: Hash` over `# Hash` yields one node, `src/hash#hash`, at level
+0 -- the identical id the heading alone used to produce, which is why
+the change moves no link target in this corpus. A leading heading
+saying something else is the author's own structure and keeps its own
+node beneath the title's.
+
+The title's slug is reserved through the same per-file `Slugger` a
+heading's is. It used to come from a bare `slugify` call that reserved
+nothing, which was a live bug rather than a latent one: a file node
+and a heading sharing a name produced two `Node`s carrying one id,
+`Graph::sort`'s `dedup_by` kept the first and dropped the second, and
+the heading lost its node, its extent, and its children's real parent
+while the containment edge it had already pushed survived as a
+self-loop. The one-file probe that found it produced exactly one node
+and the edge `a#hash -> a#hash`.
+
+**Rationale:** Frontmatter is where a document declares what it is. A
+key the parser reads, `Frontmatter::title` exposes, and both weave
+backends typeset should not also depend on the shape of the prose
+underneath it to reach the graph. Making the node unconditional for
+every file was the alternative and the wrong one: it adds a synthetic
+node to every file in the corpus, and it makes `[text](file.md)` land
+on a node named after the filename rather than on the heading the
+author actually wrote -- `src/md/frontmatter#frontmatter` instead of
+`src/md/frontmatter#markdown-frontmatter`. Absorbing the repeated
+heading rather than suffixing it is what keeps the change free: a
+`-1` suffix on the heading would have moved every fragment already
+pointing at it.
+
+<!-- dankg:depends target=#decision-61-a-frontmatter-cover-switch-for-the-woven-title quote="Only the document's very first block qualifies, and only on an exact match of the title once both sides are trimmed." -->
 
 ## Block nodes
 
@@ -955,7 +1014,7 @@ would undo that.
 
 - `[t](#heading)` -- Slug within the current file.
 - `[t](other.md#heading)` -- Path relative to the current file, then slug.
-- `[t](other.md)` -- That file's first heading; else a file-level node.
+- `[t](other.md)` -- That file's own level-0 title node (decision 62); else its first heading; else a file-level node.
 - `[[Heading]]` -- Slug search across the root; ambiguity warns and picks the lexicographically first path.
 - `[[other#Heading]]` -- Filename stem search across the root, then slug.
 - `[t](https://...)` -- External. Recorded on the node, never a graph node.
