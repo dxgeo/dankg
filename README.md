@@ -407,6 +407,27 @@ beneath its own `<h1>` -- an unlabeled byline, a formatted date --
 without dumping the rest of a document's frontmatter the way the PDF
 cover page does.
 
+Frontmatter's own `cover` key decides where a document's title
+appears. The title block is the PDF cover page, or HTML's `<h1>` and
+byline. The repeated heading is the document's own leading heading,
+when that heading repeats the title. `cover: true` keeps the title
+block and drops the repeated heading, so the title is typeset once.
+`cover: false` does the reverse: no cover page, no generated `<h1>`,
+and the repeated heading carries the title alone. Leave `cover` out
+and nothing changes -- both render, exactly as they always have.
+`cover` itself never appears as a line on the page it names.
+
+```markdown
+---
+title: Weave
+cover: true
+---
+
+# Weave
+
+This page shows "Weave" once, on the cover.
+```
+
 A named block immediately followed by its own recorded
 `<!-- dankg:result ... -->` marker renders as one paired unit --
 source, then a labeled "Output" -- instead of three unrelated blocks.
@@ -483,10 +504,13 @@ An uncaptioned artifact is not a real figure in either backend, so
 `figure=` changes nothing about it.
 
 `weave=hidden` drops both halves of a paired block together.
-`weave=source-hidden` and `weave=output-hidden` each drop only one,
-leaving the other exactly as it already renders -- a walkthrough
-that shows a chart without the code behind it, or a snippet worth
-showing without spoiling the answer it produces:
+`weave=source-hidden` keeps the block's own `produces=file:` artifact
+and nothing else -- no source, no captured output, no provenance
+line -- for a walkthrough that shows a chart without the code behind
+it or the `wrote chart.png` under it. `weave=output-hidden` is the
+mirror image: it keeps the source and drops that whole second half,
+artifact included, for a snippet worth showing without spoiling the
+answer it produces. A failed run is never hidden by either one:
 
 ````markdown
 ```python name=chart deps=setup produces=file:chart.png weave=source-hidden
@@ -546,7 +570,8 @@ rather than broken markup.
 <!-- dankg:depends target=architecture.md#staleness quote="The rendered page itself never changes because of this" -->
 <!-- dankg:depends target=architecture.md#produced-artifacts quote="A recognized pair's source block may also declare" -->
 <!-- dankg:depends target=architecture.md#captions quote="so a caption can carry its own spaces" -->
-<!-- dankg:depends target=architecture.md#hiding-one-half-of-a-pair quote="each drop exactly one, leaving the other exactly as it already renders" -->
+<!-- dankg:depends target=architecture.md#hiding-one-half-of-a-pair quote="each keep exactly one thing" -->
+<!-- dankg:depends target=architecture.md#hiding-one-half-of-a-pair quote="A failed run is the one thing neither value hides" -->
 <!-- dankg:depends target=architecture.md#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="gives a reader genuine, automatic" -->
 <!-- dankg:depends target=architecture.md#decision-55-a-captioned-figure-renders-outside-the-pairs-own-block-in-typst quote="nothing to unwrap a figure out of a box from the outside" -->
 <!-- dankg:depends target=architecture.md#decision-58-a-hayagriva-tagged-fence-or-a-frontmatter-bibliography-path-as-a-documents-bibliography-source----full-hayagriva-schema-fidelity quote="Everything Hayagriva's own format supports parses, not a curated" -->

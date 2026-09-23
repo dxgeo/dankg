@@ -14,7 +14,9 @@
 //!
 //! The document's own frontmatter renders on a dedicated cover page, not
 //! inline with the outline and body -- see this file's own *Cover page*
-//! prose for why.
+//! prose for why. Frontmatter's own `cover: false` turns that page off
+//! entirely; `cover: true` is the default shape, already what a document
+//! with no `cover` key at all gets.
 //!
 //! Targets Typst 0.15.1's syntax (confirmed by `tests/typst.rs`'s own
 //! real-compile check). Typst is still pre-1.0; no `typst --version`
@@ -43,7 +45,10 @@ pub struct BibliographySummary {
 }
 
 /// `title` becomes the cover page's own large centered heading, with the
-/// rest of the document's frontmatter printed beneath it. `#outline()`
+/// rest of the document's frontmatter printed beneath it, unless
+/// frontmatter's own `cover: false` (decision 61) drops that page and
+/// leaves the document's own first heading to carry the title instead.
+/// `#outline()`
 /// (Typst's table of contents) is inserted right after the page break
 /// that follows only when `toc` is true -- a PDF has no runtime to
 /// toggle one, so the choice is made once, at compile time, unlike the
@@ -67,7 +72,10 @@ pub fn render(
     bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
 ) -> String {
-    let mut out = cover_page(title, &doc.frontmatter);
+    let mut out = match doc.frontmatter.cover() {
+        Some(false) => String::new(),
+        _ => cover_page(title, &doc.frontmatter),
+    };
     if toc {
         out.push_str("#outline()\n\n");
     }
@@ -100,7 +108,7 @@ fn cover_page(title: &str, frontmatter: &Frontmatter) -> String {
     out
 }
 
-const NON_GENERIC_FRONTMATTER_KEYS: &[&str] = &["title", "author", "date", "bibliography"];
+const NON_GENERIC_FRONTMATTER_KEYS: &[&str] = &["title", "author", "date", "bibliography", "cover"];
 
 fn frontmatter_lines(frontmatter: &Frontmatter) -> Vec<String> {
     frontmatter
@@ -272,7 +280,15 @@ fn eval_pair(
         body.push_str(&figure);
         figure.clear();
     }
-    let mut out = format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]\n");
+    // Hiding both halves can leave nothing to wrap. An empty stroked
+    // block is a visible artifact of its own -- a rule beside blank
+    // space -- so it is dropped rather than emitted, leaving whatever
+    // figure the pair produced standing on its own.
+    let mut out = if body.trim().is_empty() {
+        String::new()
+    } else {
+        format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]\n")
+    };
     out.push_str(&figure);
     out
 }
@@ -310,8 +326,10 @@ fn eval_pair_result(
         }
         _ => (if pair.failed { "Output (failed)" } else { "Output" }).to_string(),
     };
-    let _ = write!(body, "\n#text(size: 9pt, fill: {color})[{output_caption}]\n\n");
-    body.push_str(&code_or_data_table(pair.output_info, pair.output_text, pair.output_line, diags));
+    if !hides_output(source_info, pair) {
+        let _ = write!(body, "\n#text(size: 9pt, fill: {color})[{output_caption}]\n\n");
+        body.push_str(&code_or_data_table(pair.output_info, pair.output_text, pair.output_line, diags));
+    }
     if let Some((lang, content)) = table {
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
         let content_markup = code_or_data_table(&info, content, source_line, diags);
@@ -339,9 +357,28 @@ fn eval_pair_result(
             None => body.push_str(&image_markup),
         }
     }
-    if let Some(p) = provenance_text(pair) {
-        let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n", escape_typst(&p));
+    if !hides_output(source_info, pair) {
+        if let Some(p) = provenance_text(pair) {
+            let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n", escape_typst(&p));
+        }
     }
+}
+
+/// Whether a block's own recorded output half -- the caption, the
+/// captured text, and the provenance line -- is dropped from the page
+/// (decision 53). A block that hides its source is asking to be seen
+/// as its artifact alone, so the captured text goes with it. The
+/// artifact itself is untouched: [`eval_pair_result`] still runs and
+/// still builds `figure`, which is what separates `source-hidden` from
+/// `output-hidden` -- the latter returns before the figure is built
+/// and so drops it as well.
+///
+/// A failed run is never hidden, whichever flag is set. Hiding a half
+/// is a statement about a working block's own typeset shape, not a
+/// licence to swallow an error: a reader given a page with no trace
+/// of the failure has no way to know the artifact above it is stale.
+fn hides_output(info: &InfoString, pair: &Pair) -> bool {
+    !pair.failed && info.weave_source_hidden()
 }
 
 /// `produces`/`reads` (decision 33), when either is non-empty, is the
@@ -645,6 +682,38 @@ mod tests {
         let mut diags = Diags::new("t.md");
         let out = render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(!out.contains("#outline()"));
+    }
+
+    #[test]
+    fn cover_false_drops_the_whole_cover_page() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ntitle: T\nauthor: Jane Doe\ncover: false\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        assert!(!out.contains("#pagebreak()"), "{out}");
+        assert!(!out.contains("Jane Doe"), "{out}");
+        assert!(out.starts_with("#outline()"), "{out}");
+    }
+
+    #[test]
+    fn cover_true_is_the_same_page_a_document_with_no_cover_key_gets() {
+        let mut d = Diags::new("t.md");
+        let with = Document::parse("---\ntitle: T\ncover: true\n---\n# H\n", &mut d);
+        let without = Document::parse("---\ntitle: T\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let a = render(&with, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let b = render(&without, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        assert_eq!(a, b, "`cover` is a directive, never a line on the page it names");
+    }
+
+    #[test]
+    fn an_unrecognized_cover_value_keeps_the_page() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ntitle: T\ncover: yes\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        assert!(out.contains("#pagebreak()"), "never guessed at, so the default stands: {out}");
+        assert!(!out.contains("Cover"), "{out}");
     }
 
     #[test]
@@ -1013,12 +1082,35 @@ mod tests {
     }
 
     #[test]
-    fn source_hidden_keeps_the_output_but_drops_the_source() {
+    fn source_hidden_drops_both_halves_of_a_successful_pair() {
         let src = "```sh name=a weave=source-hidden\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
         let (out, _) = render_doc(src);
         assert!(!out.contains("echo hi"), "{out}");
-        assert!(out.contains("Output"), "{out}");
-        assert!(out.contains("hi\n```"), "{out}");
+        assert!(!out.contains("Output"), "{out}");
+        assert!(!out.contains("hi\n```"), "{out}");
+        // Nothing left to wrap, so no empty stroked block either.
+        assert!(!out.contains("#block(stroke:"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_still_renders_a_captioned_figure() {
+        let src = "```python name=a produces=file:chart.png weave=source-hidden caption=\"A chart\"\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, true);
+        assert!(!out.contains("savefig()"), "{out}");
+        assert!(!out.contains("wrote chart.png"), "{out}");
+        assert!(out.contains("#figure(caption: [A chart])"), "{out}");
+        assert!(out.contains("#image(\"assets/chart.png\")"), "{out}");
+    }
+
+
+    #[test]
+    fn a_failed_pair_keeps_its_output_even_when_source_hidden() {
+        let src = "```sh name=a weave=source-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\nboom\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("Output (failed)"), "{out}");
+        assert!(out.contains("boom"), "{out}");
     }
 
     #[test]

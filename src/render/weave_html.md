@@ -65,6 +65,12 @@ pub struct Bibliography<'a> {
 /// date-handling crate here either). Every other frontmatter key is
 /// left alone; this page has never dumped the rest of a document's
 /// frontmatter the way the PDF cover page does, and still does not.
+///
+/// That whole title block -- `<h1>`, byline, date -- is this backend's
+/// own cover. Frontmatter's own `cover: false` (decision 61) drops it,
+/// and the document's own first heading carries the title alone. The
+/// `<title>` in `<head>` is never dropped with it: a browser tab still
+/// needs a name, and nothing about it repeats on the page.
 pub fn render(
     doc: &Document,
     title: &str,
@@ -95,12 +101,14 @@ pub fn render(
     toc(&mut out, doc, &slugs);
 
     out.push_str("<main>\n");
-    let _ = writeln!(out, "<h1>{}</h1>", escape(title));
-    if let Some(author) = author_line(&doc.frontmatter) {
-        let _ = writeln!(out, "<p class=\"byline\">{author}</p>");
-    }
-    if let Some(date) = date_line(&doc.frontmatter) {
-        let _ = writeln!(out, "<p class=\"byline-date\">{date}</p>");
+    if doc.frontmatter.cover() != Some(false) {
+        let _ = writeln!(out, "<h1>{}</h1>", escape(title));
+        if let Some(author) = author_line(&doc.frontmatter) {
+            let _ = writeln!(out, "<p class=\"byline\">{author}</p>");
+        }
+        if let Some(date) = date_line(&doc.frontmatter) {
+            let _ = writeln!(out, "<p class=\"byline-date\">{date}</p>");
+        }
     }
     blocks(&mut out, &doc.blocks, &slugs, tables, images, figures_outside, bibliography, diags);
     // Unconditionally at the end, never at the `hayagriva` fence's own
@@ -405,14 +413,24 @@ fn eval_pair(
     diags: &mut Diags,
 ) {
     let class = if pair.failed { "eval-pair failed" } else { "eval-pair" };
-    let _ = writeln!(out, "<figure class=\"{class}\">");
+    let mut inner = String::new();
     if !source_info.weave_source_hidden() {
-        code_or_data_table(out, source_info, source_text, source_line, diags);
+        code_or_data_table(&mut inner, source_info, source_text, source_line, diags);
     }
     let mut figure = String::new();
     if !source_info.weave_output_hidden() {
-        eval_pair_result(out, &mut figure, source_info, pair, table, image, source_line, diags);
+        eval_pair_result(&mut inner, &mut figure, source_info, pair, table, image, source_line, diags);
     }
+    // Hiding both halves can leave the wrapper with nothing inside it.
+    // An empty `<figure class="eval-pair">` still carries the pair's
+    // own border and spacing, so it is dropped rather than emitted,
+    // leaving whatever figure the pair produced standing on its own.
+    if inner.trim().is_empty() {
+        out.push_str(&figure);
+        return;
+    }
+    let _ = writeln!(out, "<figure class=\"{class}\">");
+    out.push_str(&inner);
     if source_info.figure_outside().unwrap_or(figures_outside) {
         out.push_str("</figure>\n");
         out.push_str(&figure);
@@ -454,8 +472,10 @@ fn eval_pair_result(
         }
         _ => (if pair.failed { "Output (failed)" } else { "Output" }).to_string(),
     };
-    let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(&output_caption));
-    code_or_data_table(out, pair.output_info, pair.output_text, pair.output_line, diags);
+    if !hides_output(source_info, pair) {
+        let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(&output_caption));
+        code_or_data_table(out, pair.output_info, pair.output_text, pair.output_line, diags);
+    }
     if let Some((lang, content)) = table {
         figure.push_str("<figure class=\"table-figure\">\n");
         if let Some(label) = source_info.caption().or_else(|| source_info.produces()) {
@@ -479,7 +499,26 @@ fn eval_pair_result(
         }
         figure.push_str("</figure>\n");
     }
-    provenance(out, pair);
+    if !hides_output(source_info, pair) {
+        provenance(out, pair);
+    }
+}
+
+/// Whether a block's own recorded output half -- the caption, the
+/// captured text, and the provenance line -- is dropped from the page
+/// (decision 53). A block that hides its source is asking to be seen
+/// as its artifact alone, so the captured text goes with it. The
+/// artifact itself is untouched: [`eval_pair_result`] still runs and
+/// still builds `figure`, which is what separates `source-hidden` from
+/// `output-hidden` -- the latter returns before the figure is built
+/// and so drops it as well.
+///
+/// A failed run is never hidden, whichever flag is set. Hiding a half
+/// is a statement about a working block's own typeset shape, not a
+/// licence to swallow an error: a reader given a page with no trace
+/// of the failure has no way to know the artifact above it is stale.
+fn hides_output(info: &InfoString, pair: &Pair) -> bool {
+    !pair.failed && info.weave_source_hidden()
 }
 
 /// The MIME type a `data:` URI needs, from the artifact's own extension
@@ -1060,6 +1099,29 @@ mod tests {
     }
 
     #[test]
+    fn cover_false_drops_the_title_block_but_never_the_head_title() {
+        let (out, _) = render_doc("---\nauthor: Jane Doe\ndate: 2026-09-18\ncover: false\n---\n# H\n");
+        assert!(!out.contains("<h1>Title</h1>"), "{out}");
+        assert!(!out.contains("Jane Doe"), "the byline is part of the same block: {out}");
+        assert!(!out.contains("September 18, 2026"), "{out}");
+        assert!(out.contains("<title>Title</title>"), "a browser tab still needs a name: {out}");
+        assert!(out.contains("<h1 id=\"h\">H</h1>"), "the document's own heading is untouched: {out}");
+    }
+
+    #[test]
+    fn cover_true_renders_the_same_title_block_as_no_cover_key() {
+        let (with, _) = render_doc("---\nauthor: Jane Doe\ncover: true\n---\n# H\n");
+        let (without, _) = render_doc("---\nauthor: Jane Doe\n---\n# H\n");
+        assert_eq!(with, without, "dropping the repeated heading is `weave.rs`'s own job, not this module's");
+    }
+
+    #[test]
+    fn an_unrecognized_cover_value_keeps_the_title_block() {
+        let (out, _) = render_doc("---\ncover: yes\n---\n# H\n");
+        assert!(out.contains("<h1>Title</h1>"), "never guessed at, so the default stands: {out}");
+    }
+
+    #[test]
     fn author_renders_as_an_unlabeled_byline() {
         let (out, _) = render_doc("---\nauthor: Jane Doe\n---\n# H\n");
         assert!(out.contains("<p class=\"byline\">Jane Doe</p>"), "{out}");
@@ -1363,12 +1425,34 @@ mod tests {
     }
 
     #[test]
-    fn source_hidden_keeps_the_output_but_drops_the_source() {
+    fn source_hidden_drops_both_halves_of_a_successful_pair() {
         let src = "```sh name=a weave=source-hidden\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
         let (out, _) = render_doc(src);
         assert!(!out.contains("echo hi"), "{out}");
-        assert!(out.contains("<figcaption>Output</figcaption>"), "{out}");
-        assert!(out.contains(">hi\n<"), "{out}");
+        assert!(!out.contains("<figcaption>Output</figcaption>"), "{out}");
+        assert!(!out.contains(">hi\n<"), "{out}");
+        // Nothing left inside, so no empty pair wrapper either.
+        assert!(!out.contains("class=\"eval-pair\""), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_still_renders_a_captioned_figure() {
+        let src = "```python name=a produces=file:chart.png weave=source-hidden caption=\"A chart\"\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"png".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, true);
+        assert!(!out.contains("savefig()"), "{out}");
+        assert!(!out.contains("wrote chart.png"), "{out}");
+        assert!(out.contains("class=\"image-figure\""), "{out}");
+        assert!(out.contains("<figcaption>A chart</figcaption>"), "{out}");
+    }
+
+    #[test]
+    fn a_failed_pair_keeps_its_output_even_when_source_hidden() {
+        let src = "```sh name=a weave=source-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\nboom\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("<figcaption>Output (failed)</figcaption>"), "{out}");
+        assert!(out.contains("boom"), "{out}");
     }
 
     #[test]

@@ -175,3 +175,62 @@ fn rendered_citations_and_bibliography_actually_compile() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A `cover: false` document (decision 61) starts with `#outline()` or a
+/// heading, never the `#align(center)[...]` block every other emitted
+/// document opens with. Dropping the cover page changes the shape of the
+/// markup Typst is handed, not just a line inside it, so a real compile is
+/// the only thing that confirms the remaining document still stands on its
+/// own.
+const NO_COVER_SOURCE: &str = r#"---
+title: No Cover Smoke Test
+author: Jane Doe
+date: 2026-09-18
+cover: false
+---
+# No cover smoke test
+
+Body text, with *emphasis* and a [link](https://example.com).
+
+## Later
+"#;
+
+#[test]
+fn a_document_with_its_cover_page_dropped_actually_compiles() {
+    let mut parse_diags = Diags::new("t.md");
+    let doc = Document::parse(NO_COVER_SOURCE, &mut parse_diags);
+    assert!(parse_diags.is_empty(), "fixture should parse cleanly: {:?}", parse_diags.items());
+
+    let mut diags = Diags::new("t.md");
+    let typ =
+        typst::render(&doc, "No Cover Smoke Test", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+    assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
+    assert!(typ.starts_with("#outline()"), "the cover page and its pagebreak are gone: {typ}");
+    assert!(!typ.contains("Jane Doe"), "the byline goes with the page: {typ}");
+
+    let dir = std::env::temp_dir().join(format!("dankg-typst-nocover-smoke-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("scratch dir");
+    let typ_path = dir.join("doc.typ");
+    let pdf_path = dir.join("doc.pdf");
+    fs::write(&typ_path, &typ).expect("write .typ");
+
+    let output = match typst_compile(&typ_path, &pdf_path) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("skipping: `typst` not runnable ({e})");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+
+    assert!(
+        output.status.success(),
+        "typst compile failed:\n-- .typ --\n{typ}\n-- stderr --\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(pdf_path.exists(), "typst reported success but wrote no PDF");
+    assert!(fs::metadata(&pdf_path).unwrap().len() > 0, "PDF is empty");
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -274,7 +274,7 @@ A pipe table is no longer `Block::Passthrough`. A new `Block::Table { aligns, he
 
 ## Decision 44: Weave PDF via Typst
 
-`render::typst` emits Typst markup only -- a sibling to `render::dot`/`render::mermaid`, never a PDF generator. The document's title and its own frontmatter render on a dedicated cover page: title large and centered, `author` beneath it as its own unlabeled byline (comma-joined for a list of several), `date` beneath that as a real Typst `datetime` -- `2026-09-18` reads as "September 18, 2026", built by Typst's own formatter, never a raw string -- and every remaining frontmatter entry beneath that as its own generic labeled line. `title`, `author`, `date`, `bibliography`, and any `dankg.*` key are excluded from that generic dump -- none of the five is reader-facing content. `Frontmatter::date_parts` parses `YYYY`/`YYYY-MM`/`YYYY-MM-DD`; anything else falls back to the same generic scalar-or-list text every other key gets, never silently dropped. The whole page ends with `#pagebreak()`, before the outline and body. `weave::run` always writes the result to `.dankg/build/weave/<name>.typ`, then spawns a configured `[weave.pdf] command` (`typst compile {typ} {pdf}`) against it, the same `cmd::build` substitution-then-split every other configured command already goes through. Unconfigured, weave still writes the `.typ` and reports that no PDF was produced, the same graceful degradation an unconfigured `[tangle.*] command` already gets. `[weave.pdf] template` names a Typst file concatenated in front of the emitted cover page, verbatim, before the `.typ` is written -- a plain-text prepend rather than a Typst `#import`, since an `#import`'s own path resolves relative to the compiled `.typ`, not to the config that named it. Typst's own version is targeted by documentation (0.15.1, confirmed by `tests/typst.rs`'s own real-compile check), never pinned by a runtime `typst --version` check or an optional Cargo dependency.
+`render::typst` emits Typst markup only -- a sibling to `render::dot`/`render::mermaid`, never a PDF generator. The document's title and its own frontmatter render on a dedicated cover page: title large and centered, `author` beneath it as its own unlabeled byline (comma-joined for a list of several), `date` beneath that as a real Typst `datetime` -- `2026-09-18` reads as "September 18, 2026", built by Typst's own formatter, never a raw string -- and every remaining frontmatter entry beneath that as its own generic labeled line. `title`, `author`, `date`, `bibliography`, `cover`, and any `dankg.*` key are excluded from that generic dump -- none of the six is reader-facing content. Frontmatter's own `cover: false` (decision 61) drops the page entirely; `cover: true` keeps it and drops the document's own repeated leading heading instead. `Frontmatter::date_parts` parses `YYYY`/`YYYY-MM`/`YYYY-MM-DD`; anything else falls back to the same generic scalar-or-list text every other key gets, never silently dropped. The whole page ends with `#pagebreak()`, before the outline and body. `weave::run` always writes the result to `.dankg/build/weave/<name>.typ`, then spawns a configured `[weave.pdf] command` (`typst compile {typ} {pdf}`) against it, the same `cmd::build` substitution-then-split every other configured command already goes through. Unconfigured, weave still writes the `.typ` and reports that no PDF was produced, the same graceful degradation an unconfigured `[tangle.*] command` already gets. `[weave.pdf] template` names a Typst file concatenated in front of the emitted cover page, verbatim, before the `.typ` is written -- a plain-text prepend rather than a Typst `#import`, since an `#import`'s own path resolves relative to the compiled `.typ`, not to the config that named it. Typst's own version is targeted by documentation (0.15.1, confirmed by `tests/typst.rs`'s own real-compile check), never pinned by a runtime `typst --version` check or an optional Cargo dependency.
 
 **Rationale:** Zero crates stays intact the same way it does for `tangle`: DanKG never links a PDF library, only emits text and spawns an external command. A runtime version check has no precedent to justify its own maintenance cost. Pandoc's own Typst writer and Org-mode's LaTeX/`ox-typst` export backends solve the identical "emit markup, shell out to compile it" problem the identical way: document a target version, and let a real incompatibility surface as the compiler's own error. `duckdb` already gets exactly this treatment from `[db.*] command` in this codebase. The cover page exists because inlining the title directly in front of the outline and body, the first cut's own shape, visibly duplicated it whenever a file's frontmatter `title` matched its own first heading -- a pattern several static-site generators expect. A separate page has no such collision.
 
@@ -345,7 +345,7 @@ A new `caption` key joins `KNOWN_ATTRS`. `InfoString::caption()` reads it raw, f
 
 ## Decision 53: `weave=source-hidden` and `weave=output-hidden` split a pair's own two halves
 
-Two more recognized values join `weave=hidden` (decision 48), read the same loose way `weave_hidden()` already reads it: `weave=source-hidden` drops only the source's own rendering from a recognized pair (decision 46), leaving its output, artifact, and provenance exactly as they already render; `weave=output-hidden` drops that entire second half instead -- output, artifact, and provenance together -- leaving the source exactly as it already renders. Since `weave=` holds one value, the two are mutually exclusive by construction; hiding both halves at once is already `weave=hidden`, not a new combination. On a block with no recorded result, there is no second half for either value to act on: `source-hidden` falls back to `hidden`'s own "absent as if it were never in the document" (decision 48), since hiding a lone source with nothing left to show is indistinguishable from hiding the block outright; `output-hidden` is a no-op there, rendering the block exactly as if the attribute were absent. Neither value changes the pair's own `failed` class (HTML) or stroke color (Typst): whichever half is visible still carries the identical status signal it already would.
+Two more recognized values join `weave=hidden` (decision 48), read the same loose way `weave_hidden()` already reads it: `weave=source-hidden` drops only the source's own rendering from a recognized pair (decision 46), leaving its output, artifact, and provenance exactly as they already render (narrowed by decision 60, which drops the output and provenance with it and keeps the artifact alone); `weave=output-hidden` drops that entire second half instead -- output, artifact, and provenance together -- leaving the source exactly as it already renders. Since `weave=` holds one value, the two are mutually exclusive by construction; hiding both halves at once is already `weave=hidden`, not a new combination. On a block with no recorded result, there is no second half for either value to act on: `source-hidden` falls back to `hidden`'s own "absent as if it were never in the document" (decision 48), since hiding a lone source with nothing left to show is indistinguishable from hiding the block outright; `output-hidden` is a no-op there, rendering the block exactly as if the attribute were absent. Neither value changes the pair's own `failed` class (HTML) or stroke color (Typst): whichever half is visible still carries the identical status signal it already would.
 
 **Rationale:** `weave=hidden` (decision 48) is all-or-nothing. A reader sometimes wants only one half: a walkthrough that shows a chart without the plotting code behind it, or a snippet worth showing without spoiling the answer it produces. Splitting the existing pair into its own two already-distinct halves -- source, and everything decision 46 already renders after it -- needed no new structure, only two more values of the attribute decision 48 already introduced for exactly this kind of weave-only rendering hint.
 
@@ -637,6 +637,100 @@ throughout. A line range is what diagnostics and editors both want.
 A file with no headings, or with links written above its first heading, gets a
 synthetic level-0 node named from its frontmatter title or file name, so that
 `[text](file.md)` always has something to land on.
+
+## Decision 60: `weave=source-hidden` drops the output half too, keeping only the artifact
+
+Decision 53 gave `source-hidden` one job: drop the source, leave the
+output, artifact, and provenance untouched. That is not what a block
+declaring it usually wants. A block whose whole purpose is a chart or
+a table asks to be seen as that artifact; its captured stdout is a
+line like `wrote chart.png`, and its provenance line names tables the
+figure above already stands for. `source-hidden` now drops the output
+caption, the captured text, and the provenance line along with the
+source, and renders the block's own `produces=file:` artifact alone.
+`output-hidden` is unchanged: it still returns before the artifact is
+built, so it still drops the artifact with the rest of that half, and
+still leaves the source exactly as it already renders. The two remain
+mutually exclusive, and remain distinguishable -- `source-hidden` is
+now "the artifact only," `output-hidden` is "the source only," and
+`weave=hidden` is still "none of it."
+
+Two consequences follow. Hiding both halves can leave a pair's own
+wrapper -- Typst's `#block(stroke: ...)` (decision 46), HTML's
+`<figure class="eval-pair">` -- with nothing inside it, and an empty
+wrapper is a visible artifact of its own: a rule beside blank space,
+or a bordered void. Both backends now omit the wrapper entirely when
+its body comes out empty, leaving whichever figure the pair produced
+standing on its own. And a *failed* run is never hidden, whichever
+value is set: `hides_output` returns false for a failed pair in both
+backends, so the output caption, the captured text, and decision 53's
+own status signal all survive.
+
+**Rationale:** The narrowed behaviour is what the attribute was
+already being used for. A report that hides the source of every
+figure block did not want `wrote chart.png` rendered under each one,
+and had no way to suppress it -- `output-hidden` would have taken the
+figure too, and `weave=hidden` takes everything. Keeping the failure
+case visible is the one exception worth hard-coding rather than
+leaving to the author: hiding a half is a statement about a working
+block's own typeset shape, not a licence to swallow an error. A
+reader handed a page with no trace of a failure has no way to know
+the artifact above it is stale, which is exactly the silent-staleness
+failure decision 47's own stale badge exists to prevent.
+
+<!-- dankg:depends target=#decision-53-weavesource-hidden-and-weaveoutput-hidden-split-a-pairs-own-two-halves quote="Since `weave=` holds one value, the two are mutually exclusive by construction" -->
+
+## Decision 61: A frontmatter `cover` switch for the woven title
+
+A woven document prints its title twice. The PDF backend prints it on
+the cover page (decision 44), and the document's own leading heading
+usually repeats it -- `title: Weave` over `# Weave`, the shape a
+static-site generator expects. HTML prints the same two without a
+page break between them: a generated `<h1>` directly above the
+document's own `<h1>`. A frontmatter `cover` key now settles which of
+the two a reader sees.
+
+`cover: true` keeps each backend's own title block -- the PDF cover
+page, HTML's `<h1>` and byline. It drops the repeated heading
+instead. `cover: false` drops the title block and keeps the repeated
+heading, which then carries the title alone. Typst loses the cover
+page and its `#pagebreak()` with it; HTML loses the generated `<h1>`,
+the byline, and the date line. No `cover` key at all is what every
+document written before the key existed already gets: the title
+block, the repeated heading, and neither one touched.
+
+`Frontmatter::cover` returns `Option<bool>` for exactly those three
+states. It matches `true` and `false` without regard to case, since
+`True` and `TRUE` are the same boolean to a YAML reader. Any other
+value reads as no answer at all and leaves the default standing --
+the same "never guessed at" stance the rest of the frontmatter subset
+holds.
+
+The repeated heading is dropped in `weave::run`, once, before either
+renderer sees the document. Both backends want the identical
+document. HTML's own table of contents is built from the same blocks
+its body is, so a heading dropped there leaves the outline too, in
+both formats. Only the document's very first block qualifies, and
+only on an exact match of the title once both sides are trimmed. A
+heading further down is the author's own structure, and weave never
+guesses at which. `cover` itself never prints as a labeled line on
+the cover page. It joins `bibliography` and every `dankg.*` key as a
+directive rather than reader-facing content.
+
+**Rationale:** The duplication was a real defect that the cover page
+only half-hid. Decision 44 made the repeat *look* deliberate by
+putting a page break in front of it, which is not the same as a
+reader wanting to read the title twice. Dropping the repeated heading
+unconditionally was the obvious alternative and the wrong one: it
+silently edits a document that never asked, and it breaks the author
+who wrote the title block and the repeated heading on purpose. Three
+states are what let the existing default stay exactly where it is
+while each of the two real preferences gets a way to say itself. One
+key covers both backends rather than one key each, because the
+question it answers -- where does this document's title live -- is a
+property of the document, not of the format it is typeset into.
+
+<!-- dankg:depends target=src/md/frontmatter.md#markdown-frontmatter quote="Unsupported input warns with its line number and is skipped, never guessed at." -->
 
 ## Block nodes
 
@@ -3059,17 +3153,25 @@ figure for a placement choice to apply to.
 ## Hiding one half of a pair
 
 `weave=hidden` (above) drops both of a pair's own halves together.
-`weave=source-hidden` and `weave=output-hidden` (decision 53) each
-drop exactly one, leaving the other exactly as it already renders:
-`source-hidden` keeps the output, artifact, and provenance but drops
-the source; `output-hidden` keeps the source but drops everything
-after it. Since `weave=` holds one value, the two are mutually
-exclusive by construction -- hiding both halves is already
-`weave=hidden`. On a block with no recorded result, `source-hidden`
-falls back to `hidden`'s own "absent as if it were never in the
-document," since there is no separate output left to preserve;
-`output-hidden` is a no-op there, since there is no separate output
-half to drop.
+`weave=source-hidden` and `weave=output-hidden` (decisions 53 and 60)
+each keep exactly one thing: `source-hidden` keeps the block's own
+`produces=file:` artifact and drops the source, the output caption,
+the captured text, and the provenance line; `output-hidden` keeps the
+source and drops that whole second half, artifact included. Since
+`weave=` holds one value, the two are mutually exclusive by
+construction -- hiding everything is already `weave=hidden`. On a
+block with no recorded result, `source-hidden` falls back to
+`hidden`'s own "absent as if it were never in the document," since
+there is no artifact left to show; `output-hidden` is a no-op there,
+since there is no separate output half to drop.
+
+Hiding both of a pair's own visible halves can leave its wrapper --
+Typst's `#block(stroke: ...)`, HTML's `<figure class="eval-pair">` --
+with nothing in it, and an empty wrapper still draws its own rule and
+spacing. Both backends omit the wrapper when its body comes out
+empty. A failed run is the one thing neither value hides: `hides_output`
+returns false for a failed pair, so the captured text and the pair's
+own status signal survive whichever value is set.
 
 <!-- dankg:depends target=#decision-52-caption-overrides-a-pairs-own-synthesized-caption quote="It replaces exactly one of the two, never both" -->
 <!-- dankg:depends target=#decision-53-weavesource-hidden-and-weaveoutput-hidden-split-a-pairs-own-two-halves quote="Since `weave=` holds one value, the two are mutually exclusive by construction" -->
@@ -3093,7 +3195,10 @@ date-handling crate here either, the same constraint Typst's own
 `datetime` sidesteps only because Typst is doing the formatting
 there). Every other frontmatter key is left alone; this page has never
 dumped the rest of a document's frontmatter the way the PDF cover page
-does.
+does. That whole title block -- `<h1>`, byline, date -- is this
+backend's own cover. Frontmatter's own `cover: false` (decision 61)
+drops it, and the document's own first heading carries the title. The `<title>` in `<head>` is never dropped with it: a browser
+tab still needs a name, and nothing about it repeats on the page.
 
 ## PDF backend
 
@@ -3103,9 +3208,11 @@ title and frontmatter render on a dedicated cover page first --
 title large and centered, `author` beneath it as its own unlabeled
 byline, `date` beneath that as a real Typst `datetime` (never a raw
 string), every remaining entry beneath that as its own generic line.
-`title`, `author`, `date`, `bibliography`, and any `dankg.*` key are
-excluded from that generic dump. The page ends with `#pagebreak()`
-before the outline and body. `weave::run` always
+`title`, `author`, `date`, `bibliography`, `cover`, and any `dankg.*`
+key are excluded from that generic dump. The page ends with
+`#pagebreak()` before the outline and body, and frontmatter's own
+`cover: false` (decision 61) drops the whole page, `#pagebreak()`
+included. `weave::run` always
 writes `.dankg/build/weave/<name>.typ`, then spawns a configured
 `[weave.pdf] command` (typically `typst compile {typ} {pdf}`) against
 it. Unconfigured, weave still writes the `.typ` and reports that no

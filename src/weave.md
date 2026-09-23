@@ -86,7 +86,7 @@ is never anything but a bare name.
 pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_outside: bool) -> Result<Report, String> {
     let source = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let mut diags = Diags::new(path);
-    let doc = Document::parse(&source, &mut diags);
+    let mut doc = Document::parse(&source, &mut diags);
 
     let abs_path = index::absolute(Path::new(path));
     let root = index::discover_root(&abs_path)
@@ -100,6 +100,9 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
 
     let entry_rel = abs_path.strip_prefix(&root).map(index::to_slash).unwrap_or_else(|_| path.to_string());
     warn_stale_pairs(&doc, path, &entry_rel, &root, &config, &mut diags);
+    if doc.frontmatter.cover() == Some(true) {
+        drop_repeated_title_heading(&mut doc, &title);
+    }
     let (tables, images) = produced_artifacts(&doc, &entry_rel, &root, &mut diags);
     let bib = bibliography(&doc, &entry_rel, &root, &mut diags);
 
@@ -116,6 +119,50 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
     diags.sort();
     diags.emit();
     Ok(report)
+}
+```
+
+## The repeated title
+
+`cover: true` says the document's own title block -- the PDF cover
+page, the HTML `<h1>` and byline -- is the one place the title
+belongs. The document's own leading heading, when it repeats that
+title, is the repeated heading. `run` drops it before either backend
+sees the document.
+
+It is dropped here rather than in each renderer, for two reasons.
+Both backends want the identical document. And HTML's own table of
+contents is built from the same blocks its body is, so a heading
+dropped here leaves the outline too -- Typst's `#outline()` and
+HTML's `<nav>` alike -- without either module knowing the rule
+exists.
+
+Where this sits inside `run` is not free either. Dropping a block
+shifts every later block's own index, and `tables`/`images` are keyed
+by that index. So it runs after `warn_stale_pairs`, which compares
+indices against the file still on disk, and before
+`produced_artifacts`, which computes the keys both renderers then
+read.
+
+Only the document's very first block qualifies, and only on an exact
+match of the title once both sides are trimmed. A heading further
+down is the author's own structure, and weave never guesses at which.
+`Inline::plain` is the same flattening `graph/build.rs` already
+derives a heading node's own title with, so a heading written
+`# *Weave*` matches a frontmatter `title: Weave` here exactly as it
+would there.
+
+<!-- dankg:depends target=../architecture.md#decision-61-a-frontmatter-cover-switch-for-the-woven-title quote="Only the document's very first block qualifies, and only on an exact match" -->
+
+```rust name=drop_repeated_title_heading path=weave.rs
+fn drop_repeated_title_heading(doc: &mut Document, title: &str) {
+    let repeats = matches!(
+        doc.blocks.first(),
+        Some(Block::Heading { inlines, .. }) if Inline::plain(inlines).trim() == title.trim()
+    );
+    if repeats {
+        doc.blocks.remove(0);
+    }
 }
 ```
 
@@ -703,6 +750,70 @@ mod tests {
         run(dir.join("notes.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
         let content = fs::read_to_string(&out).unwrap();
         assert!(content.contains("<title>Real Title</title>"), "{content}");
+    }
+
+    #[test]
+    fn cover_true_drops_a_leading_heading_that_repeats_the_title() {
+        let dir = scratch(&[("notes.md", "---\ntitle: Real Title\ncover: true\n---\n# Real Title\n\ntext\n\n## Later\n")]);
+        let out = dir.join("out.html");
+        run(dir.join("notes.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(content.contains("<h1>Real Title</h1>"), "the title block itself stays: {content}");
+        assert!(!content.contains("<h1 id=\"real-title\">"), "the body's own repeat is gone: {content}");
+        // Gone from the table of contents with it -- the TOC is built
+        // from the same blocks the body is.
+        assert!(!content.contains("#real-title"), "{content}");
+        assert!(content.contains("#later"), "a heading further down is untouched: {content}");
+    }
+
+    #[test]
+    fn cover_true_leaves_a_leading_heading_that_says_something_else() {
+        let dir = scratch(&[("notes.md", "---\ntitle: Real Title\ncover: true\n---\n# Something Else\n")]);
+        let out = dir.join("out.html");
+        run(dir.join("notes.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(content.contains("<h1 id=\"something-else\">Something Else</h1>"), "{content}");
+    }
+
+    #[test]
+    fn no_cover_key_repeats_the_title_the_way_it_always_did() {
+        let dir = scratch(&[("notes.md", "---\ntitle: Real Title\n---\n# Real Title\n")]);
+        let out = dir.join("out.html");
+        run(dir.join("notes.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(content.contains("<h1>Real Title</h1>"), "{content}");
+        assert!(content.contains("<h1 id=\"real-title\">Real Title</h1>"), "{content}");
+    }
+
+    #[test]
+    fn cover_false_drops_the_title_block_and_keeps_the_document_heading() {
+        let dir = scratch(&[("notes.md", "---\ntitle: Real Title\nauthor: Jane Doe\ncover: false\n---\n# Real Title\n")]);
+        let out = dir.join("out.html");
+        run(dir.join("notes.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(!content.contains("<h1>Real Title</h1>"), "the generated title block is gone: {content}");
+        assert!(!content.contains("Jane Doe"), "its byline goes with it: {content}");
+        assert!(content.contains("<h1 id=\"real-title\">Real Title</h1>"), "the document's own heading carries it: {content}");
+        assert!(content.contains("<title>Real Title</title>"), "the tab still needs a name: {content}");
+    }
+
+    #[test]
+    fn cover_false_drops_the_typst_cover_page() {
+        let dir = scratch(&[("notes.md", "---\ntitle: Real Title\ncover: false\n---\n# Real Title\n")]);
+        let report = run(dir.join("notes.md").to_str().unwrap(), Format::Pdf, None, true, false).unwrap();
+        let typ = fs::read_to_string(report.typ_path.unwrap()).unwrap();
+        assert!(!typ.contains("#pagebreak()"), "no cover page, so nothing to break after: {typ}");
+        assert!(typ.starts_with("#outline()"), "{typ}");
+        assert!(typ.contains("= Real Title"), "the document's own heading carries the title: {typ}");
+    }
+
+    #[test]
+    fn cover_true_keeps_the_typst_cover_page_and_drops_the_repeat() {
+        let dir = scratch(&[("notes.md", "---\ntitle: Real Title\ncover: true\n---\n# Real Title\n\ntext\n")]);
+        let report = run(dir.join("notes.md").to_str().unwrap(), Format::Pdf, None, true, false).unwrap();
+        let typ = fs::read_to_string(report.typ_path.unwrap()).unwrap();
+        assert!(typ.contains("#text(size: 28pt, weight: \"bold\")[Real Title]"), "{typ}");
+        assert!(!typ.contains("= Real Title"), "the body's own repeat is gone: {typ}");
     }
 
     #[test]

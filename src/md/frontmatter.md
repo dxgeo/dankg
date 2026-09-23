@@ -53,6 +53,15 @@ exactly `true` means private. This is the same conservative default
 frontmatter already applies everywhere else in this module. A typo
 should never silently widen a module's visibility.
 
+`cover` is weave's own frontmatter switch (decision 61), and the one
+key here with three states rather than two. `true` and `false` each
+mean what they say, matched without regard to case -- `True` and
+`TRUE` are the same boolean to a YAML reader, and a reader who writes
+either one means the switch. Anything else reads as `None`, an absent
+key included, and the caller keeps whatever default it already had.
+Unlike `tangle_public`, a wrong value here cannot widen anything. It
+only ever leaves a document rendering the way it already did.
+
 ```rust name=frontmatter_impl path=md/frontmatter.rs
 impl Frontmatter {
     pub fn is_empty(&self) -> bool {
@@ -100,6 +109,28 @@ impl Frontmatter {
     /// directly, the same accessor this one is built on.
     pub fn date_parts(&self) -> Option<(u32, Option<u32>, Option<u32>)> {
         parse_ymd(self.scalar("date")?)
+    }
+
+    /// Whether weave renders this document's own title block -- the PDF
+    /// backend's cover page, the HTML backend's `<h1>` and byline
+    /// (decision 61). `Some(true)` also means weave drops the
+    /// document's own leading heading when it repeats the title, since
+    /// the title block already carries it. `None` covers both an absent
+    /// `cover` key and a value this accessor does not recognize; either
+    /// way the caller keeps its own default. `true`/`false` match
+    /// without regard to case, since `True` and `TRUE` are the same
+    /// boolean to a YAML reader. Nothing else is guessed at, the same
+    /// "half-understood is worse than refused" stance this module holds
+    /// everywhere else.
+    pub fn cover(&self) -> Option<bool> {
+        let raw = self.scalar("cover")?;
+        if raw.eq_ignore_ascii_case("true") {
+            Some(true)
+        } else if raw.eq_ignore_ascii_case("false") {
+            Some(false)
+        } else {
+            None
+        }
     }
 
     pub fn tags(&self) -> Vec<&str> {
@@ -518,6 +549,36 @@ mod tests {
     fn tangle_public_rejects_anything_but_exactly_true() {
         let (fm, _, _, _) = parse("---\ndankg.tangle.public: yes\n---\n");
         assert!(!fm.tangle_public(), "a typo should never silently widen visibility");
+    }
+
+    #[test]
+    fn cover_is_none_with_no_key_at_all() {
+        let (fm, _, _, _) = parse("# No frontmatter\n");
+        assert_eq!(fm.cover(), None);
+    }
+
+    #[test]
+    fn cover_reads_both_booleans() {
+        let (on, _, _, _) = parse("---\ncover: true\n---\n");
+        assert_eq!(on.cover(), Some(true));
+        let (off, _, _, _) = parse("---\ncover: false\n---\n");
+        assert_eq!(off.cover(), Some(false));
+    }
+
+    #[test]
+    fn cover_ignores_case_the_way_a_yaml_reader_does() {
+        let (fm, _, _, _) = parse("---\ncover: True\n---\n");
+        assert_eq!(fm.cover(), Some(true), "`True` is the same boolean as `true`");
+        let (fm, _, _, _) = parse("---\ncover: FALSE\n---\n");
+        assert_eq!(fm.cover(), Some(false));
+    }
+
+    #[test]
+    fn cover_reads_anything_else_as_no_answer() {
+        let (fm, _, _, _) = parse("---\ncover: yes\n---\n");
+        assert_eq!(fm.cover(), None, "an unrecognized value is never guessed at");
+        let (fm, _, _, _) = parse("---\ncover: [true]\n---\n");
+        assert_eq!(fm.cover(), None, "a list is not a boolean");
     }
 }
 ```
