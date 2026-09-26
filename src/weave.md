@@ -104,14 +104,14 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
         drop_repeated_title_heading(&mut doc, &title);
     }
     let (tables, images) = produced_artifacts(&doc, &entry_rel, &root, &mut diags);
-    let labels = figure_labels(&doc, &tables, &images, &mut diags);
+    let (labels, numbers) = figures(&doc, &tables, &images, &mut diags);
     let bib = bibliography(&doc, &entry_rel, &root, &mut diags);
 
     let report = match format {
         Format::Html => {
             render_html(
-                &doc, &title, &config, &root, &tables, &images, &labels, bib.as_ref(), output, figures_outside,
-                &mut diags,
+                &doc, &title, &config, &root, &tables, &images, &labels, &numbers, bib.as_ref(), output,
+                figures_outside, &mut diags,
             )?
         }
         Format::Pdf => render_pdf(
@@ -346,25 +346,62 @@ already set. Suffixing the collision the way `Slugger` suffixes a
 duplicate heading would be wrong here. A silently suffixed label is a
 reference that silently points at the wrong figure.
 
-```rust name=figure_labels path=weave.rs
-/// Every figure's own label, by the block index its pair starts at --
-/// `label=` when the reader wrote one, otherwise the block's own
-/// `name=` (decision 63). A block with no artifact in `tables` or
-/// `images` is not a figure (decision 54) and is absent here. Each
-/// backend turns one label into its own identifier: `<fig:NAME>` in
-/// Typst, `id="fig-NAME"` in HTML.
-fn figure_labels(
+The same walk numbers every figure it finds (decision 65). HTML has no
+way to number one for itself. CSS cannot put a counter value from one
+element into an `<a>` elsewhere in the document. The one feature that
+does exactly that is `target-counter()`. No browser implements it.
+So dankg counts. HTML writes the number as literal text. Typst still
+counts for itself off the `#figure` it was handed. Both backends walk
+the same figure sequence, which is what lands them on the same number.
+
+The count is per kind, never sequential. Typst numbers a table and an
+image on two separate counters, confirmed by a real compile. A single
+counter would disagree with the PDF on every document holding both.
+`kind: table` and `kind: image` are declared rather than inferred for
+exactly this reason. Both backends count off one declaration.
+
+A figure neither backend renders takes no number. `weave=hidden` drops
+the whole pair, and `weave=output-hidden` drops the artifact half with
+it (decision 53). Neither leaves a figure on the page to count. Such a
+figure still keeps its label, which is how a reference to a hidden
+figure stays distinguishable from a reference to nothing.
+`weave=source-hidden` is the other way round. It keeps the artifact
+(decision 60). Its own figure renders and counts like any other.
+
+The two maps come back from one walk rather than two. Each renderer
+then receives only what it reads -- Typst the labels alone, HTML both
+\-- and neither can disagree with the other about which blocks were
+figures in the first place.
+
+```rust name=figures path=weave.rs
+/// Every figure's own label and number, by the block index its pair
+/// starts at. The label is `label=` when the reader wrote one,
+/// otherwise the block's own `name=` (decision 63). The number is
+/// this figure's position among its own kind, counted in document
+/// order (decision 65). A block with no artifact in `tables` or
+/// `images` is not a figure (decision 54) and is in neither map. A
+/// figure neither backend renders is in `labels` and not in
+/// `numbers`: it keeps its name and takes no number.
+fn figures(
     doc: &Document,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     diags: &mut Diags,
-) -> HashMap<usize, String> {
+) -> (HashMap<usize, String>, HashMap<usize, u32>) {
     let mut labels = HashMap::new();
+    let mut numbers = HashMap::new();
     let mut claimed: HashMap<&str, u32> = HashMap::new();
+    let (mut tables_seen, mut images_seen) = (0u32, 0u32);
     for (index, b) in doc.blocks.iter().enumerate() {
         let Block::Code { info, line, .. } = b else { continue };
-        if !tables.contains_key(&index) && !images.contains_key(&index) {
+        let is_table = tables.contains_key(&index);
+        if !is_table && !images.contains_key(&index) {
             continue;
+        }
+        if !info.weave_hidden() && !info.weave_output_hidden() {
+            let counter = if is_table { &mut tables_seen } else { &mut images_seen };
+            *counter += 1;
+            numbers.insert(index, *counter);
         }
         let Some(label) = info.label().or_else(|| info.name()) else { continue };
         if let Some(&first) = claimed.get(label) {
@@ -377,7 +414,7 @@ fn figure_labels(
         claimed.insert(label, *line);
         labels.insert(index, label.to_string());
     }
-    labels
+    (labels, numbers)
 }
 ```
 
@@ -613,6 +650,7 @@ fn render_html(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
+    numbers: &HashMap<usize, u32>,
     bibliography: Option<&Bibliography>,
     output: Option<&str>,
     figures_outside: bool,
@@ -621,7 +659,7 @@ fn render_html(
     let extra_css = config.weave("html").and_then(|w| w.css).and_then(|rel| read_asset(root, &rel, "css", diags));
     let html_bib = bibliography.map(|bib| weave_html::Bibliography { entries: &bib.entries, order: &bib.order });
     let rendered = weave_html::render(
-        doc, title, extra_css.as_deref(), tables, images, labels, figures_outside, html_bib.as_ref(), diags,
+        doc, title, extra_css.as_deref(), tables, images, labels, numbers, figures_outside, html_bib.as_ref(), diags,
     );
 
     let written = match output {
@@ -1106,23 +1144,23 @@ mod tests {
     /// A pair with an artifact and no `label=` takes its own `name=`
     /// (decision 63).
     #[test]
-    fn figure_labels_defaults_to_the_blocks_own_name() {
+    fn figures_defaults_to_the_blocks_own_name() {
         let d = doc("```python name=chart produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "chart.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
         assert_eq!(labels.get(&0), Some(&"chart".to_string()));
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
     #[test]
-    fn figure_labels_prefers_a_reader_written_label_over_the_name() {
+    fn figures_prefers_a_reader_written_label_over_the_name() {
         let d = doc("```python name=chart label=revenue produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "chart.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
         assert_eq!(labels.get(&0), Some(&"revenue".to_string()));
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
@@ -1130,10 +1168,10 @@ mod tests {
     /// A named block with no artifact is not a figure (decision 54), so
     /// there is nothing for a reference to point at and nothing to label.
     #[test]
-    fn figure_labels_skips_a_block_with_no_artifact() {
+    fn figures_skips_a_block_with_no_artifact() {
         let d = doc("```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n");
         let mut diags = Diags::new("t.md");
-        let labels = figure_labels(&d, &HashMap::new(), &HashMap::new(), &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &HashMap::new(), &mut diags);
         assert!(labels.is_empty());
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
@@ -1141,12 +1179,12 @@ mod tests {
     /// A hidden figure keeps its label, so a later reference to it can be
     /// told apart from a reference to nothing at all.
     #[test]
-    fn figure_labels_keeps_a_hidden_figures_own_label() {
+    fn figures_keeps_a_hidden_figures_own_label() {
         let d = doc("```python name=chart weave=hidden produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "chart.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
         assert_eq!(labels.get(&0), Some(&"chart".to_string()));
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
@@ -1158,7 +1196,7 @@ mod tests {
         images.insert(0, (Vec::new(), "one.png".to_string()));
         images.insert(3, (Vec::new(), "two.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
         assert_eq!(labels.get(&0), Some(&"chart".to_string()));
         assert_eq!(labels.get(&3), None, "the second claim is dropped, not suffixed");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
@@ -1176,9 +1214,86 @@ mod tests {
         images.insert(0, (Vec::new(), "one.png".to_string()));
         images.insert(3, (Vec::new(), "two.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
         assert_eq!(labels.get(&0), Some(&"chart".to_string()));
         assert_eq!(labels.get(&3), None);
+        assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
+    }
+
+    /// Typst counts a table and an image on two separate counters, so
+    /// this walk does too (decision 65). A single counter would disagree
+    /// with the PDF on exactly this document.
+    #[test]
+    fn figures_numbers_each_kind_on_its_own_counter() {
+        let d = doc("```python name=t1 produces=file:a.csv\nrun()\n```\n\n<!-- dankg:result name=t1 hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=i1 produces=file:a.png\nrun()\n```\n\n<!-- dankg:result name=i1 hash=0000000000000002 -->\n\n```\nok\n```\n\n```python name=t2 produces=file:b.csv\nrun()\n```\n\n<!-- dankg:result name=t2 hash=0000000000000003 -->\n\n```\nok\n```\n\n```python name=i2 produces=file:b.png\nrun()\n```\n\n<!-- dankg:result name=i2 hash=0000000000000004 -->\n\n```\nok\n```\n");
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "x\n1\n".to_string()));
+        tables.insert(6, ("csv".to_string(), "x\n2\n".to_string()));
+        let mut images = HashMap::new();
+        images.insert(3, (Vec::new(), "a.png".to_string()));
+        images.insert(9, (Vec::new(), "b.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let (_, numbers) = figures(&d, &tables, &images, &mut diags);
+        assert_eq!(numbers.get(&0), Some(&1), "first table");
+        assert_eq!(numbers.get(&3), Some(&1), "first image, its own counter");
+        assert_eq!(numbers.get(&6), Some(&2), "second table");
+        assert_eq!(numbers.get(&9), Some(&2), "second image");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    /// `weave=hidden` leaves no figure on the page, so it takes no number
+    /// and never shifts the one after it.
+    #[test]
+    fn figures_never_numbers_a_hidden_figure() {
+        let d = doc("```python name=a weave=hidden produces=file:a.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=b produces=file:b.png\nrun()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nok\n```\n");
+        let mut images = HashMap::new();
+        images.insert(0, (Vec::new(), "a.png".to_string()));
+        images.insert(3, (Vec::new(), "b.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
+        assert_eq!(numbers.get(&0), None, "hidden, so not counted");
+        assert_eq!(numbers.get(&3), Some(&1), "the visible one is still Figure 1");
+        assert_eq!(labels.get(&0), Some(&"a".to_string()), "a hidden figure keeps its label");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    /// `weave=output-hidden` drops the artifact half with the output
+    /// (decision 53), so there is no figure left to count either.
+    #[test]
+    fn figures_never_numbers_an_output_hidden_figure() {
+        let d = doc("```python name=a weave=output-hidden produces=file:a.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let mut images = HashMap::new();
+        images.insert(0, (Vec::new(), "a.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
+        assert!(numbers.is_empty());
+        assert_eq!(labels.get(&0), Some(&"a".to_string()));
+    }
+
+    /// `weave=source-hidden` keeps the artifact (decision 60), so its own
+    /// figure renders and counts like any other.
+    #[test]
+    fn figures_numbers_a_source_hidden_figure() {
+        let d = doc("```python name=a weave=source-hidden produces=file:a.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let mut images = HashMap::new();
+        images.insert(0, (Vec::new(), "a.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let (_, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
+        assert_eq!(numbers.get(&0), Some(&1));
+    }
+
+    /// Numbering and labelling are separate. A figure whose label was
+    /// dropped as a collision still renders, so it still counts.
+    #[test]
+    fn a_figure_whose_label_collided_is_still_numbered() {
+        let d = doc("```python name=a label=chart produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=b label=chart produces=file:two.png\nrun()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nok\n```\n");
+        let mut images = HashMap::new();
+        images.insert(0, (Vec::new(), "one.png".to_string()));
+        images.insert(3, (Vec::new(), "two.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
+        assert_eq!(labels.get(&3), None, "the second label is dropped");
+        assert_eq!(numbers.get(&3), Some(&2), "the figure itself still counts");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
     }
 

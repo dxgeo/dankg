@@ -14,10 +14,17 @@
 //! follows that same shape: strong verification wherever `typst` happens to
 //! be installed (this repo's own dev machine included, confirmed 0.15.1),
 //! no CI dependency on it.
+//!
+//! One test here reaches across to `render::weave_html` as well. Decision 65
+//! has dankg count every figure for HTML while Typst still counts for
+//! itself, so the two counts must agree. Only a real compile read back out
+//! of the PDF can judge that, which is why the comparison lives in this
+//! file rather than beside either renderer's own unit tests.
 
 use dankg::diag::Diags;
 use dankg::md::Document;
 use dankg::render::typst;
+use dankg::weave;
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
@@ -381,6 +388,120 @@ fn a_table_figure_and_an_image_figure_compile_and_number_on_separate_counters() 
     };
     assert!(text.contains("Table 1: A table"), "the table takes Typst's own table counter: {text}");
     assert!(text.contains("Figure 1: A chart"), "the image takes Typst's own figure counter: {text}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+
+/// Four figures, interleaved table/image/table/image, each captioned. Typst
+/// counts them on two separate counters and `weave::figures` has to land on
+/// the same numbers (decision 65). A single counter would read 1/2/3/4 here
+/// and disagree with the PDF on every one after the first.
+const INTERLEAVED_SOURCE: &str = r#"# Interleaved
+
+```python name=t1 produces=file:one.csv caption="Table A"
+run()
+```
+
+<!-- dankg:result name=t1 hash=0000000000000001 -->
+
+```
+ok
+```
+
+```python name=i1 produces=file:one.png caption="Chart A"
+run()
+```
+
+<!-- dankg:result name=i1 hash=0000000000000002 -->
+
+```
+ok
+```
+
+```python name=t2 produces=file:two.csv caption="Table B"
+run()
+```
+
+<!-- dankg:result name=t2 hash=0000000000000003 -->
+
+```
+ok
+```
+
+```python name=i2 produces=file:two.png caption="Chart B"
+run()
+```
+
+<!-- dankg:result name=i2 hash=0000000000000004 -->
+
+```
+ok
+```
+"#;
+
+/// Every `Table N`/`Figure N` in `text`, in the order it appears. The two
+/// backends write the same sequence in two different shapes, so both are
+/// reduced to this before they are compared.
+fn numbering_sequence(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, _) in text.char_indices() {
+        for kind in ["Table ", "Figure "] {
+            if !text[i..].starts_with(kind) {
+                continue;
+            }
+            let digits: String = text[i + kind.len()..].chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() {
+                out.push(format!("{kind}{digits}"));
+            }
+        }
+    }
+    out
+}
+
+/// Driven through `weave::run` rather than through the two renderers
+/// directly, so the numbers come from the real `weave::figures` walk
+/// instead of a map written by hand here. A hand-written map would test
+/// that the renderers agree with Typst and prove nothing about the walk
+/// that feeds them, which is the half a per-kind counter bug would live in.
+#[test]
+fn the_number_html_writes_matches_the_number_typst_typesets() {
+    if Command::new("typst").arg("--version").output().is_err() {
+        eprintln!("skipping: `typst` not runnable");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("dankg-weave-numbering-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join(".dankg")).expect("scratch dir");
+    fs::write(dir.join(".dankg/config"), "[weave.pdf]\ncommand = typst compile {typ} {pdf}\n").expect("config");
+    fs::write(dir.join("a.md"), INTERLEAVED_SOURCE).expect("a.md");
+    fs::write(dir.join("one.csv"), "x,y\n1,2\n").expect("one.csv");
+    fs::write(dir.join("two.csv"), "x,y\n3,4\n").expect("two.csv");
+    fs::write(dir.join("one.png"), red_png()).expect("one.png");
+    fs::write(dir.join("two.png"), red_png()).expect("two.png");
+
+    let md = dir.join("a.md").to_string_lossy().to_string();
+    let html_path = dir.join("a.html");
+    let pdf_path = dir.join("a.pdf");
+    weave::run(&md, weave::Format::Html, Some(&html_path.to_string_lossy()), true, false).expect("weave --format html");
+    let report =
+        weave::run(&md, weave::Format::Pdf, Some(&pdf_path.to_string_lossy()), true, false).expect("weave --format pdf");
+    assert!(report.pdf_written, "the configured `typst compile` should have produced a PDF");
+
+    let html = fs::read_to_string(&html_path).expect("read the page back");
+    let pdf_text = match Command::new("pdftotext").arg(&pdf_path).arg("-").output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => {
+            eprintln!("skipping the comparison: `pdftotext` not runnable");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+
+    let expected = ["Table 1", "Figure 1", "Table 2", "Figure 2"];
+    assert_eq!(numbering_sequence(&html), expected, "HTML wrote the wrong sequence:\n{html}");
+    assert_eq!(numbering_sequence(&pdf_text), expected, "Typst typeset the wrong sequence:\n{pdf_text}");
 
     let _ = fs::remove_dir_all(&dir);
 }

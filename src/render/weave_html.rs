@@ -66,6 +66,7 @@ pub fn render(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
+    numbers: &HashMap<usize, u32>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -99,7 +100,7 @@ pub fn render(
             let _ = writeln!(out, "<p class=\"byline-date\">{date}</p>");
         }
     }
-    blocks(&mut out, &doc.blocks, &slugs, tables, images, labels, figures_outside, bibliography, diags);
+    blocks(&mut out, &doc.blocks, &slugs, tables, images, labels, numbers, figures_outside, bibliography, diags);
     // Unconditionally at the end, never at the `hayagriva` fence's own
     // position (decision 59) -- the same fixed structural placement
     // `render::typst`'s own `#bibliography(...)` call gets.
@@ -229,6 +230,7 @@ fn blocks(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
+    numbers: &HashMap<usize, u32>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -247,6 +249,7 @@ fn blocks(
                         tables.get(&i),
                         images.get(&i),
                         labels.get(&i).map(String::as_str),
+                        numbers.get(&i).copied(),
                         figures_outside,
                         diags,
                     );
@@ -255,7 +258,7 @@ fn blocks(
                 continue;
             }
         }
-        block(out, &items[i], slugs, tables, images, labels, figures_outside, bibliography, diags);
+        block(out, &items[i], slugs, tables, images, labels, numbers, figures_outside, bibliography, diags);
         i += 1;
     }
 }
@@ -267,6 +270,7 @@ fn block(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
+    numbers: &HashMap<usize, u32>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -287,7 +291,9 @@ fn block(
                 code_or_data_table(out, info, text, *line, diags);
             }
         }
-        Block::List(l) => list(out, l, slugs, tables, images, labels, figures_outside, bibliography, diags),
+        Block::List(l) => {
+            list(out, l, slugs, tables, images, labels, numbers, figures_outside, bibliography, diags)
+        }
         Block::ThematicBreak { .. } => out.push_str("<hr>\n"),
         // Outside the subset. Escaped, not raw: an unparsed construct
         // must never become unvalidated HTML.
@@ -323,6 +329,7 @@ fn eval_pair(
     table: Option<&(String, String)>,
     image: Option<&(Vec<u8>, String)>,
     label: Option<&str>,
+    number: Option<u32>,
     figures_outside: bool,
     diags: &mut Diags,
 ) {
@@ -333,7 +340,7 @@ fn eval_pair(
     }
     let mut figure = String::new();
     if !source_info.weave_output_hidden() {
-        eval_pair_result(&mut inner, &mut figure, source_info, pair, table, image, label, source_line, diags);
+        eval_pair_result(&mut inner, &mut figure, source_info, pair, table, image, label, number, source_line, diags);
     }
     // Hiding both halves can leave the wrapper with nothing inside it.
     // An empty `<figure class="eval-pair">` still carries the pair's
@@ -377,6 +384,7 @@ fn eval_pair_result(
     table: Option<&(String, String)>,
     image: Option<&(Vec<u8>, String)>,
     label: Option<&str>,
+    number: Option<u32>,
     source_line: u32,
     diags: &mut Diags,
 ) {
@@ -395,7 +403,7 @@ fn eval_pair_result(
     if let Some((lang, content)) = table {
         let _ = writeln!(figure, "<figure class=\"table-figure\"{anchor}>");
         if let Some(caption) = source_info.caption().or_else(|| source_info.produces()) {
-            let _ = writeln!(figure, "<figcaption>{}</figcaption>", escape(caption));
+            let _ = writeln!(figure, "<figcaption>{}{}</figcaption>", supplement("Table", number), escape(caption));
         }
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
         code_or_data_table(figure, &info, content, source_line, diags);
@@ -411,7 +419,7 @@ fn eval_pair_result(
             escape_attr(resolved)
         );
         if let Some(caption) = source_info.caption().or_else(|| source_info.produces()) {
-            let _ = writeln!(figure, "<figcaption>{}</figcaption>", escape(caption));
+            let _ = writeln!(figure, "<figcaption>{}{}</figcaption>", supplement("Figure", number), escape(caption));
         }
         figure.push_str("</figure>\n");
     }
@@ -433,6 +441,19 @@ fn eval_pair_result(
 /// is a statement about a working block's own typeset shape, not a
 /// licence to swallow an error: a reader given a page with no trace
 /// of the failure has no way to know the artifact above it is stale.
+/// `Table 1: ` or `Figure 1: `, matching Typst's own default supplement
+/// word and its own `: ` separator exactly (decision 65). The wording is
+/// Typst's rather than configurable. That is what makes the two backends
+/// read alike for the same document. An unnumbered figure gets no prefix
+/// at all. Only a figure neither backend renders is unnumbered, so
+/// nothing reaching here in practice takes that branch.
+fn supplement(kind: &str, number: Option<u32>) -> String {
+    match number {
+        Some(n) => format!("{kind} {n}: "),
+        None => String::new(),
+    }
+}
+
 fn hides_output(info: &InfoString, pair: &Pair) -> bool {
     !pair.failed && info.weave_source_hidden()
 }
@@ -497,6 +518,7 @@ fn list(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
+    numbers: &HashMap<usize, u32>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -509,7 +531,7 @@ fn list(
     }
     for item in &l.items {
         out.push_str("<li>");
-        blocks(out, &item.blocks, slugs, tables, images, labels, figures_outside, bibliography, diags);
+        blocks(out, &item.blocks, slugs, tables, images, labels, numbers, figures_outside, bibliography, diags);
         out.push_str("</li>\n");
     }
     let _ = writeln!(out, "</{tag}>");
@@ -941,23 +963,25 @@ mod tests {
         images: &HashMap<usize, (Vec<u8>, String)>,
         figures_outside: bool,
     ) -> (String, Diags) {
-        render_doc_with_labels(source, tables, images, &HashMap::new(), figures_outside)
+        render_doc_with_figures(source, tables, images, &HashMap::new(), &HashMap::new(), figures_outside)
     }
 
-    /// The same, plus the label map `weave::figure_labels` builds
-    /// (decision 63). A test asserting on a figure's own `id` needs one.
-    /// Every other test here has no figure to label, so it passes none.
-    fn render_doc_with_labels(
+    /// The same, plus the two maps `weave::figures` builds: a figure's own
+    /// label (decision 63) and its own number (decision 65). A test
+    /// asserting on an `id` or on a numbered figcaption needs them. Every
+    /// other test here has no figure at all, so it passes neither.
+    fn render_doc_with_figures(
         source: &str,
         tables: &HashMap<usize, (String, String)>,
         images: &HashMap<usize, (Vec<u8>, String)>,
         labels: &HashMap<usize, String>,
+        numbers: &HashMap<usize, u32>,
         figures_outside: bool,
     ) -> (String, Diags) {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, tables, images, labels, figures_outside, None, &mut diags);
+        let out = render(&doc, "Title", None, tables, images, labels, numbers, figures_outside, None, &mut diags);
         (out, diags)
     }
 
@@ -1211,7 +1235,7 @@ mod tests {
         tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
         let mut labels = HashMap::new();
         labels.insert(0, "revenue".to_string());
-        let (out, _) = render_doc_with_labels(src, &tables, &HashMap::new(), &labels, false);
+        let (out, _) = render_doc_with_figures(src, &tables, &HashMap::new(), &labels, &HashMap::new(), false);
         assert!(out.contains("<figure class=\"table-figure\" id=\"fig-revenue\">"), "{out}");
     }
 
@@ -1222,7 +1246,7 @@ mod tests {
         images.insert(0, (vec![0xffu8, 0xd8, 0xff, 0xe0], "chart.jpg".to_string()));
         let mut labels = HashMap::new();
         labels.insert(0, "chart".to_string());
-        let (out, _) = render_doc_with_labels(src, &HashMap::new(), &images, &labels, false);
+        let (out, _) = render_doc_with_figures(src, &HashMap::new(), &images, &labels, &HashMap::new(), false);
         assert!(out.contains("<figure class=\"image-figure\" id=\"fig-chart\">"), "{out}");
     }
 
@@ -1236,7 +1260,7 @@ mod tests {
         images.insert(0, (vec![0xffu8, 0xd8, 0xff, 0xe0], "chart.jpg".to_string()));
         let mut labels = HashMap::new();
         labels.insert(0, "chart".to_string());
-        let (out, _) = render_doc_with_labels(src, &HashMap::new(), &images, &labels, false);
+        let (out, _) = render_doc_with_figures(src, &HashMap::new(), &images, &labels, &HashMap::new(), false);
         assert!(out.contains("<figure class=\"eval-pair\">"), "{out}");
         assert_eq!(out.matches("id=\"fig-chart\"").count(), 1, "{out}");
     }
@@ -1249,6 +1273,55 @@ mod tests {
         let (out, _) = render_doc_with_tables(src, &tables);
         assert!(out.contains("<figure class=\"table-figure\">"), "{out}");
         assert!(!out.contains("id=\"fig-"), "{out}");
+    }
+
+    /// The number is dankg's own, counted by `weave::figures`, written as
+    /// literal text (decision 65). HTML has no way to count for itself.
+    #[test]
+    fn a_numbered_table_figure_carries_typsts_own_supplement_wording() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let mut numbers = HashMap::new();
+        numbers.insert(0, 3);
+        let (out, _) = render_doc_with_figures(src, &tables, &HashMap::new(), &HashMap::new(), &numbers, false);
+        assert!(out.contains("<figcaption>Table 3: file:data.csv</figcaption>"), "{out}");
+    }
+
+    #[test]
+    fn a_numbered_image_figure_carries_typsts_own_supplement_wording() {
+        let src = "```python name=c produces=file:chart.png caption=\"A chart\"\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (vec![0xffu8, 0xd8, 0xff, 0xe0], "chart.jpg".to_string()));
+        let mut numbers = HashMap::new();
+        numbers.insert(0, 2);
+        let (out, _) = render_doc_with_figures(src, &HashMap::new(), &images, &HashMap::new(), &numbers, false);
+        assert!(out.contains("<figcaption>Figure 2: A chart</figcaption>"), "{out}");
+    }
+
+    /// The pair's own output figcaption is not a figure's caption and
+    /// takes no number. Only the nested `<figure>` decision 54 builds is
+    /// numbered.
+    #[test]
+    fn the_pairs_own_output_figcaption_stays_unnumbered() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let mut numbers = HashMap::new();
+        numbers.insert(0, 1);
+        let (out, _) = render_doc_with_figures(src, &tables, &HashMap::new(), &HashMap::new(), &numbers, false);
+        assert!(out.contains("<figcaption>Output</figcaption>"), "{out}");
+        assert_eq!(out.matches("Table 1: ").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn an_unnumbered_figure_carries_no_supplement_at_all() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("<figcaption>file:data.csv</figcaption>"), "{out}");
+        assert!(!out.contains("Table "), "{out}");
     }
 
     #[test]
@@ -1487,6 +1560,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             false,
             None,
             &mut diags,
@@ -1508,7 +1582,7 @@ mod tests {
         let order: Vec<String> = order.iter().map(|s| s.to_string()).collect();
         let bib = Bibliography { entries: &entries, order: &order };
         let mut diags = Diags::new("t.md");
-        render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, Some(&bib), &mut diags)
+        render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, Some(&bib), &mut diags)
     }
 
     #[test]
@@ -1555,7 +1629,7 @@ mod tests {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse("[@a]\n\n@b argues\n", &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(out.contains("[@a]"), "{out}");
         assert!(out.contains("@b argues"), "{out}");
     }
