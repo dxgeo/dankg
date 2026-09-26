@@ -294,11 +294,17 @@ same caption twice.
 
 An artifact with a caption (decision 54) is wrapped in a real
 `#figure(caption: [...])` rather than a bare `#text(...)` line beside
-raw content -- `kind: table` for a table, left to Typst's own
-inference (a lone `#image(...)` body infers `kind: image`) for an
-image. This is what gives a reader genuine, automatic "Table N"/
-"Figure N" numbering: `#figure`'s own counter, not anything counted
-here. Its own caption position -- Typst's own default puts a
+raw content. Both kinds are declared: `kind: table` for a table,
+`kind: image` for an image. Typst infers `kind: image` from a lone
+`#image(...)` body anyway. Declaring it changes nothing Typst
+typesets. A real compile confirms that. The table counter and the
+image counter stay separate either way. It is declared because the
+inference is a guess about a body. That guess holds only while there
+are exactly two artifact shapes. Anything outside Typst that has to
+know a figure's kind reads a declaration this file made, instead of
+reproducing Typst's own inference and drifting from it. This is what
+gives a reader genuine, automatic "Table N"/"Figure N" numbering:
+`#figure`'s own counter, not anything counted here. Its own caption position -- Typst's own default puts a
 figure's caption below its content for every kind -- is left to
 whatever `[weave.pdf] template` sets via `#show figure.where(kind: table): set figure.caption(position: top)`, the conventional
 table-above, figure-below split. An artifact with no caption at all
@@ -494,7 +500,7 @@ fn eval_pair_result(
             Some(label) => {
                 let _ = write!(
                     figure,
-                    "\n#figure(caption: [{}])[\n{image_markup}]\n\n",
+                    "\n#figure(kind: image, caption: [{}])[\n{image_markup}]\n\n",
                     escape_typst(label)
                 );
             }
@@ -1281,7 +1287,7 @@ mod tests {
         let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, true);
         assert!(!out.contains("savefig()"), "{out}");
         assert!(!out.contains("wrote chart.png"), "{out}");
-        assert!(out.contains("#figure(caption: [A chart])"), "{out}");
+        assert!(out.contains("#figure(kind: image, caption: [A chart])"), "{out}");
         assert!(out.contains("#image(\"assets/chart.png\")"), "{out}");
     }
 
@@ -1339,13 +1345,13 @@ mod tests {
     }
 
     #[test]
-    fn a_produced_image_is_wrapped_in_a_real_figure_with_no_kind_override() {
+    fn a_produced_image_is_wrapped_in_a_real_figure_with_an_explicit_image_kind() {
         let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
         let mut images = HashMap::new();
         images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
         let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, false);
-        assert!(out.contains("#figure(caption: [file:chart.png])["), "{out}");
-        assert!(!out.contains("kind: table"), "an image figure infers its own kind, {out}");
+        assert!(out.contains("#figure(kind: image, caption: [file:chart.png])["), "{out}");
+        assert!(!out.contains("kind: table"), "an image figure is not a table, {out}");
     }
 
     #[test]

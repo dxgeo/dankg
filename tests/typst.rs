@@ -234,3 +234,150 @@ fn a_document_with_its_cover_page_dropped_actually_compiles() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A captioned table artifact and a captioned image artifact in one
+/// document, each wrapped in a `#figure` carrying its own declared kind.
+/// A string assertion cannot judge `kind: image`. A wrong kind name is
+/// still a string the emitter is internally consistent about. Typst is
+/// the half that refuses to compile it. The PDF is read back with
+/// `pdftotext` because the declared kind is only worth declaring if the
+/// two counters stay separate. `Table 1` beside `Figure 1` is the only
+/// place that shows.
+const FIGURE_KINDS_SOURCE: &str = r#"# Figure kinds smoke test
+
+```python name=t produces=file:data.csv caption="A table"
+write_csv()
+```
+
+<!-- dankg:result name=t hash=0000000000000001 -->
+
+```
+wrote data.csv
+```
+
+```python name=c produces=file:chart.png caption="A chart"
+savefig()
+```
+
+<!-- dankg:result name=c hash=0000000000000002 -->
+
+```
+wrote chart.png
+```
+"#;
+
+/// A 4x4 red PNG, built byte by byte rather than checked in. Typst reads
+/// the real file `#image(...)` points at. The bytes therefore have to be
+/// a PNG a decoder accepts. Zero dependencies (decision 1) rules out a
+/// crate for this. `render_pdf` is the half that normally copies an
+/// artifact into `assets/`, which this test stands in for.
+fn red_png() -> Vec<u8> {
+    fn chunk(tag: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&[tag, data].concat()).to_be_bytes());
+        out
+    }
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffffu32;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+    // One uncompressed deflate block, since `std` has no deflate encoder:
+    // a zlib header, a stored block, and an Adler-32 of the raw scanlines.
+    fn zlib_stored(raw: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x78, 0x01];
+        out.push(0x01);
+        out.extend_from_slice(&(raw.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(!(raw.len() as u16)).to_le_bytes());
+        out.extend_from_slice(raw);
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in raw {
+            a = (a + byte as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        out
+    }
+    let (w, h) = (4u32, 4u32);
+    let mut raw = Vec::new();
+    for _ in 0..h {
+        raw.push(0); // filter: none
+        for _ in 0..w {
+            raw.extend_from_slice(&[0xff, 0x00, 0x00]);
+        }
+    }
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit truecolor
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend_from_slice(&chunk(b"IHDR", &ihdr));
+    png.extend_from_slice(&chunk(b"IDAT", &zlib_stored(&raw)));
+    png.extend_from_slice(&chunk(b"IEND", &[]));
+    png
+}
+
+#[test]
+fn a_table_figure_and_an_image_figure_compile_and_number_on_separate_counters() {
+    let mut parse_diags = Diags::new("t.md");
+    let doc = Document::parse(FIGURE_KINDS_SOURCE, &mut parse_diags);
+    assert!(parse_diags.is_empty(), "fixture should parse cleanly: {:?}", parse_diags.items());
+
+    let mut tables = HashMap::new();
+    tables.insert(1, ("csv".to_string(), "name,amount\nwidgets,3\n".to_string()));
+    let mut images = HashMap::new();
+    images.insert(4, (Vec::new(), "chart.png".to_string()));
+
+    let mut diags = Diags::new("t.md");
+    let typ = typst::render(&doc, "Figure Kinds Smoke Test", false, &tables, &images, false, None, &mut diags);
+    assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
+    assert!(typ.contains("#figure(kind: table, caption: [A table])["), "{typ}");
+    assert!(typ.contains("#figure(kind: image, caption: [A chart])["), "{typ}");
+
+    let dir = std::env::temp_dir().join(format!("dankg-typst-figkinds-smoke-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("assets")).expect("scratch dir");
+    fs::write(dir.join("assets/chart.png"), red_png()).expect("write chart.png");
+    let typ_path = dir.join("doc.typ");
+    let pdf_path = dir.join("doc.pdf");
+    fs::write(&typ_path, &typ).expect("write .typ");
+
+    let output = match typst_compile(&typ_path, &pdf_path) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("skipping: `typst` not runnable ({e})");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+
+    assert!(
+        output.status.success(),
+        "typst compile failed:\n-- .typ --\n{typ}\n-- stderr --\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(pdf_path.exists(), "typst reported success but wrote no PDF");
+
+    // `pdftotext` is optional the same way `typst` is, and skipped the same
+    // way when it is absent.
+    let text = match Command::new("pdftotext").arg(&pdf_path).arg("-").output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => {
+            eprintln!("skipping the numbering assertion: `pdftotext` not runnable");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    assert!(text.contains("Table 1: A table"), "the table takes Typst's own table counter: {text}");
+    assert!(text.contains("Figure 1: A chart"), "the image takes Typst's own figure counter: {text}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
