@@ -60,15 +60,19 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
         drop_repeated_title_heading(&mut doc, &title);
     }
     let (tables, images) = produced_artifacts(&doc, &entry_rel, &root, &mut diags);
+    let labels = figure_labels(&doc, &tables, &images, &mut diags);
     let bib = bibliography(&doc, &entry_rel, &root, &mut diags);
 
     let report = match format {
         Format::Html => {
-            render_html(&doc, &title, &config, &root, &tables, &images, bib.as_ref(), output, figures_outside, &mut diags)?
+            render_html(
+                &doc, &title, &config, &root, &tables, &images, &labels, bib.as_ref(), output, figures_outside,
+                &mut diags,
+            )?
         }
         Format::Pdf => render_pdf(
-            &doc, &title, &config, &root, &name, &tables, &images, bib.as_ref(), output, toc, figures_outside,
-            &mut diags,
+            &doc, &title, &config, &root, &name, &tables, &images, &labels, bib.as_ref(), output, toc,
+            figures_outside, &mut diags,
         )?,
     };
 
@@ -180,6 +184,39 @@ fn image_ext(path: &str) -> Option<&'static str> {
         "webp" => Some("webp"),
         _ => None,
     }
+}
+
+/// Every figure's own label, by the block index its pair starts at --
+/// `label=` when the reader wrote one, otherwise the block's own
+/// `name=` (decision 63). A block with no artifact in `tables` or
+/// `images` is not a figure (decision 54) and is absent here. Each
+/// backend turns one label into its own identifier: `<fig:NAME>` in
+/// Typst, `id="fig-NAME"` in HTML.
+fn figure_labels(
+    doc: &Document,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    diags: &mut Diags,
+) -> HashMap<usize, String> {
+    let mut labels = HashMap::new();
+    let mut claimed: HashMap<&str, u32> = HashMap::new();
+    for (index, b) in doc.blocks.iter().enumerate() {
+        let Block::Code { info, line, .. } = b else { continue };
+        if !tables.contains_key(&index) && !images.contains_key(&index) {
+            continue;
+        }
+        let Some(label) = info.label().or_else(|| info.name()) else { continue };
+        if let Some(&first) = claimed.get(label) {
+            diags.warn(
+                *line,
+                format!("figure label `{label}` is already used by the figure on line {first}; this one is dropped"),
+            );
+            continue;
+        }
+        claimed.insert(label, *line);
+        labels.insert(index, label.to_string());
+    }
+    labels
 }
 
 pub struct Bibliography {
@@ -366,6 +403,7 @@ fn render_html(
     root: &Path,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     bibliography: Option<&Bibliography>,
     output: Option<&str>,
     figures_outside: bool,
@@ -373,8 +411,9 @@ fn render_html(
 ) -> Result<Report, String> {
     let extra_css = config.weave("html").and_then(|w| w.css).and_then(|rel| read_asset(root, &rel, "css", diags));
     let html_bib = bibliography.map(|bib| weave_html::Bibliography { entries: &bib.entries, order: &bib.order });
-    let rendered =
-        weave_html::render(doc, title, extra_css.as_deref(), tables, images, figures_outside, html_bib.as_ref(), diags);
+    let rendered = weave_html::render(
+        doc, title, extra_css.as_deref(), tables, images, labels, figures_outside, html_bib.as_ref(), diags,
+    );
 
     let written = match output {
         Some(p) => {
@@ -399,6 +438,7 @@ fn render_pdf(
     name: &str,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     bibliography: Option<&Bibliography>,
     output: Option<&str>,
     toc: bool,
@@ -438,7 +478,8 @@ fn render_pdf(
         }
     });
 
-    let body = typst::render(doc, title, toc, tables, &copied_images, figures_outside, bib_summary.as_ref(), diags);
+    let body =
+        typst::render(doc, title, toc, tables, &copied_images, labels, figures_outside, bib_summary.as_ref(), diags);
     let weave_cfg = config.weave("pdf");
     let preamble =
         weave_cfg.as_ref().and_then(|w| w.template.clone()).and_then(|rel| read_asset(root, &rel, "template", diags));
@@ -827,6 +868,85 @@ mod tests {
         assert!(tables.is_empty());
         assert!(images.is_empty());
         assert!(diags.items().is_empty(), "{:?}", diags.items());
+    }
+
+    /// A pair with an artifact and no `label=` takes its own `name=`
+    /// (decision 63).
+    #[test]
+    fn figure_labels_defaults_to_the_blocks_own_name() {
+        let d = doc("```python name=chart produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
+        let mut images = HashMap::new();
+        images.insert(0, (Vec::new(), "chart.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        assert_eq!(labels.get(&0), Some(&"chart".to_string()));
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn figure_labels_prefers_a_reader_written_label_over_the_name() {
+        let d = doc("```python name=chart label=revenue produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
+        let mut images = HashMap::new();
+        images.insert(0, (Vec::new(), "chart.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        assert_eq!(labels.get(&0), Some(&"revenue".to_string()));
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    /// A named block with no artifact is not a figure (decision 54), so
+    /// there is nothing for a reference to point at and nothing to label.
+    #[test]
+    fn figure_labels_skips_a_block_with_no_artifact() {
+        let d = doc("```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n");
+        let mut diags = Diags::new("t.md");
+        let labels = figure_labels(&d, &HashMap::new(), &HashMap::new(), &mut diags);
+        assert!(labels.is_empty());
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    /// A hidden figure keeps its label, so a later reference to it can be
+    /// told apart from a reference to nothing at all.
+    #[test]
+    fn figure_labels_keeps_a_hidden_figures_own_label() {
+        let d = doc("```python name=chart weave=hidden produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
+        let mut images = HashMap::new();
+        images.insert(0, (Vec::new(), "chart.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        assert_eq!(labels.get(&0), Some(&"chart".to_string()));
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn a_colliding_label_warns_by_line_and_the_second_one_is_dropped() {
+        let d = doc("```python name=a label=chart produces=file:one.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote one.png\n```\n\n```python name=b label=chart produces=file:two.png\nsavefig()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nwrote two.png\n```\n");
+        let mut images = HashMap::new();
+        images.insert(0, (Vec::new(), "one.png".to_string()));
+        images.insert(3, (Vec::new(), "two.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        assert_eq!(labels.get(&0), Some(&"chart".to_string()));
+        assert_eq!(labels.get(&3), None, "the second claim is dropped, not suffixed");
+        assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
+        assert_eq!(diags.items()[0].line, 11, "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("already used by the figure on line 1"), "{:?}", diags.items());
+    }
+
+    /// A `label=` colliding with another block's own defaulted `name=`
+    /// collides just the same. The rule is about the label that comes
+    /// out, not about which attribute it came from.
+    #[test]
+    fn a_label_colliding_with_a_defaulted_name_collides_too() {
+        let d = doc("```python name=chart produces=file:one.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote one.png\n```\n\n```python name=b label=chart produces=file:two.png\nsavefig()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nwrote two.png\n```\n");
+        let mut images = HashMap::new();
+        images.insert(0, (Vec::new(), "one.png".to_string()));
+        images.insert(3, (Vec::new(), "two.png".to_string()));
+        let mut diags = Diags::new("t.md");
+        let labels = figure_labels(&d, &HashMap::new(), &images, &mut diags);
+        assert_eq!(labels.get(&0), Some(&"chart".to_string()));
+        assert_eq!(labels.get(&3), None);
+        assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
     }
 
     #[test]

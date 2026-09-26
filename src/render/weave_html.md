@@ -77,6 +77,7 @@ pub fn render(
     extra_css: Option<&str>,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -110,7 +111,7 @@ pub fn render(
             let _ = writeln!(out, "<p class=\"byline-date\">{date}</p>");
         }
     }
-    blocks(&mut out, &doc.blocks, &slugs, tables, images, figures_outside, bibliography, diags);
+    blocks(&mut out, &doc.blocks, &slugs, tables, images, labels, figures_outside, bibliography, diags);
     // Unconditionally at the end, never at the `hayagriva` fence's own
     // position (decision 59) -- the same fixed structural placement
     // `render::typst`'s own `#bibliography(...)` call gets.
@@ -318,6 +319,7 @@ fn blocks(
     slugs: &HashMap<u32, String>,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -335,6 +337,7 @@ fn blocks(
                         &pair,
                         tables.get(&i),
                         images.get(&i),
+                        labels.get(&i).map(String::as_str),
                         figures_outside,
                         diags,
                     );
@@ -343,7 +346,7 @@ fn blocks(
                 continue;
             }
         }
-        block(out, &items[i], slugs, tables, images, figures_outside, bibliography, diags);
+        block(out, &items[i], slugs, tables, images, labels, figures_outside, bibliography, diags);
         i += 1;
     }
 }
@@ -354,6 +357,7 @@ fn block(
     slugs: &HashMap<u32, String>,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -374,7 +378,7 @@ fn block(
                 code_or_data_table(out, info, text, *line, diags);
             }
         }
-        Block::List(l) => list(out, l, slugs, tables, images, figures_outside, bibliography, diags),
+        Block::List(l) => list(out, l, slugs, tables, images, labels, figures_outside, bibliography, diags),
         Block::ThematicBreak { .. } => out.push_str("<hr>\n"),
         // Outside the subset. Escaped, not raw: an unparsed construct
         // must never become unvalidated HTML.
@@ -409,6 +413,7 @@ fn eval_pair(
     pair: &Pair,
     table: Option<&(String, String)>,
     image: Option<&(Vec<u8>, String)>,
+    label: Option<&str>,
     figures_outside: bool,
     diags: &mut Diags,
 ) {
@@ -419,7 +424,7 @@ fn eval_pair(
     }
     let mut figure = String::new();
     if !source_info.weave_output_hidden() {
-        eval_pair_result(&mut inner, &mut figure, source_info, pair, table, image, source_line, diags);
+        eval_pair_result(&mut inner, &mut figure, source_info, pair, table, image, label, source_line, diags);
     }
     // Hiding both halves can leave the wrapper with nothing inside it.
     // An empty `<figure class="eval-pair">` still carries the pair's
@@ -462,6 +467,7 @@ fn eval_pair_result(
     pair: &Pair,
     table: Option<&(String, String)>,
     image: Option<&(Vec<u8>, String)>,
+    label: Option<&str>,
     source_line: u32,
     diags: &mut Diags,
 ) {
@@ -476,17 +482,18 @@ fn eval_pair_result(
         let _ = writeln!(out, "<figcaption>{}</figcaption>", escape(&output_caption));
         code_or_data_table(out, pair.output_info, pair.output_text, pair.output_line, diags);
     }
+    let anchor = label.map(|l| format!(" id=\"fig-{}\"", escape_attr(l))).unwrap_or_default();
     if let Some((lang, content)) = table {
-        figure.push_str("<figure class=\"table-figure\">\n");
-        if let Some(label) = source_info.caption().or_else(|| source_info.produces()) {
-            let _ = writeln!(figure, "<figcaption>{}</figcaption>", escape(label));
+        let _ = writeln!(figure, "<figure class=\"table-figure\"{anchor}>");
+        if let Some(caption) = source_info.caption().or_else(|| source_info.produces()) {
+            let _ = writeln!(figure, "<figcaption>{}</figcaption>", escape(caption));
         }
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
         code_or_data_table(figure, &info, content, source_line, diags);
         figure.push_str("</figure>\n");
     }
     if let Some((bytes, resolved)) = image {
-        figure.push_str("<figure class=\"image-figure\">\n");
+        let _ = writeln!(figure, "<figure class=\"image-figure\"{anchor}>");
         let _ = writeln!(
             figure,
             "<img src=\"data:{};base64,{}\" alt=\"{}\">",
@@ -494,8 +501,8 @@ fn eval_pair_result(
             base64_encode(bytes),
             escape_attr(resolved)
         );
-        if let Some(label) = source_info.caption().or_else(|| source_info.produces()) {
-            let _ = writeln!(figure, "<figcaption>{}</figcaption>", escape(label));
+        if let Some(caption) = source_info.caption().or_else(|| source_info.produces()) {
+            let _ = writeln!(figure, "<figcaption>{}</figcaption>", escape(caption));
         }
         figure.push_str("</figure>\n");
     }
@@ -580,6 +587,7 @@ fn list(
     slugs: &HashMap<u32, String>,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -592,7 +600,7 @@ fn list(
     }
     for item in &l.items {
         out.push_str("<li>");
-        blocks(out, &item.blocks, slugs, tables, images, figures_outside, bibliography, diags);
+        blocks(out, &item.blocks, slugs, tables, images, labels, figures_outside, bibliography, diags);
         out.push_str("</li>\n");
     }
     let _ = writeln!(out, "</{tag}>");
@@ -1083,10 +1091,23 @@ mod tests {
         images: &HashMap<usize, (Vec<u8>, String)>,
         figures_outside: bool,
     ) -> (String, Diags) {
+        render_doc_with_labels(source, tables, images, &HashMap::new(), figures_outside)
+    }
+
+    /// The same, plus the label map `weave::figure_labels` builds
+    /// (decision 63). A test asserting on a figure's own `id` needs one.
+    /// Every other test here has no figure to label, so it passes none.
+    fn render_doc_with_labels(
+        source: &str,
+        tables: &HashMap<usize, (String, String)>,
+        images: &HashMap<usize, (Vec<u8>, String)>,
+        labels: &HashMap<usize, String>,
+        figures_outside: bool,
+    ) -> (String, Diags) {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, tables, images, figures_outside, None, &mut diags);
+        let out = render(&doc, "Title", None, tables, images, labels, figures_outside, None, &mut diags);
         (out, diags)
     }
 
@@ -1334,6 +1355,53 @@ mod tests {
     }
 
     #[test]
+    fn a_labelled_table_figure_carries_its_own_id() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let mut labels = HashMap::new();
+        labels.insert(0, "revenue".to_string());
+        let (out, _) = render_doc_with_labels(src, &tables, &HashMap::new(), &labels, false);
+        assert!(out.contains("<figure class=\"table-figure\" id=\"fig-revenue\">"), "{out}");
+    }
+
+    #[test]
+    fn a_labelled_image_figure_carries_its_own_id() {
+        let src = "```python name=c produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (vec![0xffu8, 0xd8, 0xff, 0xe0], "chart.jpg".to_string()));
+        let mut labels = HashMap::new();
+        labels.insert(0, "chart".to_string());
+        let (out, _) = render_doc_with_labels(src, &HashMap::new(), &images, &labels, false);
+        assert!(out.contains("<figure class=\"image-figure\" id=\"fig-chart\">"), "{out}");
+    }
+
+    /// The id goes on the nested figure, never on the pair's own outer
+    /// `<figure class="eval-pair">`. A reference has to land on the
+    /// artifact itself, not on the source block above it.
+    #[test]
+    fn a_labelled_figure_leaves_the_pairs_own_outer_figure_alone() {
+        let src = "```python name=c produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (vec![0xffu8, 0xd8, 0xff, 0xe0], "chart.jpg".to_string()));
+        let mut labels = HashMap::new();
+        labels.insert(0, "chart".to_string());
+        let (out, _) = render_doc_with_labels(src, &HashMap::new(), &images, &labels, false);
+        assert!(out.contains("<figure class=\"eval-pair\">"), "{out}");
+        assert_eq!(out.matches("id=\"fig-chart\"").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn an_unlabelled_figure_carries_no_id() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("<figure class=\"table-figure\">"), "{out}");
+        assert!(!out.contains("id=\"fig-"), "{out}");
+    }
+
+    #[test]
     fn a_produced_artifact_nests_inside_the_pairs_own_figure_by_default() {
         let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
         let mut tables = HashMap::new();
@@ -1568,6 +1636,7 @@ mod tests {
             Some("body { font-family: serif; }"),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             false,
             None,
             &mut diags,
@@ -1589,7 +1658,7 @@ mod tests {
         let order: Vec<String> = order.iter().map(|s| s.to_string()).collect();
         let bib = Bibliography { entries: &entries, order: &order };
         let mut diags = Diags::new("t.md");
-        render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), false, Some(&bib), &mut diags)
+        render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, Some(&bib), &mut diags)
     }
 
     #[test]
@@ -1636,7 +1705,7 @@ mod tests {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse("[@a]\n\n@b argues\n", &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(out.contains("[@a]"), "{out}");
         assert!(out.contains("@b argues"), "{out}");
     }

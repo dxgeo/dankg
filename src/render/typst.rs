@@ -68,6 +68,7 @@ pub fn render(
     toc: bool,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
@@ -79,7 +80,7 @@ pub fn render(
     if toc {
         out.push_str("#outline()\n\n");
     }
-    out.push_str(&blocks(&doc.blocks, tables, images, figures_outside, bibliography, diags));
+    out.push_str(&blocks(&doc.blocks, tables, images, labels, figures_outside, bibliography, diags));
     // Unconditionally at the end, never at the `hayagriva` fence's own
     // position (decision 59) -- the same fixed structural placement the
     // cover page and outline above already get.
@@ -182,6 +183,7 @@ fn blocks(
     items: &[Block],
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
@@ -199,6 +201,7 @@ fn blocks(
                         &pair,
                         tables.get(&i),
                         images.get(&i),
+                        labels.get(&i).map(String::as_str),
                         figures_outside,
                         diags,
                     ));
@@ -207,7 +210,7 @@ fn blocks(
                 continue;
             }
         }
-        if let Some(s) = block(&items[i], tables, images, figures_outside, bibliography, diags) {
+        if let Some(s) = block(&items[i], tables, images, labels, figures_outside, bibliography, diags) {
             rendered.push(s);
         }
         i += 1;
@@ -219,6 +222,7 @@ fn block(
     b: &Block,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
@@ -234,7 +238,7 @@ fn block(
         // `hidden` (decision 53).
         Block::Code { info, .. } if info.weave_hidden() || info.weave_source_hidden() => return None,
         Block::Code { info, text, line, .. } => code_or_data_table(info, text, *line, diags),
-        Block::List(l) => list(l, tables, images, figures_outside, bibliography, diags),
+        Block::List(l) => list(l, tables, images, labels, figures_outside, bibliography, diags),
         Block::ThematicBreak { .. } => "#line(length: 100%)\n".to_string(),
         Block::Passthrough { text, .. } => format!("{}\n", escape_typst(text)),
         Block::Table { aligns, header, rows, .. } => table_block(aligns, header, rows, bibliography),
@@ -263,6 +267,7 @@ fn eval_pair(
     pair: &Pair,
     table: Option<&(String, String)>,
     image: Option<&(Vec<u8>, String)>,
+    label: Option<&str>,
     figures_outside: bool,
     diags: &mut Diags,
 ) -> String {
@@ -273,7 +278,7 @@ fn eval_pair(
     }
     let mut figure = String::new();
     if !source_info.weave_output_hidden() {
-        eval_pair_result(&mut body, &mut figure, source_info, pair, table, image, source_line, diags);
+        eval_pair_result(&mut body, &mut figure, source_info, pair, table, image, label, source_line, diags);
     }
     let figure_outside = source_info.figure_outside().unwrap_or(figures_outside);
     if !figure_outside {
@@ -315,6 +320,7 @@ fn eval_pair_result(
     pair: &Pair,
     table: Option<&(String, String)>,
     image: Option<&(Vec<u8>, String)>,
+    label: Option<&str>,
     source_line: u32,
     diags: &mut Diags,
 ) {
@@ -330,15 +336,16 @@ fn eval_pair_result(
         let _ = write!(body, "\n#text(size: 9pt, fill: {color})[{output_caption}]\n\n");
         body.push_str(&code_or_data_table(pair.output_info, pair.output_text, pair.output_line, diags));
     }
+    let anchor = label.map(|l| format!(" <fig:{l}>")).unwrap_or_default();
     if let Some((lang, content)) = table {
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
         let content_markup = code_or_data_table(&info, content, source_line, diags);
         match source_info.caption().or_else(|| source_info.produces()) {
-            Some(label) => {
+            Some(caption) => {
                 let _ = write!(
                     figure,
-                    "\n#figure(kind: table, caption: [{}])[\n{content_markup}]\n\n",
-                    escape_typst(label)
+                    "\n#figure(kind: table, caption: [{}])[\n{content_markup}]{anchor}\n\n",
+                    escape_typst(caption)
                 );
             }
             None => body.push_str(&content_markup),
@@ -347,11 +354,11 @@ fn eval_pair_result(
     if let Some((_, resolved)) = image {
         let image_markup = format!("#image(\"assets/{}\")\n", escape_typst_string(resolved));
         match source_info.caption().or_else(|| source_info.produces()) {
-            Some(label) => {
+            Some(caption) => {
                 let _ = write!(
                     figure,
-                    "\n#figure(kind: image, caption: [{}])[\n{image_markup}]\n\n",
-                    escape_typst(label)
+                    "\n#figure(kind: image, caption: [{}])[\n{image_markup}]{anchor}\n\n",
+                    escape_typst(caption)
                 );
             }
             None => body.push_str(&image_markup),
@@ -402,6 +409,7 @@ fn list(
     l: &List,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
@@ -409,7 +417,7 @@ fn list(
     let marker = if l.ordered { "+" } else { "-" };
     let mut out = String::new();
     for item in &l.items {
-        let body = blocks(&item.blocks, tables, images, figures_outside, bibliography, diags);
+        let body = blocks(&item.blocks, tables, images, labels, figures_outside, bibliography, diags);
         for (i, line) in body.lines().enumerate() {
             if i == 0 {
                 out.push_str(marker);
@@ -659,10 +667,23 @@ mod tests {
         images: &HashMap<usize, (Vec<u8>, String)>,
         figures_outside: bool,
     ) -> (String, Diags) {
+        render_doc_with_labels(source, tables, images, &HashMap::new(), figures_outside)
+    }
+
+    /// The same, plus the label map `weave::figure_labels` builds
+    /// (decision 63). A test asserting on `<fig:...>` needs one. Every
+    /// other test here has no figure to label, so it passes none.
+    fn render_doc_with_labels(
+        source: &str,
+        tables: &HashMap<usize, (String, String)>,
+        images: &HashMap<usize, (Vec<u8>, String)>,
+        labels: &HashMap<usize, String>,
+        figures_outside: bool,
+    ) -> (String, Diags) {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, tables, images, figures_outside, None, &mut diags);
+        let out = render(&doc, "Title", true, tables, images, labels, figures_outside, None, &mut diags);
         (out, diags)
     }
 
@@ -680,7 +701,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(!out.contains("#outline()"));
     }
 
@@ -689,7 +710,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ntitle: T\nauthor: Jane Doe\ncover: false\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(!out.contains("#pagebreak()"), "{out}");
         assert!(!out.contains("Jane Doe"), "{out}");
         assert!(out.starts_with("#outline()"), "{out}");
@@ -701,8 +722,8 @@ mod tests {
         let with = Document::parse("---\ntitle: T\ncover: true\n---\n# H\n", &mut d);
         let without = Document::parse("---\ntitle: T\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let a = render(&with, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
-        let b = render(&without, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let a = render(&with, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let b = render(&without, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert_eq!(a, b, "`cover` is a directive, never a line on the page it names");
     }
 
@@ -711,7 +732,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ntitle: T\ncover: yes\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(out.contains("#pagebreak()"), "never guessed at, so the default stands: {out}");
         assert!(!out.contains("Cover"), "{out}");
     }
@@ -724,7 +745,7 @@ mod tests {
             &mut d,
         );
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Tags: rust, typst"), "{cover}");
@@ -741,7 +762,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\nauthor: Jane Doe\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Jane Doe"), "{cover}");
@@ -753,7 +774,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\nauthor: [Jane Doe, John Smith]\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Jane Doe, John Smith"), "{cover}");
@@ -764,7 +785,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ndate: 2026-09-18\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(
@@ -782,7 +803,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ndate: 2026-09\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(
@@ -796,7 +817,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ndate: 2026\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("[2026]"), "{cover}");
@@ -808,7 +829,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ndate: sometime next year\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("sometime next year"), "{cover}");
@@ -1158,6 +1179,52 @@ mod tests {
     }
 
     #[test]
+    fn a_labelled_table_figure_carries_its_own_typst_label() {
+        let src = "```sql db=w name=t produces=file:data.csv\nselect 1;\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nn\n1\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "x,y\n1,2\n".to_string()));
+        let mut labels = HashMap::new();
+        labels.insert(0, "revenue".to_string());
+        let (out, _) = render_doc_with_labels(src, &tables, &HashMap::new(), &labels, false);
+        assert!(out.contains("] <fig:revenue>"), "{out}");
+    }
+
+    #[test]
+    fn a_labelled_image_figure_carries_its_own_typst_label() {
+        let src = "```python name=c produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let mut labels = HashMap::new();
+        labels.insert(0, "chart".to_string());
+        let (out, _) = render_doc_with_labels(src, &HashMap::new(), &images, &labels, false);
+        assert!(out.contains("#figure(kind: image, caption: [file:chart.png])["), "{out}");
+        assert!(out.contains("] <fig:chart>"), "{out}");
+    }
+
+    /// The label rides the figure, not the pair's own block, so it lands
+    /// in the same place under either placement (decision 56).
+    #[test]
+    fn a_labelled_figure_keeps_its_label_when_placed_outside_the_block() {
+        let src = "```python name=c produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let mut labels = HashMap::new();
+        labels.insert(0, "chart".to_string());
+        let (out, _) = render_doc_with_labels(src, &HashMap::new(), &images, &labels, true);
+        assert!(out.contains("]\n\n#figure(kind: image"), "the figure is outside the block: {out}");
+        assert!(out.contains("] <fig:chart>"), "{out}");
+    }
+
+    #[test]
+    fn an_unlabelled_figure_carries_no_typst_label() {
+        let src = "```python name=c produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, false);
+        assert!(!out.contains("<fig:"), "{out}");
+    }
+
+    #[test]
     fn a_produced_image_is_wrapped_in_a_real_figure_with_an_explicit_image_kind() {
         let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
         let mut images = HashMap::new();
@@ -1178,7 +1245,7 @@ mod tests {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), false, bib, &mut diags)
+        render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, bib, &mut diags)
     }
 
     fn bib(keys: &[&str]) -> BibliographySummary {

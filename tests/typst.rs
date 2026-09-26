@@ -68,7 +68,7 @@ fn rendered_typst_actually_compiles() {
     assert!(parse_diags.is_empty(), "fixture should parse cleanly: {:?}", parse_diags.items());
 
     let mut diags = Diags::new("t.md");
-    let typ = typst::render(&doc, "Weave Smoke Test", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+    let typ = typst::render(&doc, "Weave Smoke Test", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
     assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
 
     let dir = std::env::temp_dir().join(format!("dankg-typst-smoke-{}", std::process::id()));
@@ -145,6 +145,7 @@ fn rendered_citations_and_bibliography_actually_compile() {
         false,
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         false,
         Some(&summary),
         &mut diags,
@@ -203,7 +204,7 @@ fn a_document_with_its_cover_page_dropped_actually_compiles() {
 
     let mut diags = Diags::new("t.md");
     let typ =
-        typst::render(&doc, "No Cover Smoke Test", true, &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        typst::render(&doc, "No Cover Smoke Test", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
     assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
     assert!(typ.starts_with("#outline()"), "the cover page and its pagebreak are gone: {typ}");
     assert!(!typ.contains("Jane Doe"), "the byline goes with the page: {typ}");
@@ -335,9 +336,11 @@ fn a_table_figure_and_an_image_figure_compile_and_number_on_separate_counters() 
     tables.insert(1, ("csv".to_string(), "name,amount\nwidgets,3\n".to_string()));
     let mut images = HashMap::new();
     images.insert(4, (Vec::new(), "chart.png".to_string()));
+    let labels = HashMap::new();
 
     let mut diags = Diags::new("t.md");
-    let typ = typst::render(&doc, "Figure Kinds Smoke Test", false, &tables, &images, false, None, &mut diags);
+    let typ =
+        typst::render(&doc, "Figure Kinds Smoke Test", false, &tables, &images, &labels, false, None, &mut diags);
     assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
     assert!(typ.contains("#figure(kind: table, caption: [A table])["), "{typ}");
     assert!(typ.contains("#figure(kind: image, caption: [A chart])["), "{typ}");

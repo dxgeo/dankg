@@ -791,6 +791,20 @@ pointing at it.
 
 <!-- dankg:depends target=#decision-61-a-frontmatter-cover-switch-for-the-woven-title quote="Only the document's very first block qualifies, and only on an exact match of the title once both sides are trimmed." -->
 
+## Decision 63: A figure's label comes from its block's own `name=`, or from `label=`
+
+A captioned `produces=file:` artifact renders as a real figure in both backends (decision 54). Nothing named it until now. Nothing could point at it. Its label is the block's own `name=`. That name is already unique within its file by construction (decision 19), and already that block's own graph node slug. A block written `name=chart produces=file:chart.png caption="Revenue"` is therefore labelled with no new attribute written at all.
+
+A `label` attribute joins `KNOWN_ATTRS` beside `caption` and `figure`, and overrides that default for one block. `weave::figure_labels` is the one walk that resolves the two, keyed by the block index each pair starts at -- the same key `produced_artifacts` already hands both renderers its own artifacts under. A block with no artifact in either map is not a figure and takes no label. A figure hidden by `weave=hidden` or `weave=output-hidden` (decision 53) does take one, because each backend applies its own hiding and the block is still in `doc.blocks` when the walk reaches it.
+
+Each backend turns that one label into its own identifier. Typst gets `<fig:chart>`, appended to the `#figure(...)` under either placement (decision 56). HTML gets `id="fig-chart"` on the nested `<figure>`, never on the pair's own outer `<figure class="eval-pair">`: a reference has to land on the artifact, not on the source block above it.
+
+Two figures claiming one label warns at the second one's own line. The second one is dropped. The rule is about the label that comes out, not about which attribute it came from. A `label=` colliding with another block's own defaulted `name=` therefore collides just the same.
+
+**Rationale:** `label=` exists because `name` is also the block's eval identity and its tangle identity. Renaming a block for a code reason should not break every reference the prose already wrote. Suffixing a collision the way `Slugger` suffixes a duplicate heading is the alternative and the wrong one here: a silently suffixed label is a reference that silently points at the wrong figure. It warns rather than refuses, which is where it parts from the `name=` collision it takes its default from. `check_unique_names` returns a hard `PlanError::DuplicateName` there. Refusing to render a whole document over one label typo is a harsher trade than refusing to run one eval chain.
+
+<!-- dankg:depends target=#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="An artifact with no caption at all renders unwrapped" -->
+
 ## Block nodes
 
 A named, top-level code block is a node too (decision 20). It is scoped to

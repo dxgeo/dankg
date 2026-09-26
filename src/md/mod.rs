@@ -208,7 +208,7 @@ impl PartialEq for InfoString {
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
 pub const KNOWN_ATTRS: &[&str] = &[
     "db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key", "protocol", "weave",
-    "caption", "figure",
+    "caption", "figure", "label",
 ];
 
 impl InfoString {
@@ -355,6 +355,17 @@ impl InfoString {
             Some("inside") => Some(false),
             _ => None,
         }
+    }
+
+    /// A reader-authored label (decision 63) naming this block's own
+    /// figure, overriding the default that `name()` supplies. It exists
+    /// because `name` is also the block's eval identity and its tangle
+    /// identity. Renaming a block for a code reason should not break
+    /// every reference the prose already wrote. Absent here means the
+    /// caller falls back to `name()`. A block written
+    /// `name=chart caption="Revenue"` therefore needs no label at all.
+    pub fn label(&self) -> Option<&str> {
+        self.get("label")
     }
 }
 
