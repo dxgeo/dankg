@@ -1,0 +1,278 @@
+# A produced artifact is a node, and it carries the name
+
+## Context
+
+Decision 63 gave a figure a label, defaulting to its block's own
+`name=` and overridden by a reader-written `label=`. Decision 64 made
+a same-file wikilink resolve against it. Both shipped in 0.9.0. Both
+work inside `dankg weave`.
+
+The graph never learned about `label=`. `graph/build.rs` builds a
+block's node from `info.name()` alone. A reference written against a
+label resolves in weave and reads as a dead link to `dankg graph`, to
+`dankg check`, and to the TUI's own cross-reference panel. `check` is
+the CI gate. A corpus adopting `label=` therefore fails its own gate
+over a reference that is correct.
+
+The first draft of this plan proposed recording the label as an alias
+on the block's own node. That draft is abandoned. A label names the
+*figure*, not the block that produced it. Aliasing the block gives one
+node two names for two different things. The right shape is two nodes,
+each with its own name.
+
+<!-- dankg:depends target=../architecture.md#decision-63-a-figures-label-comes-from-its-blocks-own-name-or-from-label quote="A `label` attribute joins `KNOWN_ATTRS` beside `caption` and `figure`" -->
+
+## What the probes established
+
+**A produced file has no node. A produced relation does.**
+`graph/build.rs` gates node creation on `if let Some(db) = info.db()`.
+A `[db.*]` block's own `produces=orders` becomes a `Relation` node
+under a `db:warehouse` namespace, joined by a real `Produces` edge.
+`produces=file:chart.png` on any other block becomes nothing at all.
+`a_block_with_no_db_never_gets_a_relation_even_with_a_produces_marker`
+pins that deliberately. So the graph already models one kind of
+produced thing and not the other, which is a gap with or without
+labels.
+
+**The two tools resolve disjoint sets.** A block written
+`name=chart label=trend` answers to `trend` in weave and to `chart` in
+the graph. Neither fragment works in both. `weave::figures` computes
+`info.label().or_else(|| info.name())`. A label replaces the name
+rather than adding to it. `graph/build.rs` reads the name and nothing
+else.
+
+| written | weave | `dankg graph` and `check` |
+| --- | --- | --- |
+| `[[#chart]]` | fails the weave | resolves |
+| `[[#trend]]` | resolves | dead link |
+
+**The failure message on the first row is wrong.** A real run says the
+artifact could not be read. The artifact read fine.
+`unresolved_message` falls through to its artifact branch because the
+block *is* a figure, just not under the fragment asked for. Nothing
+distinguishes "no such figure" from "that name belongs to something
+else here".
+
+**The cache stores what resolution reads.** `graph/cache.rs` is a
+line-oriented format at `VERSION = 3`. Anything new that resolution
+depends on has to be encoded, decoded, and version-bumped. A warm
+cache otherwise serves pre-change nodes that still hash as fresh.
+
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 3;" -->
+
+## What this reuses
+
+**`push_relation_node`, `relation_node`, and `EdgeKind::Produces`.** A
+produced relation is already a node the producing block points at
+through a `Produces` edge. A produced file is the same shape with a
+different namespace. Nothing about the edge, the dedupe, or the
+rendering needs inventing.
+
+**`Slugger`, and the per-file namespace it already owns.** An
+artifact's own name shares one namespace with every heading and block
+name in its file. One walk assigns all three, which is what makes a
+collision visible where it happens.
+
+**`weave::figures`, which already owns the name.** It resolves an
+override against a default in one walk and already warns on a
+collision by line. What changes is where the default comes from.
+
+<!-- dankg:depends target=../architecture.md#decision-63-a-figures-label-comes-from-its-blocks-own-name-or-from-label quote="Two figures claiming one label warns at the second one's own line." -->
+
+## What's new
+
+### Decision 69: A `produces=file:` artifact is a node
+
+A block declaring `produces=file:PATH` gets a second node for the file
+it writes, joined to the block by the `Produces` edge a relation
+already uses. The block node stays exactly what it is.
+
+This closes a gap that predates labels. `dankg graph` already draws a
+produced relation, because a `[db.*]` block's own recorded
+`produces=orders` builds one. A produced file was left out. A corpus
+whose blocks write CSVs and charts shows the code and never what the
+code made.
+
+The artifact is what a figure reference points at. A reference names
+the thing on the page. The thing on the page is the artifact, not the
+source block above it. Two nodes give the two fragments two meanings
+rather than making one node answer to two names.
+
+The node lives under a `file:` namespace, the way a relation lives
+under `db:NAME`. An artifact is addressable inside its own file
+through its name alone. A same-file `[[#trend]]` needs no namespace
+written out.
+
+### Decision 70: An artifact's name comes from its path, or from an override
+
+The default is the path's own stem: `produces=file:data/quarterly.csv`
+is named `quarterly`. That mirrors a heading, whose slug is derived
+from the text the author already wrote rather than declared separately.
+Most artifacts need no attribute at all.
+
+An attribute overrides it for one block, the way `label=` does today.
+Decision 63's reason stands unchanged: a block's `name=` is its eval
+identity and its tangle identity. A path is a filesystem detail.
+Neither should have to change because the prose wants a better word.
+
+Both backends derive their own identifier from that one name, exactly
+as they do now: `<fig:NAME>` in Typst, `id="fig-NAME"` in HTML.
+
+A name colliding with a heading slug, a block name, or another
+artifact warns at its own line and is dropped. That artifact falls
+back to its path-derived default. A derived name that collides is
+suffixed by `Slugger` the way a repeated heading already is, because a
+derived collision is not the author's mistake to fix. Suffixing a
+*declared* name is refused for decision 63's own reason: a silently
+suffixed name is a reference that silently points at the wrong figure.
+
+### Decision 71: A recognized pair is addressable in both backends
+
+`[[#chart]]`, naming the block itself, resolves to the pair's own
+rendered box. HTML puts an `id` on the `<figure class="eval-pair">` it
+already emits. Typst puts a label on the `#block(stroke: ...)` it
+already emits.
+
+Without this, decision 69 moves the disagreement rather than ending
+it: the graph would resolve `[[#chart]]` to the block node while weave
+still had nothing to point at. A block and the artifact it produces
+are two targets. Both are addressable. Each means what it says.
+
+An unpaired block gets no anchor, since decision 46's box is what a
+pair renders and there is nothing to point at without one.
+
+### Decision 72: A reference naming something that exists under another name says so
+
+`unresolved_message` gains one answer before its artifact branch. A
+fragment naming a block whose artifact is addressable under a
+different name reports that, rather than reporting whichever artifact
+condition happens to match.
+
+Decisions 69 and 71 make the common case unreachable. The message
+stays because it is wrong today, and because a fragment can still miss
+in ways the other decisions do not cover.
+
+## Why not the alternatives
+
+**Alias the block's own node with the label.** The first draft of this
+plan. It loses because a label names the figure. The block node would
+answer to a name that is not its own. It also leaves a produced file
+invisible to the graph, which is the larger gap underneath.
+
+**Make the block node's slug the label.** One line in `build.rs`, with
+no change to weave at all. It loses on decision 20, which fused node
+scope and eval scope deliberately: a block `dankg eval` runs as
+`chart` would appear in the graph as `trend`. Adding a label would
+also move an existing node id silently.
+
+**Scope the attribute to weave and rename it `weave_label`.** It loses
+because a name cannot fix the gate. `dankg check` resolves prose links
+generically and cannot tell a weave-only reference from any other. A
+weave-scoped name appearing in a `[[#...]]` still reports a dead link.
+Only deciding whether the graph knows the name fixes that. Naming it
+for the command that reads it also sits badly once the graph reads it
+too.
+
+**Drop the attribute.** The gap disappears with the feature. It loses
+because the default would then be a path. A path is a filesystem
+detail no prose should have to quote.
+
+**Fix only the message.** Decision 72 alone. It loses because `check`
+would keep reporting a correct reference as a dead link, which is a CI
+gate failing over a document that is right.
+
+## Open questions
+
+1. What the override attribute is called. `label=` ships today and is
+   too generic: it becomes a Typst label, an HTML id, and a graph slug
+   at once. `artifact=` names what it names. `as=` reads well beside
+   `produces=` but breaks the noun convention every other attribute
+   follows. The rename is mechanical either way, since `dankg fmt`
+   canonicalizes attribute order and 0.9.0 has no external users.
+2. Whether an artifact node is drawn by default in `dankg graph` and
+   listed in the TUI, or kept behind a flag the way `--live` keeps a
+   spawned catalog. Drawing it by default changes the picture for
+   every corpus with produced artifacts.
+3. What extent an artifact node reports. A relation node has no source
+   lines of its own. An artifact could borrow its producing block's,
+   or report none.
+
+## What this explicitly does not do
+
+- Any change to `Inline::WikiLink`, the markdown parser, or the
+  reference syntax. `[[#chart]]` and `[text](#chart)` both parse
+  today.
+- A node for `reads=file:`. The reverse edge can follow once the
+  forward one exists.
+- Cross-file references. Weave renders one file (decision 41).
+  Decision 64 narrows that for a fragment with no file name in it
+  alone.
+- Aliases for headings. A heading has one slug. Nothing has asked for
+  a second.
+
+## Critical files
+
+- `src/graph/build.rs` / `build.md` -- a `produces=file:` artifact
+  becomes a node under a `file:` namespace, joined by `Produces`; its
+  name is assigned from the same per-file `Slugger` a heading and a
+  block name come from.
+- `src/graph/model.md` -- a node kind for an artifact, beside
+  `Relation`.
+- `src/graph/resolve.md` -- nothing, if the artifact's name is a real
+  slug in its own file. That is the point of making it a node rather
+  than an alias.
+- `src/graph/cache.md` -- the artifact node encoded and decoded, and
+  `VERSION` 3 to 4. A stamp answers "is this the file I indexed",
+  which stays true when build's reading of an unchanged file changes.
+  Not bumping would serve stale nodes that still hash as fresh -- the
+  same trap decision 62 hit.
+- `src/md/mod.md` -- the override attribute, renamed per question 1.
+- `src/weave.md` -- `figures` takes its default from the artifact's
+  path rather than the block's `name=`; `unresolved_message` gains
+  decision 72's own answer.
+- `src/render/weave_html.md` / `typst.md` -- an anchor on the pair's
+  own box (decision 71).
+- `architecture.md` -- decisions 69 through 72; decision 63 narrowed
+  to say the name belongs to the artifact.
+- `README.md` and `example/weave_example/report.md` -- the renamed
+  attribute. The "A gap worth knowing about" section goes with the
+  gap.
+
+## Verification
+
+1. Edit loop per CLAUDE.md, then `dankg fmt --check` and
+   `dankg check .`.
+
+2. Unit tests:
+
+   - A block with `produces=file:data/quarterly.csv` builds an
+     artifact node named `quarterly`, and a `Produces` edge from the
+     block to it.
+   - A `db=` block's own relation node is unchanged, which is what
+     makes decision 69 an added namespace rather than an altered one.
+   - An override renames the artifact node and leaves the block node
+     alone.
+   - A declared name colliding with a heading slug warns by line. The
+     artifact falls back to its path-derived default. The heading
+     keeps its own unsuffixed slug.
+   - Two artifacts whose paths derive one name are suffixed by
+     `Slugger`, never warned about.
+   - `[[#quarterly]]` resolves to the artifact node and `[[#chart]]`
+     to the block node, in one document.
+   - A recognized pair carries an anchor in both backends. An unpaired
+     block carries none.
+
+3. A cache round-trip test: a file with an artifact node encodes and
+   decodes intact. A `VERSION` 3 entry is rejected rather than
+   decoded. `tests/index.rs`'s own
+   `graph_output_does_not_depend_on_the_cache` is what catches a
+   missed bump.
+
+4. The four corpus goldens are re-blessed only if the test corpus
+   gains a produced artifact. It has none today. An unchanged golden
+   is therefore itself evidence that decision 69 adds nodes rather
+   than moving them.
+
+5. `dankg check example/weave_example` reports zero unresolved nodes
+   beyond the deliberate `[[SomeOtherFile]]`, which is the symptom
+   that started this plan.
