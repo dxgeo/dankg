@@ -639,3 +639,51 @@ fn a_labelled_heading_reference_compiles_against_an_unnumbered_heading() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `weave::run` collects diagnostics as it goes and emits them at the end.
+/// It used to emit from two places -- once before the unresolved-reference
+/// bail, once after a successful render -- and a backend returning `Err`
+/// propagated through `?` and reached neither. Every warning collected was
+/// dropped at exactly the moment an author needed it.
+///
+/// This pins the symptom rather than the shape: the run is driven through
+/// the real binary, and the diagnostic has to be on stderr beside the
+/// failure. The failure is forced by making the build directory's own
+/// `assets` path a regular file, so copying an image into it cannot
+/// succeed -- which decision 51 now stops the weave over, at the block's
+/// own line, rather than letting Typst refuse a label that never got
+/// written.
+#[test]
+fn a_failed_artifact_copy_stops_the_weave_and_says_why() {
+    let dir = std::env::temp_dir().join(format!("dankg-weave-diags-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join(".dankg/build/weave")).expect("scratch dir");
+    fs::write(dir.join(".dankg/config"), "[weave.pdf]\ncommand = typst compile {typ} {pdf}\n").expect("config");
+    // A file where a directory has to go, so `create_dir_all` cannot win.
+    fs::write(dir.join(".dankg/build/weave/assets"), "not a directory").expect("blocker");
+    fs::write(dir.join("chart.png"), red_png()).expect("chart.png");
+    fs::write(
+        dir.join("a.md"),
+        "```python name=chart produces=file:chart.png caption=\"A chart\"\nrun()\n```\n\n\
+         <!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#chart]].\n",
+    )
+    .expect("a.md");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_dankg"))
+        .args(["weave", dir.join("a.md").to_str().unwrap(), "--format", "pdf"])
+        .output()
+        .expect("failed to run dankg");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(!out.status.success(), "the copy failed, so the run must fail: {stderr}");
+    assert!(
+        stderr.contains("could not copy `chart.png` into the build directory"),
+        "the diagnostic that explains the failure must survive it: {stderr}"
+    );
+    assert!(stderr.contains("a.md:1"), "reported at the block's own line, not at line 0: {stderr}");
+    // dankg fails first, so Typst is never handed the document at all.
+    assert!(!stderr.contains("does not exist in the document"), "Typst must never see it: {stderr}");
+    assert!(!dir.join(".dankg/build/weave/a.typ").exists(), "no .typ is written either: {stderr}");
+
+    let _ = fs::remove_dir_all(&dir);
+}

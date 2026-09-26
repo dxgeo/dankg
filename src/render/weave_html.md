@@ -302,6 +302,18 @@ concern above): `source_info.figure_outside()`'s own `figure=inside`/
 `figure=outside` when present, otherwise `dankg weave`'s own
 document-wide `--figures-inside`/`--figures-outside` default.
 
+An artifact with no caption at all gets no nested `<figure>` either.
+Its raw content goes into the pair's own body instead, exactly where
+`render::typst` puts it (decision 54). This renderer used to emit the
+wrapper regardless and guard only the `<figcaption>`, which left the
+two backends disagreeing about a document neither could actually be
+handed: a produced artifact always carries a caption, its own
+`produces=file:PATH` echo when the reader wrote none. Nothing reaching
+weave has an uncaptioned artifact in it. A probe against both
+renderers, handed an artifact map built by hand, is what found the
+disagreement. Unobservable is not the same as agreeing. Decision 54
+says *either* backend.
+
 A figure's own `<figcaption>` carries the number `weave::figures`
 counted for it, written as literal text with Typst's own supplement
 word and its own `: ` separator (decision 65). HTML cannot count for
@@ -499,27 +511,35 @@ fn eval_pair_result(
     }
     let anchor = label.map(|l| format!(" id=\"fig-{}\"", escape_attr(l))).unwrap_or_default();
     if let Some((lang, content)) = table {
-        let _ = writeln!(figure, "<figure class=\"table-figure\"{anchor}>");
-        if let Some(caption) = source_info.caption().or_else(|| source_info.produces()) {
-            let _ = writeln!(figure, "<figcaption>{}{}</figcaption>", supplement("Table", number), escape(caption));
-        }
         let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
-        code_or_data_table(figure, &info, content, source_line, diags);
-        figure.push_str("</figure>\n");
+        match source_info.caption().or_else(|| source_info.produces()) {
+            Some(caption) => {
+                let _ = writeln!(figure, "<figure class=\"table-figure\"{anchor}>");
+                let _ =
+                    writeln!(figure, "<figcaption>{}{}</figcaption>", supplement("Table", number), escape(caption));
+                code_or_data_table(figure, &info, content, source_line, diags);
+                figure.push_str("</figure>\n");
+            }
+            None => code_or_data_table(out, &info, content, source_line, diags),
+        }
     }
     if let Some((bytes, resolved)) = image {
-        let _ = writeln!(figure, "<figure class=\"image-figure\"{anchor}>");
-        let _ = writeln!(
-            figure,
-            "<img src=\"data:{};base64,{}\" alt=\"{}\">",
+        let img = format!(
+            "<img src=\"data:{};base64,{}\" alt=\"{}\">\n",
             mime_for(resolved),
             base64_encode(bytes),
             escape_attr(resolved)
         );
-        if let Some(caption) = source_info.caption().or_else(|| source_info.produces()) {
-            let _ = writeln!(figure, "<figcaption>{}{}</figcaption>", supplement("Figure", number), escape(caption));
+        match source_info.caption().or_else(|| source_info.produces()) {
+            Some(caption) => {
+                let _ = writeln!(figure, "<figure class=\"image-figure\"{anchor}>");
+                figure.push_str(&img);
+                let _ =
+                    writeln!(figure, "<figcaption>{}{}</figcaption>", supplement("Figure", number), escape(caption));
+                figure.push_str("</figure>\n");
+            }
+            None => out.push_str(&img),
         }
-        figure.push_str("</figure>\n");
     }
     if !hides_output(source_info, pair) {
         provenance(out, pair);
@@ -1453,6 +1473,30 @@ mod tests {
         assert!(fig_start < cap && cap < table_start, "caption must come before the table: {out}");
     }
 
+    /// The mirror of `render::typst`'s own
+    /// `an_uncaptioned_artifact_stays_inside_the_blocks_stroke`. Both
+    /// backends have to agree here, and one of them used to emit the
+    /// wrapper anyway (decision 54).
+    #[test]
+    fn an_uncaptioned_table_artifact_gets_no_nested_figure() {
+        let src = "```python name=a\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(!out.contains("table-figure"), "an uncaptioned artifact is not a real figure: {out}");
+        assert!(out.contains("<table>"), "its raw content still renders, in the pair's own body: {out}");
+    }
+
+    #[test]
+    fn an_uncaptioned_image_artifact_gets_no_nested_figure() {
+        let src = "```python name=a\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (vec![0xffu8, 0xd8, 0xff, 0xe0], "chart.jpg".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, false);
+        assert!(!out.contains("image-figure"), "{out}");
+        assert!(out.contains("<img src=\"data:image/jpeg;base64,"), "its raw content still renders: {out}");
+    }
+
     #[test]
     fn a_labelled_table_figure_carries_its_own_id() {
         let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
@@ -1584,7 +1628,11 @@ mod tests {
     #[test]
     fn a_bare_heading_reference_reads_as_the_headings_own_title() {
         let out = render_refs("# Intro\n\nSee [[#intro]].\n");
-        assert!(out.contains("<a href=\"#intro\">Intro</a>"), "{out}");
+        // Decision 68's own claim is identity with what `toc` writes for
+        // the same heading, not merely that the title is in there. The
+        // table of contents emits one such anchor and the reference emits
+        // the other, so the identical string has to appear twice.
+        assert_eq!(out.matches("<a href=\"#intro\">Intro</a>").count(), 2, "{out}");
     }
 
     /// The fragment an author writes is the label, not the id: a figure's

@@ -530,6 +530,10 @@ draw_chart(data, "chart.png")
 ```
 ````
 
+A label holds letters, digits, `-` and `_`, the same characters a
+heading slug holds. Anything else warns and the label is dropped, so
+the figure renders and numbers as usual but nothing can point at it.
+
 A heading is referenceable the same way, by its own slug -- the
 anchor its table-of-contents link already uses. `[[#the-edit-loop]]`
 points at `## The edit loop`. The markdown link form works for either
@@ -576,6 +580,12 @@ draw_chart(data, "chart.png")
 
 An uncaptioned artifact is not a real figure in either backend, so
 `figure=` changes nothing about it.
+
+An artifact that cannot be read, or cannot be copied into the PDF
+build directory, stops the weave and says which file and why. It used
+to warn and carry on. A reference to that figure would then have
+survived into the output with nothing left to point at, which is the
+one thing `weave` refuses to ship.
 
 `weave=hidden` drops both halves of a paired block together.
 `weave=source-hidden` keeps the block's own `produces=file:` artifact

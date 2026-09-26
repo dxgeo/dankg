@@ -327,7 +327,7 @@ For a recognized pair (decision 46) whose source block also declares `produces=f
 
 ## Decision 51: A `produces=file:` image renders as a real image
 
-`produced_artifacts` resolves a `png`/`jpg`/`jpeg`/`gif`/`svg`/`webp` extension the identical way decision 50 resolves a table one, into raw bytes and the artifact's own root-relative path, keyed by the source block's index. Neither renderer parses an image; each embeds it its own way. In HTML, the bytes are base64-encoded by a hand-rolled encoder (decision 1: zero crates, the same choice `data::table`'s own CSV/JSON readers already made) and inlined as `<img src="data:…;base64,…">`, keeping the woven page one self-contained file with nothing to ship alongside it (decision 43). In Typst, `render_pdf` copies the bytes into `.dankg/build/weave/assets/<root-relative-path>` before compiling -- `render::typst` only ever emits markup, never touches a filesystem. The emitted `#image("assets/<root-relative-path>")` reference and the copy's own destination are computed from that identical string. The two can never name different files. A copy that fails is dropped from the map the Typst renderer sees and warned about on stderr: never a reference to a file that was never actually written. A missing or unreadable source artifact gets decision 50's own treatment: a stderr warning, nothing added to the page.
+`produced_artifacts` resolves a `png`/`jpg`/`jpeg`/`gif`/`svg`/`webp` extension the identical way decision 50 resolves a table one, into raw bytes and the artifact's own root-relative path, keyed by the source block's index. Neither renderer parses an image; each embeds it its own way. In HTML, the bytes are base64-encoded by a hand-rolled encoder (decision 1: zero crates, the same choice `data::table`'s own CSV/JSON readers already made) and inlined as `<img src="data:…;base64,…">`, keeping the woven page one self-contained file with nothing to ship alongside it (decision 43). In Typst, `render_pdf` copies the bytes into `.dankg/build/weave/assets/<root-relative-path>` before compiling -- `render::typst` only ever emits markup, never touches a filesystem. The emitted `#image("assets/<root-relative-path>")` reference and the copy's own destination are computed from that identical string. The two can never name different files. A copy that fails stops the weave, at the block's own line, before Typst runs; it was dropped from the map the Typst renderer sees and merely warned about until decision 64 made a reference to that figure outlive it, which left Typst refusing an `@fig:` with no label to match and naming generated `.typ` to say so. A missing or unreadable source artifact gets decision 50's own treatment: a stderr warning, nothing added to the page.
 
 **Rationale:** A chart is the ordinary case decision 50 does not cover -- `plt.savefig(...)` writes an image, not a table. Two backends that display an image at all necessarily display it two different ways: an inline data URI has no Typst equivalent; a compiled asset path has no HTML one. Unlike decision 50's table, there is no single shared emitter to reuse here. Keeping each backend's own handling in its own module, fed from the same resolved bytes and path, is the least duplication the two real constraints allow.
 
@@ -819,7 +819,7 @@ So `weave::figures` numbers every figure in document order and hands both render
 
 The count is per kind, never sequential. Typst numbers a table and an image on two separate counters, confirmed by a real compile read back with `pdftotext`. A single counter would disagree with the PDF on every document holding both. `kind: table` and `kind: image` are declared rather than inferred (decision 54) so that both backends count off one declaration, rather than dankg predicting Typst's own inference.
 
-Where the walk sits is not free, for the same reason decision 61's own heading drop is not. It must count exactly the figures each backend will actually emit. So it runs after `drop_repeated_title_heading`. It takes its candidates from the artifact maps `produced_artifacts` already built. It skips a figure neither backend renders. `weave=hidden` drops the whole pair. `weave=output-hidden` drops the artifact half with it (decision 53). Neither leaves a figure on the page to count. `weave=source-hidden` keeps the artifact (decision 60). Its own figure renders and counts like any other. A skipped figure still keeps its label, which is how a reference to a hidden figure stays distinguishable from a reference to nothing.
+Where the walk sits is not free, for the same reason decision 61's own heading drop is not. It must count exactly the figures each backend will actually emit. So it runs after `drop_repeated_title_heading`. It takes its candidates from the artifact maps `produced_artifacts` already built. It skips a figure neither backend renders. `weave=hidden` drops the whole pair. `weave=output-hidden` drops the artifact half with it (decision 53). Neither leaves a figure on the page to count. `weave=source-hidden` keeps the artifact (decision 60). Its own figure renders and counts like any other. A skipped figure still keeps its label, which is how a reference to a hidden figure stays distinguishable from a reference to nothing. An *uncaptioned* artifact needs no skip of its own, and cannot be tested for: a produced artifact always carries a caption, its own `produces=file:PATH` echo when the reader wrote none. Every entry in the two artifact maps therefore renders as a real figure already. Decision 54's uncaptioned case is reachable only by handing a renderer an artifact map built by hand.
 
 Numbering and labelling are separate. A figure whose `label=` was dropped as a collision (decision 63) still renders. It therefore still counts.
 
@@ -3331,6 +3331,19 @@ own status signal survive whichever value is set.
 <!-- dankg:depends target=#decision-52-caption-overrides-a-pairs-own-synthesized-caption quote="It replaces exactly one of the two, never both" -->
 <!-- dankg:depends target=#decision-53-weavesource-hidden-and-weaveoutput-hidden-split-a-pairs-own-two-halves quote="Since `weave=` holds one value, the two are mutually exclusive by construction" -->
 
+## Figures, numbered and referenced
+
+A captioned artifact is a real figure in both backends (decision 54). A figure carries a name (decision 63). The name is the block's own `name=`, or a `label=` overriding it. Each backend turns that one name into its own identifier: `<fig:NAME>` in Typst, `id="fig-NAME"` in HTML. A label holds letters, digits, `-` and `_`, the identical charset `slugify` gives a heading. A figure label and a heading slug are therefore interchangeable as a fragment.
+
+`weave::figures` is the walk that resolves a label and numbers a figure at once (decision 65). Numbering is per kind, because Typst counts tables and images on two separate counters. HTML writes the number as literal text, since no browser can put one element's counter value into a link elsewhere on the page. Typst still counts for itself, off the `#figure` it already receives. Both backends walk the same sequence, which is what lands them on the same number.
+
+Prose points at a figure with a same-file wikilink (decision 64). `[[#chart]]` reads as the figure's own number, and `[[#chart|the revenue chart]]` as the author's own words. The markdown link form `[text](#chart)` resolves through the same lookup. A heading resolves the same way, by its own slug: the PDF reads it as a section number, which the author's own `[weave.pdf] template` has to turn on (decision 67). HTML reads it as the heading's own title instead, since HTML numbers no heading (decision 68). A wikilink naming another file is untouched, because weave reads one file (decision 41).
+
+Every reference resolves in `weave::references`, once, for both backends. An unresolved one fails the whole weave at its own markdown line, after the document is walked, with one message per next action. An unresolved citation key fails the same way (decision 66), through the same count. One run therefore shows an author every bad line of either kind.
+
+<!-- dankg:depends target=#decision-64-a-same-file-wikilink-resolves-against-whatever-the-document-holds quote="`weave::references` is the one walk that resolves a fragment, for both backends." -->
+<!-- dankg:depends target=#decision-65-one-numbering-pre-pass-feeds-html-and-typst-still-counts-for-itself quote="The count is per kind, never sequential." -->
+
 ## HTML backend
 
 `render::weave_html` (decision 43) is a single self-contained page:
@@ -3416,6 +3429,16 @@ own error. `duckdb` already gets exactly this treatment from `[db.*] command` in
   writes its table or image to a real file and declares
   `produces=file:PATH` by hand, rather than dankg guessing a format
   from a command string.
+- A reference to a figure in another file. Weave reads one file
+  (decision 41), and decision 64 narrows that for a fragment with no
+  file name in it alone.
+- Labelling a plain markdown table. It is not a figure: `table_block`
+  emits a bare table, the only `kind: table` figure is the
+  produced-artifact path, and a markdown table has no info string to
+  write `caption=` or `label=` on. Deferred rather than refused.
+- A list of figures, a references list, or an index. Typst's own
+  `#outline(target: figure)` already builds the first for a reader who
+  asks for it in a template.
 - More than one `produces=file:` artifact per block (decision 50/51) --
   `InfoString::produces()` returns its whole raw value unsplit, unlike
   `deps()`/`xdeps()`'s own comma-split. One block, one artifact, for

@@ -73,28 +73,24 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
     // Both passes have run by now, and both raise a real error, so the
     // count in `diags` is the one thing to check.
     let failed = diags.count(Level::Error);
-    if failed > 0 {
-        diags.sort();
-        diags.emit();
-        return Err(format!("{failed} unresolved reference(s) or citation key(s); nothing rendered"));
-    }
-
-    let report = match format {
-        Format::Html => {
-            render_html(
+    let report = if failed > 0 {
+        Err(format!("{failed} unresolved reference(s) or citation key(s); nothing rendered"))
+    } else {
+        match format {
+            Format::Html => render_html(
                 &doc, &title, &config, &root, &tables, &images, &labels, &numbers, &slugs, &html_refs,
                 bib.as_ref(), output, figures_outside, &mut diags,
-            )?
+            ),
+            Format::Pdf => render_pdf(
+                &doc, &title, &config, &root, &name, &tables, &images, &labels, &slugs, &typst_refs,
+                bib.as_ref(), output, toc, figures_outside, &mut diags,
+            ),
         }
-        Format::Pdf => render_pdf(
-            &doc, &title, &config, &root, &name, &tables, &images, &labels, &slugs, &typst_refs, bib.as_ref(),
-            output, toc, figures_outside, &mut diags,
-        )?,
     };
 
     diags.sort();
     diags.emit();
-    Ok(report)
+    report
 }
 
 fn drop_repeated_title_heading(doc: &mut Document, title: &str) {
@@ -351,8 +347,9 @@ fn collect_fragments(inlines: &[Inline], line: u32, out: &mut Vec<(String, u32)>
     }
 }
 
-/// Why one fragment did not resolve. Three answers, because the next
-/// action differs in each (decision 64).
+/// Why one fragment did not resolve. One answer per next action
+/// (decision 64): unhide the figure, write a `produces=file:`, run
+/// `dankg eval`, fix the file the block writes, or fix the typo.
 fn unresolved_message(
     doc: &Document,
     fragment: &str,
@@ -367,12 +364,20 @@ fn unresolved_message(
         };
         return format!("`{fragment}` is a figure hidden by `{how}`; there is nothing on the page to point at");
     }
-    if doc.named_blocks().iter().any(|(info, _, _)| info.name() == Some(fragment)) {
-        return format!(
-            "`{fragment}` names a block, but not a figure; only a captioned `produces=file:` artifact is one"
-        );
+    let named = doc.blocks.iter().enumerate().find(|(_, b)| match b {
+        Block::Code { info, .. } => info.name() == Some(fragment),
+        _ => false,
+    });
+    let Some((index, Block::Code { info, .. })) = named else {
+        return format!("nothing in this document is named `{fragment}`");
+    };
+    let Some(raw) = info.produces() else {
+        return format!("`{fragment}` names a block, but it declares no `produces=file:` artifact to be a figure of");
+    };
+    if result::recorded_hash(doc, index, fragment).is_none() {
+        return format!("`{fragment}` produces={raw}, but has no recorded result yet; `dankg eval` writes one");
     }
-    format!("nothing in this document is named `{fragment}`")
+    format!("`{fragment}` produces={raw}, which could not be read; the warning above says why")
 }
 
 pub struct Bibliography {
@@ -609,7 +614,7 @@ fn render_pdf(
 ) -> Result<Report, String> {
     let build_dir = root.join(".dankg").join("build").join("weave");
     let assets_dir = build_dir.join("assets");
-    let mut copied_images = images.clone();
+    let mut uncopied = 0;
     for (index, (bytes, resolved)) in images {
         let dest = assets_dir.join(resolved);
         let result = dest
@@ -618,9 +623,18 @@ fn render_pdf(
             .unwrap_or(Ok(()))
             .and_then(|()| fs::write(&dest, bytes));
         if let Err(e) = result {
-            diags.warn(0, format!("could not copy `{resolved}` into the build directory ({e}); not rendered"));
-            copied_images.remove(index);
+            uncopied += 1;
+            let line = match doc.blocks.get(*index) {
+                Some(Block::Code { line, .. }) => *line,
+                _ => 0,
+            };
+            diags.error(line, format!("could not copy `{resolved}` into the build directory ({e})"));
         }
+    }
+    // Every failed copy is reported before the first one gives up, the
+    // same walk-then-fail shape decisions 64 and 66 use.
+    if uncopied > 0 {
+        return Err(format!("{uncopied} artifact(s) could not be copied into the build directory; nothing rendered"));
     }
 
     // The identical copy-before-compile shape `images` already gets
@@ -640,9 +654,8 @@ fn render_pdf(
         }
     });
 
-    let body = typst::render(
-        doc, title, toc, tables, &copied_images, labels, slugs, refs, figures_outside, bib_summary.as_ref(), diags,
-    );
+    let body =
+        typst::render(doc, title, toc, tables, images, labels, slugs, refs, figures_outside, bib_summary.as_ref(), diags);
     let weave_cfg = config.weave("pdf");
     let preamble =
         weave_cfg.as_ref().and_then(|w| w.template.clone()).and_then(|rel| read_asset(root, &rel, "template", diags));
@@ -1361,7 +1374,29 @@ mod tests {
         let d = doc("```sh name=a\necho hi\n```\n\nText [[#a]].\n");
         let mut diags = Diags::new("t.md");
         resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
-        assert!(diags.items()[0].message.contains("names a block, but not a figure"), "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("declares no `produces=file:` artifact"), "{:?}", diags.items());
+    }
+
+    /// The artifact is declared and recorded, and `produced_artifacts`
+    /// could not read it off disk. That is a figure with a missing file,
+    /// not a block that is no figure, and the message has to say which.
+    #[test]
+    fn a_reference_to_a_figure_whose_artifact_could_not_be_read_says_so() {
+        let d = doc("```python name=chart produces=file:missing.png caption=\"C\"\nrun()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#chart]].\n");
+        let mut diags = Diags::new("t.md");
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        assert!(diags.items()[0].message.contains("could not be read"), "{:?}", diags.items());
+    }
+
+    /// No recorded result yet is a third thing again, and `dankg eval` is
+    /// the next action rather than fixing a file or a typo.
+    #[test]
+    fn a_reference_to_a_figure_with_no_recorded_result_points_at_eval() {
+        let d = doc("```python name=chart produces=file:chart.png caption=\"C\"\nrun()\n```\n\nText [[#chart]].\n");
+        let mut diags = Diags::new("t.md");
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        assert!(diags.items()[0].message.contains("no recorded result yet"), "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("dankg eval"), "{:?}", diags.items());
     }
 
     #[test]

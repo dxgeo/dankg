@@ -83,6 +83,27 @@ silently drop the whole `.dankg/build/weave` prefix the moment a
 reader passed an absolute path. `file_stem` never has that problem: it
 is never anything but a bare name.
 
+Diagnostics are emitted from one place, on every exit path. They used
+to be emitted from two: once before the unresolved-reference bail, and
+once after a successful render. A backend returning `Err` propagated
+through `?` and reached neither. Every warning the run had collected was
+thrown away at exactly the moment an author needed it most.
+
+The bug was found by forcing an artifact copy to fail. A reference to
+that figure survived into the `.typ` with no `<fig:...>` label left to
+match. Typst refused to compile it. All the author saw was
+`label <fig:chart> does not exist in the document`, pointing into
+generated `.typ`. The warning that explained the whole thing -- the
+`could not copy` one, naming the real file -- had been collected and
+dropped. Two errors reached the author. The one naming the real cause
+was not among them.
+
+The fix is shape, not a third `emit` call. `run` computes a
+`Result<Report, String>` rather than unwrapping one with `?`, emits,
+and returns it. There is now no path out of this function that skips
+the emit, which is a property the old shape could not have: every new
+`?` added to the middle of it would have reintroduced the same bug.
+
 ```rust name=run path=weave.rs
 pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_outside: bool) -> Result<Report, String> {
     let source = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
@@ -117,28 +138,24 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
     // Both passes have run by now, and both raise a real error, so the
     // count in `diags` is the one thing to check.
     let failed = diags.count(Level::Error);
-    if failed > 0 {
-        diags.sort();
-        diags.emit();
-        return Err(format!("{failed} unresolved reference(s) or citation key(s); nothing rendered"));
-    }
-
-    let report = match format {
-        Format::Html => {
-            render_html(
+    let report = if failed > 0 {
+        Err(format!("{failed} unresolved reference(s) or citation key(s); nothing rendered"))
+    } else {
+        match format {
+            Format::Html => render_html(
                 &doc, &title, &config, &root, &tables, &images, &labels, &numbers, &slugs, &html_refs,
                 bib.as_ref(), output, figures_outside, &mut diags,
-            )?
+            ),
+            Format::Pdf => render_pdf(
+                &doc, &title, &config, &root, &name, &tables, &images, &labels, &slugs, &typst_refs,
+                bib.as_ref(), output, toc, figures_outside, &mut diags,
+            ),
         }
-        Format::Pdf => render_pdf(
-            &doc, &title, &config, &root, &name, &tables, &images, &labels, &slugs, &typst_refs, bib.as_ref(),
-            output, toc, figures_outside, &mut diags,
-        )?,
     };
 
     diags.sort();
     diags.emit();
-    Ok(report)
+    report
 }
 ```
 
@@ -573,8 +590,11 @@ generated `.typ` -- a build artifact nobody wrote by hand.
 The whole document is walked before anything fails. An author who
 mistyped three labels wants all three lines from one run, not three
 runs. Each one carries its own message, because the next action differs
-in each: nothing in the document carries that name, or a block carries
-it but is not a figure, or the figure is real and hidden.
+in each. Nothing in the document carries that name. Or a block carries
+it and declares no artifact at all. Or it declares one and has no
+recorded result yet, which `dankg eval` writes. Or the artifact is
+declared and recorded and could not be read, which the warning above it
+already names. Or the figure is real and hidden.
 
 ```rust name=resolve_references path=weave.rs
 /// Every same-file reference in `doc`, checked against `refs`. Reports
@@ -628,8 +648,9 @@ fn collect_fragments(inlines: &[Inline], line: u32, out: &mut Vec<(String, u32)>
     }
 }
 
-/// Why one fragment did not resolve. Three answers, because the next
-/// action differs in each (decision 64).
+/// Why one fragment did not resolve. One answer per next action
+/// (decision 64): unhide the figure, write a `produces=file:`, run
+/// `dankg eval`, fix the file the block writes, or fix the typo.
 fn unresolved_message(
     doc: &Document,
     fragment: &str,
@@ -644,12 +665,20 @@ fn unresolved_message(
         };
         return format!("`{fragment}` is a figure hidden by `{how}`; there is nothing on the page to point at");
     }
-    if doc.named_blocks().iter().any(|(info, _, _)| info.name() == Some(fragment)) {
-        return format!(
-            "`{fragment}` names a block, but not a figure; only a captioned `produces=file:` artifact is one"
-        );
+    let named = doc.blocks.iter().enumerate().find(|(_, b)| match b {
+        Block::Code { info, .. } => info.name() == Some(fragment),
+        _ => false,
+    });
+    let Some((index, Block::Code { info, .. })) = named else {
+        return format!("nothing in this document is named `{fragment}`");
+    };
+    let Some(raw) = info.produces() else {
+        return format!("`{fragment}` names a block, but it declares no `produces=file:` artifact to be a figure of");
+    };
+    if result::recorded_hash(doc, index, fragment).is_none() {
+        return format!("`{fragment}` produces={raw}, but has no recorded result yet; `dankg eval` writes one");
     }
-    format!("nothing in this document is named `{fragment}`")
+    format!("`{fragment}` produces={raw}, which could not be read; the warning above says why")
 }
 ```
 
@@ -928,11 +957,29 @@ touches a filesystem. `render_pdf` copies each one into
 `build_dir/assets/`, at the same root-relative path `produced_artifacts`
 already resolved it to, before compiling. `#image(...)`'s own
 reference and the copy's own destination are computed from that
-identical string. The two can never name different files. A copy
-that fails is dropped from the map `typst::render` sees and warned
-about on stderr, the same "misconfigured is reported, not fatal"
-shape as everything else weave reads off disk -- never a reference to
-a file that was never actually written.
+identical string. The two can never name different files.
+
+A copy that fails stops the weave, at the block's own line, before
+Typst runs. It used to be dropped from the map `typst::render` sees
+and warned about instead, on the "misconfigured is reported, not
+fatal" shape everything else weave reads off disk follows. Decision 64
+broke that shape. `weave::references` has already resolved a reference
+to that figure by the time the copy is attempted. The reference went
+out as `@fig:chart` with no `<fig:chart>` left in the document to match
+it. Typst then refused to compile, naming a label in generated
+`.typ` that nobody wrote by hand -- the one error decision 64 exists
+to keep an author from seeing. A probe forced it, by writing a regular
+file where `build_dir/assets/` has to be a directory.
+
+Dropping the reference instead was the alternative. It keeps the PDF
+building, at the cost of a page carrying prose where a reference was,
+which is the silent hole decision 64 refuses. The PDF is wrong either
+way once an artifact is missing. Failing says so.
+
+Every failed copy is reported before the first one gives up, the same
+walk-then-fail shape decisions 64 and 66 already use. `typst::render`
+now receives `images` unchanged, since there is no longer a case where
+it should see fewer than the document declares.
 
 ```rust name=render_pdf path=weave.rs
 fn render_pdf(
@@ -954,7 +1001,7 @@ fn render_pdf(
 ) -> Result<Report, String> {
     let build_dir = root.join(".dankg").join("build").join("weave");
     let assets_dir = build_dir.join("assets");
-    let mut copied_images = images.clone();
+    let mut uncopied = 0;
     for (index, (bytes, resolved)) in images {
         let dest = assets_dir.join(resolved);
         let result = dest
@@ -963,9 +1010,18 @@ fn render_pdf(
             .unwrap_or(Ok(()))
             .and_then(|()| fs::write(&dest, bytes));
         if let Err(e) = result {
-            diags.warn(0, format!("could not copy `{resolved}` into the build directory ({e}); not rendered"));
-            copied_images.remove(index);
+            uncopied += 1;
+            let line = match doc.blocks.get(*index) {
+                Some(Block::Code { line, .. }) => *line,
+                _ => 0,
+            };
+            diags.error(line, format!("could not copy `{resolved}` into the build directory ({e})"));
         }
+    }
+    // Every failed copy is reported before the first one gives up, the
+    // same walk-then-fail shape decisions 64 and 66 use.
+    if uncopied > 0 {
+        return Err(format!("{uncopied} artifact(s) could not be copied into the build directory; nothing rendered"));
     }
 
     // The identical copy-before-compile shape `images` already gets
@@ -985,9 +1041,8 @@ fn render_pdf(
         }
     });
 
-    let body = typst::render(
-        doc, title, toc, tables, &copied_images, labels, slugs, refs, figures_outside, bib_summary.as_ref(), diags,
-    );
+    let body =
+        typst::render(doc, title, toc, tables, images, labels, slugs, refs, figures_outside, bib_summary.as_ref(), diags);
     let weave_cfg = config.weave("pdf");
     let preamble =
         weave_cfg.as_ref().and_then(|w| w.template.clone()).and_then(|rel| read_asset(root, &rel, "template", diags));
@@ -1710,7 +1765,29 @@ mod tests {
         let d = doc("```sh name=a\necho hi\n```\n\nText [[#a]].\n");
         let mut diags = Diags::new("t.md");
         resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
-        assert!(diags.items()[0].message.contains("names a block, but not a figure"), "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("declares no `produces=file:` artifact"), "{:?}", diags.items());
+    }
+
+    /// The artifact is declared and recorded, and `produced_artifacts`
+    /// could not read it off disk. That is a figure with a missing file,
+    /// not a block that is no figure, and the message has to say which.
+    #[test]
+    fn a_reference_to_a_figure_whose_artifact_could_not_be_read_says_so() {
+        let d = doc("```python name=chart produces=file:missing.png caption=\"C\"\nrun()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#chart]].\n");
+        let mut diags = Diags::new("t.md");
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        assert!(diags.items()[0].message.contains("could not be read"), "{:?}", diags.items());
+    }
+
+    /// No recorded result yet is a third thing again, and `dankg eval` is
+    /// the next action rather than fixing a file or a typo.
+    #[test]
+    fn a_reference_to_a_figure_with_no_recorded_result_points_at_eval() {
+        let d = doc("```python name=chart produces=file:chart.png caption=\"C\"\nrun()\n```\n\nText [[#chart]].\n");
+        let mut diags = Diags::new("t.md");
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        assert!(diags.items()[0].message.contains("no recorded result yet"), "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("dankg eval"), "{:?}", diags.items());
     }
 
     #[test]

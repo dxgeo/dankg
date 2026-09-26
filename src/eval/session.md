@@ -113,9 +113,13 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool, if_sta
     diags.absorb(cfg_diags);
 
     let mut files = Files::new(root);
-    files.discover(&entry_file, &mut diags)?;
+    // Emitted before discovery's own failure propagates. `diags` already
+    // carries every `[lang.*]`/`[db.*]` config warning by this point, and
+    // a bare `?` here would drop those along with discovery's own.
+    let discovered = files.discover(&entry_file, &mut diags);
     diags.sort();
     diags.emit();
+    discovered?;
 
     // `--if-stale`'s own precheck (below) needs the whole corpus exactly
     // when a chain reaches a `table:` xdep, the same condition `run_one`
@@ -301,9 +305,10 @@ named directory walks the whole corpus the same way `graph`/`index`/
 /// covering everything the reader named.
 fn list(paths: &[String], cache: bool) -> Result<(), String> {
     let mut diags = Diags::new("dankg");
-    let corpus = index::load(paths, cache, &mut diags)?;
+    let loaded = index::load(paths, cache, &mut diags);
     diags.sort();
     diags.emit();
+    let corpus = loaded?;
 
     match list_corpus_text(paths, &corpus) {
         Some(out) => print!("{out}"),
@@ -447,6 +452,13 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
     let dir = root.join(resolve::dir_of(&entry_file));
     let mut diags = Diags::new("dankg");
     let mut files = Files::new(root);
+    // Deliberately never emitted, on either path. `run_single` has
+    // already discovered the same corpus and emitted the identical
+    // diagnostics before it calls this in a loop, so emitting here would
+    // repeat every one of them once per target. The TUI is the other
+    // caller (`tui::eval`), and writing to stderr from inside it would
+    // scribble over the drawn screen. `diags` exists here only because
+    // `discover` requires one.
     files.discover(&entry_file, &mut diags)?;
 
     let (files, graph) = corpus_graph_if_needed(path, files)?;
