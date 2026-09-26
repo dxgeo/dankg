@@ -254,7 +254,7 @@ A `SELECT` result's row count, or any other captured output, never enters the st
 
 ## Decision 41: Weave scope
 
-`dankg weave <path> --format html|pdf` turns one markdown file into a readable document. Single-file only -- no corpus-wide walk exists yet. Unlike `tangle`/`eval`, weave walks every `Block` in document order: headings, paragraphs, lists, thematic breaks, tables, passthrough, and code blocks alike, not just named, top-level ones. Code blocks render read-only. Weave never executes anything. (Decision 47 narrows this: weave reads `name=`/`deps=`/`xdeps=` too, but read-only, to check a recorded result's own staleness -- never to plan or run anything.)
+`dankg weave <path> --format html|pdf` turns one markdown file into a readable document. Single-file only -- no corpus-wide walk exists yet. Unlike `tangle`/`eval`, weave walks every `Block` in document order: headings, paragraphs, lists, thematic breaks, tables, passthrough, and code blocks alike, not just named, top-level ones. Code blocks render read-only. Weave never executes anything. (Decision 47 narrows this: weave reads `name=`/`deps=`/`xdeps=` too, but read-only, to check a recorded result's own staleness -- never to plan or run anything. Decision 64 narrows it again, for a wikilink alone: a fragment with no file name in it is resolved, because resolving one needs no corpus.)
 
 **Rationale:** Weave produces something a person reads, not a program. `plan::top_level_blocks`'s own narrowing (decision 23) exists to match what `eval` can run. Nothing here runs. Nothing here needs that scope.
 
@@ -820,6 +820,47 @@ Numbering and labelling are separate. A figure whose `label=` was dropped as a c
 **Rationale:** HTML's own figcaption number comes from the same walk, which adds to decision 54 rather than amending it in substance. That decision offered a stylesheet an element to key a counter off. No shipped stylesheet took the offer: `WEAVE_CSS` has no `counter-increment` in it, and carries no rule at all for the `table-figure` and `image-figure` classes. So the walk displaces nothing that renders today. Letting each backend count alone was the alternative and the wrong one: Typst would number one sequence and HTML another. A document mixing the two kinds would then disagree with itself across formats. Configurable supplement wording is refused for the same reason the wording is Typst's in the first place -- a reader who restyles `Figure` to `fig.` through a `[weave.pdf] template` changes the PDF alone. dankg cannot read that template to match it in HTML.
 
 <!-- dankg:depends target=#decision-53-weavesource-hidden-and-weaveoutput-hidden-split-a-pairs-own-two-halves quote="`weave=output-hidden` drops" -->
+
+## Decision 64: A same-file wikilink resolves against whatever the document holds
+
+Decision 41 narrows. Weave resolves a wikilink whose name half is empty. A same-file fragment needs no corpus, which is the whole of decision 41's own reason for rendering a wikilink as plain text. A wikilink naming another file still renders as its own plain text, unchanged.
+
+Every same-file fragment that finds a target resolves, not figure labels alone. `graph::resolve::find_slug` searches a file's nodes, which hold headings and blocks alike. A rule admitting only figures would carve an exception out of machinery that does not want one. This is strictly larger than the figure case and strictly additive: a `[[#some-heading]]` that renders as plain text in an already-woven document starts rendering as a link. Nothing renders as less than it does today.
+
+`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads. Typst gets the fragment's own label, `fig:NAME` or `sec:SLUG`. HTML gets the fragment's own anchor id and the text a bare reference shows. Figures go in before headings. A figure label therefore wins a clash with a heading slug. A label is declared, by `label=` or by a block's own `name=`. A slug is derived from prose.
+
+`WikiLink`'s own two fields carry exactly what a reference needs. A bare `[[#chart]]` renders as a reference whose text the backend supplies. A labelled `[[#chart|the revenue chart]]` renders as a reference whose text the author wrote.
+
+| written | Typst | HTML |
+| --- | --- | --- |
+| `[[#chart]]` | `@fig:chart` | `<a href="#fig-chart">Table 3</a>` |
+| `[[#chart\|text]]` | `#link(<fig:chart>)[text]` | `<a href="#fig-chart">text</a>` |
+
+The markdown link form `[text](#chart)` resolves through the same lookup and emits the same two things. Typst's own `Link` arm wrote `#link("#chart")` before this, a URL link to a literal string, which means nothing in a PDF. HTML's wrote `href="#chart"`, which is the fragment rather than the figure's own `fig-chart` id (decision 63). It pointed at nothing. Both are bugs on their own terms and both are fixed here.
+
+An unresolved reference fails the weave. It does not render as its own literal source text. It does not render as anything else either. `weave::run` reports it through `Diags::error` at the reference's own line and returns `Err`. No `.typ` is written. No HTML is written. No PDF is built. Falling back was the earlier design here and it was wrong. A document that renders with a broken reference in it is a document an author ships. The warning scrolls past. The page looks like prose. The reader is the one who finds the hole. That is the silent staleness decision 47's own stale badge exists to prevent.
+
+The run fails after the whole document is walked, never on the first bad reference. An author who mistyped three labels wants all three lines from one run. Each carries its own message, because the next action differs in each: nothing in the document carries that name, or a block carries it but is not a figure, or the figure is real and hidden by `weave=hidden`/`weave=output-hidden`. The third message is free because hiding is applied inside each backend rather than by filtering the document. A hidden block is therefore still in `doc.blocks` when the walk reaches it.
+
+**Rationale:** dankg resolves and fails first so that the author's own error stays readable. Typst refuses an unresolvable label too, with `label <nope> does not exist in the document`, exit 1, and no PDF. Typst is right to refuse. Its message points into generated `.typ` though, a build artifact nobody wrote by hand. Building the reference on decision 57's own `@key` citation syntax was the alternative and the wrong one: `:` is already inside that key charset, so `@fig:chart` would have needed no parser change at all. A bare `@key` reaches Typst as `#cite(<key>, form: "prose")` though, which resolves against a bibliography and never against a figure label. The bibliography pre-pass would also have warned on the `fig:` key and consumed a citation number, shifting every later citation by one. `Inline::Citation` is untouched by this decision. A wikilink needed no parser change either.
+
+<!-- dankg:depends target=#decision-41-weave-scope quote="Single-file only -- no corpus-wide walk exists yet." -->
+
+## Decision 67: Heading numbering belongs to the template, not to dankg
+
+A bare `[[#some-heading]]` emits `@sec:...` in Typst, the same way a bare `[[#chart]]` emits `@fig:...`. dankg does not turn heading numbering on to make that work, and does not suppress the reference to avoid needing it. Every heading carries a `<sec:SLUG>` label so that a reference has something real to reach, from the same per-file `Slugger` a heading's own HTML `id` comes from.
+
+Typst answers `@sec:intro` against an unnumbered heading with `cannot reference heading without numbering`, and writes no PDF. The fix is one line in the author's own `[weave.pdf] template`, `#set heading(numbering: "1.")`, which is prepended to the generated `.typ` and therefore applies document-wide. A real compile confirms all three halves: the labelled form compiles against an unnumbered heading, the bare form does not, and that one line makes the bare form read `Section 1`.
+
+**Rationale:** This is not the case decision 64 fails on. The line between them matters. An unresolved reference is an error in the markdown, which is the document dankg owns. dankg can see it. dankg therefore reports it. An unnumbered heading is not an error in the markdown at all: the reference is correct and the target exists. What is missing is a typesetting setting living in the author's own file. dankg cannot fix it and should not guess at it, which is decision 44's own "let a real incompatibility surface as the compiler's own error" stance applied unchanged. An author who wants a heading reference without touching a template writes the labelled form.
+
+## Decision 68: A bare heading reference takes the heading's own title in HTML
+
+A bare `[[#intro]]` renders in HTML as a link carrying the heading's own title. `weave_html`'s own table of contents already emits exactly that for the same target. This is a rule the renderer follows already, applied to one more construct.
+
+HTML numbers no heading, which is why a number would be wrong here. A woven page carries no counter rule at all. Every heading renders bare. A reference reading `Section 1` would point at a heading with no visible 1 anywhere near it. The reader would click `Section 1` and land on `Intro`.
+
+**Rationale:** Decision 65's own "both backends must agree" rule does not reach this case. That rule exists because a figure is numbered twice, by Typst's own counter and by dankg's own walk. Two counts must not drift apart. A heading is numbered once, in the PDF alone. One source and none is not two in conflict. Counting headings inside dankg is refused for the reason decision 67 already gives: the template owns the numbering format, so `1.`, `A.` and `I.` are all possible and dankg never sees which one is set. A number dankg invented would match nothing on the HTML page and nothing in the PDF either. The asymmetry with a figure is principled rather than an exception -- HTML numbers its figures and does not number its headings -- and an author wanting one string in both backends writes `[[#intro|the introduction]]`.
 
 ## Block nodes
 

@@ -107,7 +107,7 @@ artifact nobody wrote by hand. So dankg resolves every reference
 itself and fails first, on the markdown line the author can actually
 find. Decision 64 sets that rule.
 
-<!-- dankg:depends target=../src/render/typst.md#inline-text quote="Weave is single-file (decision 41): there is no corpus to" -->
+<!-- dankg:depends target=../src/render/typst.md#inline-text quote="single-file (decision 41), and there is no corpus to" -->
 
 ## What this reuses
 

@@ -501,10 +501,56 @@ draw_chart(data, "chart.png")
 ````
 
 A captioned artifact renders as a real figure, not a caption line
-beside raw content: a table's own caption sits above it, an image's
-own sits below, and the PDF backend numbers each automatically --
-"Table 1", "Figure 1" -- through Typst's own figure counter, not
-anything `dankg` counts itself.
+beside raw content. A table's own caption sits above it and an image's
+own sits below. Both backends number each figure -- "Table 1",
+"Figure 1" -- counting tables and images separately. The PDF's numbers
+are Typst's own figure counter. The HTML page's are `dankg`'s, since
+no browser can put one element's counter value into a link elsewhere
+on the page.
+
+A figure can be referenced from prose. Its label is the block's own
+`name=`, so `[[#chart]]` points at the figure the block named `chart`
+produced. A bare reference reads as the figure's own number; add a
+`|` and your own words to say something else:
+
+```markdown
+Release counts have climbed every year (see [[#chart]]), which
+[[#chart|the yearly chart]] shows at a glance.
+```
+
+`label=` renames the target without renaming the block, for when a
+block's `name=` has to change for a code reason and the prose should
+not have to follow:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png label=releases caption="Yearly release count"
+draw_chart(data, "chart.png")
+```
+````
+
+A heading is referenceable the same way, by its own slug -- the
+anchor its table-of-contents link already uses. `[[#the-edit-loop]]`
+points at `## The edit loop`. The markdown link form works for either
+target too: `[the chart](#chart)` and `[that section](#the-edit-loop)`
+resolve exactly as the wikilinks above do.
+
+The two backends deliberately differ on one point. A bare heading
+reference reads as a section number in the PDF and as the heading's
+own title in HTML, because HTML numbers no heading. Writing your own
+label makes the two identical. The PDF needs one line in a
+`[weave.pdf] template` before a bare heading reference will compile at
+all, since Typst cannot reference a heading it has not numbered:
+
+```typst
+#set heading(numbering: "1.")
+```
+
+A reference that resolves to nothing fails the weave, on the line you
+wrote it. No page or PDF is written. One run reports every bad
+reference rather than the first. A figure hidden by `weave=hidden` is
+reported as hidden rather than as missing. A wikilink naming another
+file is untouched and still renders as plain text. `weave` reads one
+file, so there is no corpus to resolve that against.
 
 Whether that figure sits inside the pair's own block, or stands
 apart from it as a sibling, is `dankg weave`'s own call:

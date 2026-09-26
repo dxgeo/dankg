@@ -23,6 +23,7 @@ use crate::eval::session::corpus_graph_if_needed;
 use crate::eval::{plan, result};
 use crate::graph::build::{file_stem, strip_extension};
 use crate::graph::index;
+use crate::graph::slug::Slugger;
 use crate::md::{Block, Document, Inline};
 use crate::render::typst::BibliographySummary;
 use crate::render::{typst, weave_html};
@@ -105,18 +106,29 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
     }
     let (tables, images) = produced_artifacts(&doc, &entry_rel, &root, &mut diags);
     let (labels, numbers) = figures(&doc, &tables, &images, &mut diags);
+    let slugs = heading_slugs(&doc);
+    let (typst_refs, html_refs) = references(&doc, &tables, &labels, &numbers, &slugs);
+    let unresolved = resolve_references(&doc, &typst_refs, &labels, &numbers, &mut diags);
     let bib = bibliography(&doc, &entry_rel, &root, &mut diags);
+
+    // Every reference is reported before anything is rendered, so one run
+    // shows an author every bad line rather than the first (decision 64).
+    if unresolved > 0 {
+        diags.sort();
+        diags.emit();
+        return Err(format!("{unresolved} unresolved reference(s); nothing rendered"));
+    }
 
     let report = match format {
         Format::Html => {
             render_html(
-                &doc, &title, &config, &root, &tables, &images, &labels, &numbers, bib.as_ref(), output,
-                figures_outside, &mut diags,
+                &doc, &title, &config, &root, &tables, &images, &labels, &numbers, &slugs, &html_refs,
+                bib.as_ref(), output, figures_outside, &mut diags,
             )?
         }
         Format::Pdf => render_pdf(
-            &doc, &title, &config, &root, &name, &tables, &images, &labels, bib.as_ref(), output, toc,
-            figures_outside, &mut diags,
+            &doc, &title, &config, &root, &name, &tables, &images, &labels, &slugs, &typst_refs, bib.as_ref(),
+            output, toc, figures_outside, &mut diags,
         )?,
     };
 
@@ -418,6 +430,181 @@ fn figures(
 }
 ```
 
+Every heading gets a slug from the same per-file `Slugger` a graph node
+would get one from. `heading_slugs` is that walk, keyed by each
+heading's own line. It lives here rather than in either renderer
+because both backends need the identical answer: HTML puts the slug in
+a heading's own `id` and in every table-of-contents link, and Typst
+puts it in a `<sec:SLUG>` label a reference can reach (decision 67).
+Two walks would be two chances to disagree about one document.
+
+```rust name=heading_slugs path=weave.rs
+/// Every heading's own slug, by its line. One `Slugger` for the whole
+/// document, so a repeated heading title is suffixed exactly the way
+/// `graph::build` already suffixes one (decision 62's own reservation
+/// rule). Both backends read this, which is why it is built here
+/// rather than inside either of them.
+fn heading_slugs(doc: &Document) -> HashMap<u32, String> {
+    let mut slugger = Slugger::new();
+    doc.headings().iter().map(|(_, inlines, line)| (*line, slugger.assign(&Inline::plain(inlines)))).collect()
+}
+```
+
+## Resolving a reference
+
+A wikilink whose name half is empty is a same-file fragment, and weave
+resolves it (decision 64). Decision 41's own single-file scope is the
+reason a wikilink naming another file still renders as its own plain
+text: there is no corpus to resolve that against. A fragment needs no
+corpus at all.
+
+`references` builds what a fragment resolves to, once, for both
+backends. Each one gets only what it reads. Typst gets a fragment's own
+label, `fig:NAME` or `sec:SLUG`, because that is all it needs to write
+`@fig:NAME` or `#link(<sec:SLUG>)[text]`. HTML gets an anchor and the
+text a bare reference shows -- `fig-chart` and `Table 1` for a figure,
+the heading's own slug and its own title for a heading (decisions 65
+and 68). Both come out of one walk, so neither backend can disagree
+with the other about what resolved.
+
+Figures go in before headings, so a figure label wins a clash with a
+heading slug. A figure label is declared, by `label=` or by the block's
+own `name=`. A heading slug is derived from prose. Declared beats
+derived when a reader has written the same word twice.
+
+A figure neither backend renders is not a target. It has no number
+(decision 65), and pointing at markup that is not on the page is not a
+reference. It is still in `labels`, which is what lets the resolver say
+*why* rather than just "no such thing".
+
+```rust name=references path=weave.rs
+/// What each same-file fragment resolves to, for both backends
+/// (decision 64). The first map is Typst's: a fragment's own label,
+/// `fig:NAME` or `sec:SLUG`. The second is HTML's: a fragment's own
+/// anchor id, and the text a bare reference to it shows. A figure with
+/// no number is absent from both -- neither backend put it on the page.
+fn references(
+    doc: &Document,
+    tables: &HashMap<usize, (String, String)>,
+    labels: &HashMap<usize, String>,
+    numbers: &HashMap<usize, u32>,
+    slugs: &HashMap<u32, String>,
+) -> (HashMap<String, String>, HashMap<String, (String, String)>) {
+    let mut typst = HashMap::new();
+    let mut html = HashMap::new();
+    for (index, label) in labels {
+        let Some(number) = numbers.get(index) else { continue };
+        let kind = if tables.contains_key(index) { "Table" } else { "Figure" };
+        typst.insert(label.clone(), format!("fig:{label}"));
+        html.insert(label.clone(), (format!("fig-{label}"), format!("{kind} {number}")));
+    }
+    for (_, inlines, line) in doc.headings() {
+        let Some(slug) = slugs.get(&line) else { continue };
+        typst.entry(slug.clone()).or_insert_with(|| format!("sec:{slug}"));
+        html.entry(slug.clone()).or_insert_with(|| (slug.clone(), Inline::plain(inlines).trim().to_string()));
+    }
+    (typst, html)
+}
+```
+
+An unresolved reference fails the weave. It does not fall back to its
+own literal source text, and it does not render as anything else. That
+was the earlier design here and it was wrong. A document that renders
+with a broken reference in it is a document an author ships. The
+warning scrolls past, the page looks like prose, and the reader is the
+one who finds the hole. Failing is what decision 47's own stale badge
+already does for a stale result, arrived at from a different direction.
+
+dankg resolves and fails first, before either backend runs. Typst
+refuses an unresolvable label too. It says
+`label <nope> does not exist in the document` and writes no PDF. That
+message is useless to an author though, because it points into
+generated `.typ` -- a build artifact nobody wrote by hand.
+`resolve_references` reports the markdown line instead.
+
+The whole document is walked before anything fails. An author who
+mistyped three labels wants all three lines from one run, not three
+runs. Each one carries its own message, because the next action differs
+in each: nothing in the document carries that name, or a block carries
+it but is not a figure, or the figure is real and hidden.
+
+```rust name=resolve_references path=weave.rs
+/// Every same-file reference in `doc`, checked against `refs`. Reports
+/// each unresolved one at its own line and returns how many failed, so
+/// `run` can walk the whole document before it gives up (decision 64).
+fn resolve_references(
+    doc: &Document,
+    refs: &HashMap<String, String>,
+    labels: &HashMap<usize, String>,
+    numbers: &HashMap<usize, u32>,
+    diags: &mut Diags,
+) -> usize {
+    let mut slices = Vec::new();
+    walk_inlines(&doc.blocks, &mut slices);
+    let mut found = Vec::new();
+    for (line, inlines) in slices {
+        collect_fragments(inlines, line, &mut found);
+    }
+    let mut failed = 0;
+    for (fragment, line) in found {
+        if refs.contains_key(&fragment) {
+            continue;
+        }
+        failed += 1;
+        diags.error(line, unresolved_message(doc, &fragment, labels, numbers));
+    }
+    failed
+}
+
+/// Every `[[#fragment]]` and `[text](#fragment)` in `inlines`, paired
+/// with the enclosing block's own line. Recurses through emphasis and
+/// through a link's own text, since a reference is legal inside either.
+fn collect_fragments(inlines: &[Inline], line: u32, out: &mut Vec<(String, u32)>) {
+    for i in inlines {
+        match i {
+            Inline::WikiLink { target, .. } => {
+                if let Some(fragment) = target.strip_prefix('#') {
+                    out.push((fragment.to_string(), line));
+                }
+            }
+            Inline::Link { dest, text, .. } => {
+                if let Some(fragment) = dest.strip_prefix('#') {
+                    out.push((fragment.to_string(), line));
+                }
+                collect_fragments(text, line, out);
+            }
+            Inline::Emph { inner, .. } | Inline::Strong { inner, .. } => collect_fragments(inner, line, out),
+            Inline::Text(_) | Inline::Code(_) | Inline::Citation { .. } => {}
+            Inline::SoftBreak | Inline::HardBreak => {}
+        }
+    }
+}
+
+/// Why one fragment did not resolve. Three answers, because the next
+/// action differs in each (decision 64).
+fn unresolved_message(
+    doc: &Document,
+    fragment: &str,
+    labels: &HashMap<usize, String>,
+    numbers: &HashMap<usize, u32>,
+) -> String {
+    let hidden = labels.iter().find(|(index, label)| label.as_str() == fragment && !numbers.contains_key(index));
+    if let Some((index, _)) = hidden {
+        let how = match doc.blocks.get(*index) {
+            Some(Block::Code { info, .. }) if info.weave_output_hidden() => "weave=output-hidden",
+            _ => "weave=hidden",
+        };
+        return format!("`{fragment}` is a figure hidden by `{how}`; there is nothing on the page to point at");
+    }
+    if doc.named_blocks().iter().any(|(info, _, _)| info.name() == Some(fragment)) {
+        return format!(
+            "`{fragment}` names a block, but not a figure; only a captioned `produces=file:` artifact is one"
+        );
+    }
+    format!("nothing in this document is named `{fragment}`")
+}
+```
+
 A document's bibliography (decision 58/59, `plan-weave-citations.md`)
 comes from at most one `hayagriva`-tagged fence, a frontmatter
 `bibliography:` file, or both together. `bibliography` is the pre-pass
@@ -651,6 +838,8 @@ fn render_html(
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
+    slugs: &HashMap<u32, String>,
+    refs: &HashMap<String, (String, String)>,
     bibliography: Option<&Bibliography>,
     output: Option<&str>,
     figures_outside: bool,
@@ -659,7 +848,8 @@ fn render_html(
     let extra_css = config.weave("html").and_then(|w| w.css).and_then(|rel| read_asset(root, &rel, "css", diags));
     let html_bib = bibliography.map(|bib| weave_html::Bibliography { entries: &bib.entries, order: &bib.order });
     let rendered = weave_html::render(
-        doc, title, extra_css.as_deref(), tables, images, labels, numbers, figures_outside, html_bib.as_ref(), diags,
+        doc, title, extra_css.as_deref(), tables, images, labels, numbers, slugs, refs, figures_outside,
+        html_bib.as_ref(), diags,
     );
 
     let written = match output {
@@ -706,6 +896,8 @@ fn render_pdf(
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
+    slugs: &HashMap<u32, String>,
+    refs: &HashMap<String, String>,
     bibliography: Option<&Bibliography>,
     output: Option<&str>,
     toc: bool,
@@ -745,8 +937,9 @@ fn render_pdf(
         }
     });
 
-    let body =
-        typst::render(doc, title, toc, tables, &copied_images, labels, figures_outside, bib_summary.as_ref(), diags);
+    let body = typst::render(
+        doc, title, toc, tables, &copied_images, labels, slugs, refs, figures_outside, bib_summary.as_ref(), diags,
+    );
     let weave_cfg = config.weave("pdf");
     let preamble =
         weave_cfg.as_ref().and_then(|w| w.template.clone()).and_then(|rel| read_asset(root, &rel, "template", diags));
@@ -820,6 +1013,44 @@ mod tests {
             f.write_all(content.as_bytes()).unwrap();
         }
         dir
+    }
+
+    /// Every bad line in one run, and no file of any kind on disk
+    /// (decision 64).
+    #[test]
+    fn three_unresolved_references_fail_the_weave_and_write_nothing() {
+        let dir = scratch(&[("a.md", "# Intro\n\nSee [[#one]] and [[#two]] and [x](#three).\n")]);
+        let out = dir.join("out.html");
+        let result = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false);
+        let err = result.err().expect("an unresolved reference must fail the weave");
+        assert!(err.contains("3 unresolved reference(s)"), "{err}");
+        assert!(!out.exists(), "no page is written for a document that failed to resolve");
+    }
+
+    #[test]
+    fn a_resolving_heading_reference_weaves_normally() {
+        let dir = scratch(&[("a.md", "# Intro\n\nSee [[#intro]] and [the start](#intro).\n")]);
+        let out = dir.join("out.html");
+        run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(content.contains("<a href=\"#intro\">Intro</a>"), "{content}");
+        assert!(content.contains("<a href=\"#intro\">the start</a>"), "{content}");
+    }
+
+    /// A reference to a real figure resolves against the label decision 63
+    /// gave it, and reads as the number decision 65 counted for it.
+    #[test]
+    fn a_figure_reference_resolves_end_to_end() {
+        let dir = scratch(&[
+            ("a.md", "```python name=t produces=file:data.csv caption=\"Revenue\"\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#t]].\n"),
+            ("data.csv", "x,y\n1,2\n"),
+        ]);
+        let out = dir.join("out.html");
+        run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(content.contains("<figure class=\"table-figure\" id=\"fig-t\">"), "{content}");
+        assert!(content.contains("<figcaption>Table 1: Revenue</figcaption>"), "{content}");
+        assert!(content.contains("<a href=\"#fig-t\">Table 1</a>"), "{content}");
     }
 
     #[test]
@@ -1295,6 +1526,136 @@ mod tests {
         assert_eq!(labels.get(&3), None, "the second label is dropped");
         assert_eq!(numbers.get(&3), Some(&2), "the figure itself still counts");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
+    }
+
+    fn one_image_figure(source: &str) -> (Document, HashMap<usize, (Vec<u8>, String)>) {
+        (doc(source), [(0usize, (Vec::new(), "chart.png".to_string()))].into_iter().collect())
+    }
+
+    #[test]
+    fn references_resolves_a_table_figure_to_both_backends_own_shapes() {
+        let d = doc("```python name=t produces=file:a.csv\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let tables: HashMap<usize, (String, String)> = [(0, ("csv".to_string(), "x\n1\n".to_string()))].into_iter().collect();
+        let labels = [(0usize, "t".to_string())].into_iter().collect();
+        let numbers = [(0usize, 1u32)].into_iter().collect();
+        let (typst, html) = references(&d, &tables, &labels, &numbers, &HashMap::new());
+        assert_eq!(typst.get("t"), Some(&"fig:t".to_string()));
+        assert_eq!(html.get("t"), Some(&("fig-t".to_string(), "Table 1".to_string())));
+    }
+
+    #[test]
+    fn references_calls_an_image_figure_a_figure_not_a_table() {
+        let (d, images) = one_image_figure("```python name=c produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let _ = &images;
+        let labels = [(0usize, "c".to_string())].into_iter().collect();
+        let numbers = [(0usize, 2u32)].into_iter().collect();
+        let (_, html) = references(&d, &HashMap::new(), &labels, &numbers, &HashMap::new());
+        assert_eq!(html.get("c"), Some(&("fig-c".to_string(), "Figure 2".to_string())));
+    }
+
+    /// A heading resolves too (decision 64). HTML shows its own title
+    /// rather than a number, since HTML numbers no heading (decision 68).
+    #[test]
+    fn references_resolves_a_heading_to_its_slug_and_its_title() {
+        let d = doc("# The Design\n");
+        let slugs = heading_slugs(&d);
+        let (typst, html) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs);
+        assert_eq!(typst.get("the-design"), Some(&"sec:the-design".to_string()));
+        assert_eq!(html.get("the-design"), Some(&("the-design".to_string(), "The Design".to_string())));
+    }
+
+    /// Declared beats derived: a figure label is written, a heading slug is
+    /// computed from prose.
+    #[test]
+    fn a_figure_label_wins_a_clash_with_a_heading_slug() {
+        let d = doc("# Chart\n\n```python name=chart produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let slugs = heading_slugs(&d);
+        let labels = [(1usize, "chart".to_string())].into_iter().collect();
+        let numbers = [(1usize, 1u32)].into_iter().collect();
+        let (typst, _) = references(&d, &HashMap::new(), &labels, &numbers, &slugs);
+        assert_eq!(typst.get("chart"), Some(&"fig:chart".to_string()));
+    }
+
+    #[test]
+    fn a_hidden_figure_is_not_a_reference_target() {
+        let labels = [(0usize, "c".to_string())].into_iter().collect();
+        let d = doc("```python name=c weave=hidden produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let (typst, html) = references(&d, &HashMap::new(), &labels, &HashMap::new(), &HashMap::new());
+        assert!(typst.is_empty());
+        assert!(html.is_empty());
+    }
+
+    #[test]
+    fn resolve_references_passes_a_document_whose_references_all_resolve() {
+        let d = doc("# Intro\n\nSee [[#intro]] and [the start](#intro).\n");
+        let slugs = heading_slugs(&d);
+        let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs);
+        let mut diags = Diags::new("t.md");
+        assert_eq!(resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &mut diags), 0);
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    /// One run reports every bad line, never just the first (decision 64).
+    #[test]
+    fn resolve_references_reports_every_unresolved_reference_in_one_walk() {
+        let d = doc("# Intro\n\nSee [[#one]].\n\nAnd [[#two]] and [x](#three).\n");
+        let slugs = heading_slugs(&d);
+        let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs);
+        let mut diags = Diags::new("t.md");
+        assert_eq!(resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &mut diags), 3);
+        assert_eq!(diags.count(crate::diag::Level::Error), 3, "{:?}", diags.items());
+    }
+
+    #[test]
+    fn an_unresolved_reference_to_nothing_says_so() {
+        let d = doc("Text [[#nope]].\n");
+        let mut diags = Diags::new("t.md");
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        assert!(diags.items()[0].message.contains("nothing in this document is named `nope`"), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn a_reference_to_a_named_block_that_is_no_figure_says_so() {
+        let d = doc("```sh name=a\necho hi\n```\n\nText [[#a]].\n");
+        let mut diags = Diags::new("t.md");
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        assert!(diags.items()[0].message.contains("names a block, but not a figure"), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn a_reference_to_a_hidden_figure_names_the_attribute_that_hid_it() {
+        let d = doc("```python name=c weave=hidden produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#c]].\n");
+        let labels = [(0usize, "c".to_string())].into_iter().collect();
+        let mut diags = Diags::new("t.md");
+        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), &mut diags);
+        assert!(diags.items()[0].message.contains("hidden by `weave=hidden`"), "{:?}", diags.items());
+    }
+
+    #[test]
+    fn a_reference_to_an_output_hidden_figure_names_that_attribute_instead() {
+        let d = doc("```python name=c weave=output-hidden produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#c]].\n");
+        let labels = [(0usize, "c".to_string())].into_iter().collect();
+        let mut diags = Diags::new("t.md");
+        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), &mut diags);
+        assert!(diags.items()[0].message.contains("hidden by `weave=output-hidden`"), "{:?}", diags.items());
+    }
+
+    /// Decision 41 is narrowed, not repealed: a wikilink naming another
+    /// file is not a same-file fragment and is never resolved here.
+    #[test]
+    fn a_wikilink_naming_another_file_is_not_checked_at_all() {
+        let d = doc("See [[Other]] and [[Other#chart]].\n");
+        let mut diags = Diags::new("t.md");
+        assert_eq!(resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags), 0);
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    /// A reference is legal inside emphasis, and inside a link's own text.
+    #[test]
+    fn a_reference_nested_in_emphasis_is_still_checked() {
+        let d = doc("See *[[#nope]]* here.\n");
+        let mut diags = Diags::new("t.md");
+        assert_eq!(resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags), 1);
     }
 
     #[test]

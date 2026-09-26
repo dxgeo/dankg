@@ -68,6 +68,15 @@ fn typst_compile(typ_path: &std::path::Path, pdf_path: &std::path::Path) -> std:
     Command::new("typst").arg("compile").arg(typ_path).arg(pdf_path).output()
 }
 
+/// The same map `weave::heading_slugs` builds. Every heading carries a
+/// `<sec:SLUG>` label (decision 67), so a smoke test handing `render` an
+/// empty map would compile a document with none of them in it -- exactly
+/// the markup this file exists to judge.
+fn slugs_for(doc: &Document) -> HashMap<u32, String> {
+    let mut slugger = dankg::graph::slug::Slugger::new();
+    doc.headings().iter().map(|(_, inlines, line)| (*line, slugger.assign(&dankg::md::Inline::plain(inlines)))).collect()
+}
+
 #[test]
 fn rendered_typst_actually_compiles() {
     let mut parse_diags = Diags::new("t.md");
@@ -75,8 +84,22 @@ fn rendered_typst_actually_compiles() {
     assert!(parse_diags.is_empty(), "fixture should parse cleanly: {:?}", parse_diags.items());
 
     let mut diags = Diags::new("t.md");
-    let typ = typst::render(&doc, "Weave Smoke Test", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+    let slugs = slugs_for(&doc);
+    let typ = typst::render(
+        &doc,
+        "Weave Smoke Test",
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &slugs,
+        &HashMap::new(),
+        false,
+        None,
+        &mut diags,
+    );
     assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
+    assert!(typ.contains("= Weave smoke test <sec:weave-smoke-test>"), "every heading carries its own label: {typ}");
 
     let dir = std::env::temp_dir().join(format!("dankg-typst-smoke-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -153,6 +176,8 @@ fn rendered_citations_and_bibliography_actually_compile() {
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
         false,
         Some(&summary),
         &mut diags,
@@ -210,8 +235,20 @@ fn a_document_with_its_cover_page_dropped_actually_compiles() {
     assert!(parse_diags.is_empty(), "fixture should parse cleanly: {:?}", parse_diags.items());
 
     let mut diags = Diags::new("t.md");
-    let typ =
-        typst::render(&doc, "No Cover Smoke Test", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+    let slugs = slugs_for(&doc);
+    let typ = typst::render(
+        &doc,
+        "No Cover Smoke Test",
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &slugs,
+        &HashMap::new(),
+        false,
+        None,
+        &mut diags,
+    );
     assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
     assert!(typ.starts_with("#outline()"), "the cover page and its pagebreak are gone: {typ}");
     assert!(!typ.contains("Jane Doe"), "the byline goes with the page: {typ}");
@@ -344,10 +381,23 @@ fn a_table_figure_and_an_image_figure_compile_and_number_on_separate_counters() 
     let mut images = HashMap::new();
     images.insert(4, (Vec::new(), "chart.png".to_string()));
     let labels = HashMap::new();
+    let slugs = HashMap::new();
 
     let mut diags = Diags::new("t.md");
     let typ =
-        typst::render(&doc, "Figure Kinds Smoke Test", false, &tables, &images, &labels, false, None, &mut diags);
+        typst::render(
+            &doc,
+            "Figure Kinds Smoke Test",
+            false,
+            &tables,
+            &images,
+            &labels,
+            &slugs,
+            &HashMap::new(),
+            false,
+            None,
+            &mut diags,
+        );
     assert!(diags.is_empty(), "fixture should render with no warnings: {:?}", diags.items());
     assert!(typ.contains("#figure(kind: table, caption: [A table])["), "{typ}");
     assert!(typ.contains("#figure(kind: image, caption: [A chart])["), "{typ}");
@@ -502,6 +552,90 @@ fn the_number_html_writes_matches_the_number_typst_typesets() {
     let expected = ["Table 1", "Figure 1", "Table 2", "Figure 2"];
     assert_eq!(numbering_sequence(&html), expected, "HTML wrote the wrong sequence:\n{html}");
     assert_eq!(numbering_sequence(&pdf_text), expected, "Typst typeset the wrong sequence:\n{pdf_text}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+
+/// A labelled heading reference needs no heading numbering at all
+/// (decision 67). A bare one emits `@sec:...`, which Typst refuses against
+/// an unnumbered heading with `cannot reference heading without
+/// numbering`; the fix is one `#set heading(numbering: "1.")` line in the
+/// author's own `[weave.pdf] template`, which dankg neither writes nor
+/// guesses at. Both halves are compiled here for real, because the
+/// difference between them is a compiler rule rather than a string.
+const HEADING_REF_SOURCE: &str = r#"# Intro
+
+See [[#intro|the introduction]] for context.
+"#;
+
+#[test]
+fn a_labelled_heading_reference_compiles_against_an_unnumbered_heading() {
+    let mut parse_diags = Diags::new("t.md");
+    let doc = Document::parse(HEADING_REF_SOURCE, &mut parse_diags);
+    assert!(parse_diags.is_empty(), "fixture should parse cleanly: {:?}", parse_diags.items());
+
+    let slugs = slugs_for(&doc);
+    let refs: HashMap<String, String> = [("intro".to_string(), "sec:intro".to_string())].into_iter().collect();
+    let mut diags = Diags::new("t.md");
+    let typ = typst::render(
+        &doc,
+        "Heading Reference",
+        false,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &slugs,
+        &refs,
+        false,
+        None,
+        &mut diags,
+    );
+    assert!(typ.contains("#link(<sec:intro>)[the introduction]"), "{typ}");
+
+    let dir = std::env::temp_dir().join(format!("dankg-typst-headingref-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("scratch dir");
+    let typ_path = dir.join("doc.typ");
+    let pdf_path = dir.join("doc.pdf");
+    fs::write(&typ_path, &typ).expect("write .typ");
+
+    let output = match typst_compile(&typ_path, &pdf_path) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("skipping: `typst` not runnable ({e})");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    assert!(
+        output.status.success(),
+        "a labelled heading reference needs no numbering:\n-- .typ --\n{typ}\n-- stderr --\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The bare form is the one that needs the template's own setting. Typst
+    // is the half that says so, which is exactly why dankg does not.
+    let bare = typ.replace("#link(<sec:intro>)[the introduction]", "@sec:intro");
+    fs::write(&typ_path, &bare).expect("write .typ");
+    let bare_output = typst_compile(&typ_path, &pdf_path).expect("typst runs");
+    let stderr = String::from_utf8_lossy(&bare_output.stderr);
+    assert!(!bare_output.status.success(), "a bare reference to an unnumbered heading must not compile");
+    assert!(stderr.contains("numbering"), "{stderr}");
+
+    // One line in a template is the documented fix, and it works.
+    let numbered = format!("#set heading(numbering: \"1.\")\n\n{bare}");
+    fs::write(&typ_path, &numbered).expect("write .typ");
+    let fixed = typst_compile(&typ_path, &pdf_path).expect("typst runs");
+    assert!(
+        fixed.status.success(),
+        "`#set heading(numbering: ...)` is the documented fix:\n{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    if let Ok(o) = Command::new("pdftotext").arg(&pdf_path).arg("-").output() {
+        let text = String::from_utf8_lossy(&o.stdout).to_string();
+        assert!(text.contains("Section 1"), "the bare form then reads as a section number: {text}");
+    }
 
     let _ = fs::remove_dir_all(&dir);
 }

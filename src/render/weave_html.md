@@ -28,7 +28,6 @@ use crate::data::bib::{BibEntry, Person, SerialNumber};
 use crate::data::table::{self, TableData};
 use crate::diag::Diags;
 use crate::eval::result::{self, Pair};
-use crate::graph::slug::Slugger;
 use crate::md::{Align, Block, Document, Frontmatter, InfoString, Inline, List, Value};
 use crate::render::assets;
 use std::collections::HashMap;
@@ -79,11 +78,12 @@ pub fn render(
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
+    slugs: &HashMap<u32, String>,
+    refs: &HashMap<String, (String, String)>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
 ) -> String {
-    let slugs = heading_slugs(doc);
 
     let mut out = String::with_capacity(assets::WEAVE_CSS.len() + 4 * 1024);
     out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n");
@@ -100,7 +100,7 @@ pub fn render(
     out.push_str("</head>\n<body>\n");
 
     out.push_str("<input type=\"checkbox\" id=\"toc-toggle\" class=\"toc-toggle\">\n");
-    toc(&mut out, doc, &slugs);
+    toc(&mut out, doc, slugs);
 
     out.push_str("<main>\n");
     if doc.frontmatter.cover() != Some(false) {
@@ -112,7 +112,7 @@ pub fn render(
             let _ = writeln!(out, "<p class=\"byline-date\">{date}</p>");
         }
     }
-    blocks(&mut out, &doc.blocks, &slugs, tables, images, labels, numbers, figures_outside, bibliography, diags);
+    blocks(&mut out, &doc.blocks, slugs, tables, images, labels, numbers, refs, figures_outside, bibliography, diags);
     // Unconditionally at the end, never at the `hayagriva` fence's own
     // position (decision 59) -- the same fixed structural placement
     // `render::typst`'s own `#bibliography(...)` call gets.
@@ -175,13 +175,6 @@ fn frontmatter_value_html(v: &Value) -> String {
     }
 }
 
-/// Every heading's own slug, keyed by source line, from one `Slugger`
-/// run in document order. The nav and the body headings below both read
-/// the same map, so a nav link and its target agree on the anchor.
-fn heading_slugs(doc: &Document) -> HashMap<u32, String> {
-    let mut slugger = Slugger::new();
-    doc.headings().iter().map(|(_, inlines, line)| (*line, slugger.assign(&Inline::plain(inlines)))).collect()
-}
 ```
 
 ## Table of contents
@@ -322,6 +315,7 @@ fn blocks(
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
+    refs: &HashMap<String, (String, String)>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -349,7 +343,7 @@ fn blocks(
                 continue;
             }
         }
-        block(out, &items[i], slugs, tables, images, labels, numbers, figures_outside, bibliography, diags);
+        block(out, &items[i], slugs, tables, images, labels, numbers, refs, figures_outside, bibliography, diags);
         i += 1;
     }
 }
@@ -362,6 +356,7 @@ fn block(
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
+    refs: &HashMap<String, (String, String)>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -369,10 +364,10 @@ fn block(
     match b {
         Block::Heading { level, inlines, line } => {
             let id = slugs.get(line).map(String::as_str).unwrap_or("");
-            let _ = writeln!(out, "<h{level} id=\"{id}\">{}</h{level}>", inline_html(inlines, bibliography));
+            let _ = writeln!(out, "<h{level} id=\"{id}\">{}</h{level}>", inline_html(inlines, refs, bibliography));
         }
         Block::Paragraph { inlines, .. } => {
-            let _ = writeln!(out, "<p>{}</p>", inline_html(inlines, bibliography));
+            let _ = writeln!(out, "<p>{}</p>", inline_html(inlines, refs, bibliography));
         }
         Block::Code { info, text, line, .. } => {
             // A lone block has no separate output half, so
@@ -383,7 +378,7 @@ fn block(
             }
         }
         Block::List(l) => {
-            list(out, l, slugs, tables, images, labels, numbers, figures_outside, bibliography, diags)
+            list(out, l, slugs, tables, images, labels, numbers, refs, figures_outside, bibliography, diags)
         }
         Block::ThematicBreak { .. } => out.push_str("<hr>\n"),
         // Outside the subset. Escaped, not raw: an unparsed construct
@@ -391,7 +386,7 @@ fn block(
         Block::Passthrough { text, .. } => {
             let _ = writeln!(out, "<pre class=\"passthrough\">{}</pre>", escape(text));
         }
-        Block::Table { aligns, header, rows, .. } => table_block(out, aligns, header, rows, bibliography),
+        Block::Table { aligns, header, rows, .. } => table_block(out, aligns, header, rows, refs, bibliography),
     }
 }
 
@@ -610,6 +605,7 @@ fn list(
     images: &HashMap<usize, (Vec<u8>, String)>,
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
+    refs: &HashMap<String, (String, String)>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -622,7 +618,7 @@ fn list(
     }
     for item in &l.items {
         out.push_str("<li>");
-        blocks(out, &item.blocks, slugs, tables, images, labels, numbers, figures_outside, bibliography, diags);
+        blocks(out, &item.blocks, slugs, tables, images, labels, numbers, refs, figures_outside, bibliography, diags);
         out.push_str("</li>\n");
     }
     let _ = writeln!(out, "</{tag}>");
@@ -689,6 +685,7 @@ fn table_block(
     aligns: &[Align],
     header: &[Vec<Inline>],
     rows: &[Vec<Vec<Inline>>],
+    refs: &HashMap<String, (String, String)>,
     bibliography: Option<&Bibliography>,
 ) {
     let columns = header.len();
@@ -697,7 +694,7 @@ fn table_block(
         out.push_str("<th");
         push_align(out, aligns.get(i).copied());
         out.push('>');
-        out.push_str(&inline_html(cell, bibliography));
+        out.push_str(&inline_html(cell, refs, bibliography));
         out.push_str("</th>\n");
     }
     out.push_str("</tr>\n</thead>\n<tbody>\n");
@@ -708,7 +705,7 @@ fn table_block(
             push_align(out, aligns.get(i).copied());
             out.push('>');
             if let Some(cell) = row.get(i) {
-                out.push_str(&inline_html(cell, bibliography));
+                out.push_str(&inline_html(cell, refs, bibliography));
             }
             out.push_str("</td>\n");
         }
@@ -751,7 +748,11 @@ fn data_table(out: &mut String, data: &TableData) {
 ## Inline HTML and escaping
 
 ```rust name=inline_html path=render/weave_html.rs
-fn inline_html(inlines: &[Inline], bibliography: Option<&Bibliography>) -> String {
+fn inline_html(
+    inlines: &[Inline],
+    refs: &HashMap<String, (String, String)>,
+    bibliography: Option<&Bibliography>,
+) -> String {
     let mut out = String::new();
     for i in inlines {
         match i {
@@ -763,17 +764,28 @@ fn inline_html(inlines: &[Inline], bibliography: Option<&Bibliography>) -> Strin
             }
             Inline::Emph { inner, .. } => {
                 out.push_str("<em>");
-                out.push_str(&inline_html(inner, bibliography));
+                out.push_str(&inline_html(inner, refs, bibliography));
                 out.push_str("</em>");
             }
             Inline::Strong { inner, .. } => {
                 out.push_str("<strong>");
-                out.push_str(&inline_html(inner, bibliography));
+                out.push_str(&inline_html(inner, refs, bibliography));
                 out.push_str("</strong>");
             }
+            // A fragment destination is a same-file reference
+            // (decision 64) and points at the anchor `refs` resolved,
+            // which is not the fragment itself: a figure's own id
+            // carries a `fig-` prefix (decision 63).
             Inline::Link { dest, title, text } => {
+                let resolved = dest.strip_prefix('#').and_then(|f| refs.get(f));
                 out.push_str("<a href=\"");
-                out.push_str(&escape_attr(dest));
+                match resolved {
+                    Some((anchor, _)) => {
+                        out.push('#');
+                        out.push_str(&escape_attr(anchor));
+                    }
+                    None => out.push_str(&escape_attr(dest)),
+                }
                 out.push('"');
                 if let Some(t) = title {
                     out.push_str(" title=\"");
@@ -781,14 +793,24 @@ fn inline_html(inlines: &[Inline], bibliography: Option<&Bibliography>) -> Strin
                     out.push('"');
                 }
                 out.push('>');
-                out.push_str(&inline_html(text, bibliography));
+                out.push_str(&inline_html(text, refs, bibliography));
                 out.push_str("</a>");
             }
-            // Weave is single-file (decision 41): there is no corpus to
-            // resolve a wikilink's target against, the same reasoning
-            // `render::typst` already gives.
+            // A same-file fragment resolves (decision 64). A bare one
+            // shows the text the pre-pass counted for it -- a figure's
+            // own "Table 1" (decision 65), a heading's own title
+            // (decision 68). A labelled one shows the author's own
+            // words. A wikilink naming another file still renders as its
+            // own plain text: weave is single-file (decision 41), and
+            // there is no corpus to resolve that against.
             Inline::WikiLink { target, label } => {
-                out.push_str(&escape(label.as_deref().unwrap_or(target)));
+                match target.strip_prefix('#').and_then(|f| refs.get(f)) {
+                    Some((anchor, shown)) => {
+                        let text = label.as_deref().unwrap_or(shown);
+                        let _ = write!(out, "<a href=\"#{}\">{}</a>", escape_attr(anchor), escape(text));
+                    }
+                    None => out.push_str(&escape(label.as_deref().unwrap_or(target))),
+                }
             }
             Inline::Citation { keys, narrative } => citation_html(&mut out, keys, *narrative, bibliography),
             Inline::SoftBreak => out.push('\n'),
@@ -1116,10 +1138,6 @@ mod tests {
         render_doc_with_figures(source, tables, images, &HashMap::new(), &HashMap::new(), figures_outside)
     }
 
-    /// The same, plus the two maps `weave::figures` builds: a figure's own
-    /// label (decision 63) and its own number (decision 65). A test
-    /// asserting on an `id` or on a numbered figcaption needs them. Every
-    /// other test here has no figure at all, so it passes neither.
     fn render_doc_with_figures(
         source: &str,
         tables: &HashMap<usize, (String, String)>,
@@ -1128,11 +1146,39 @@ mod tests {
         numbers: &HashMap<usize, u32>,
         figures_outside: bool,
     ) -> (String, Diags) {
+        render_doc_with_refs(source, tables, images, labels, numbers, &HashMap::new(), figures_outside)
+    }
+
+    /// The same, plus every map `weave` resolves for a figure: its own
+    /// label (decision 63), its own number (decision 65), and what each
+    /// same-file fragment points at (decision 64). A test asserting on an
+    /// `id`, a numbered figcaption, or a reference needs them. Every other
+    /// test here has no figure at all, so it passes none.
+    fn render_doc_with_refs(
+        source: &str,
+        tables: &HashMap<usize, (String, String)>,
+        images: &HashMap<usize, (Vec<u8>, String)>,
+        labels: &HashMap<usize, String>,
+        numbers: &HashMap<usize, u32>,
+        refs: &HashMap<String, (String, String)>,
+        figures_outside: bool,
+    ) -> (String, Diags) {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, tables, images, labels, numbers, figures_outside, None, &mut diags);
+        let slugs = test_slugs(&doc);
+        let out = render(
+            &doc, "Title", None, tables, images, labels, numbers, &slugs, refs, figures_outside, None, &mut diags,
+        );
         (out, diags)
+    }
+
+    /// The same map `weave::heading_slugs` builds, rebuilt here so a unit
+    /// test sees the heading ids a real weave emits rather than a document
+    /// with none.
+    fn test_slugs(doc: &Document) -> HashMap<u32, String> {
+        let mut slugger = crate::graph::slug::Slugger::new();
+        doc.headings().iter().map(|(_, inlines, line)| (*line, slugger.assign(&Inline::plain(inlines)))).collect()
     }
 
     #[test]
@@ -1474,6 +1520,68 @@ mod tests {
         assert!(!out.contains("Table "), "{out}");
     }
 
+    fn ref_map() -> HashMap<String, (String, String)> {
+        [
+            ("chart".to_string(), ("fig-chart".to_string(), "Table 1".to_string())),
+            ("intro".to_string(), ("intro".to_string(), "Intro".to_string())),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn render_refs(source: &str) -> String {
+        let (out, _) =
+            render_doc_with_refs(source, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &ref_map(), false);
+        out
+    }
+
+    /// A bare figure reference reads as the number the pre-pass counted
+    /// (decision 65). HTML cannot count for itself.
+    #[test]
+    fn a_bare_figure_reference_links_to_the_figure_and_reads_as_its_number() {
+        let out = render_refs("See [[#chart]].\n");
+        assert!(out.contains("<a href=\"#fig-chart\">Table 1</a>"), "{out}");
+    }
+
+    #[test]
+    fn a_labelled_figure_reference_carries_the_authors_own_words() {
+        let out = render_refs("See [[#chart|the revenue chart]].\n");
+        assert!(out.contains("<a href=\"#fig-chart\">the revenue chart</a>"), "{out}");
+    }
+
+    /// A bare heading reference reads as the heading's own title
+    /// (decision 68), the same text `toc` already writes for it. HTML
+    /// numbers no heading, so a number would point at nothing visible.
+    #[test]
+    fn a_bare_heading_reference_reads_as_the_headings_own_title() {
+        let out = render_refs("# Intro\n\nSee [[#intro]].\n");
+        assert!(out.contains("<a href=\"#intro\">Intro</a>"), "{out}");
+    }
+
+    /// The fragment an author writes is the label, not the id: a figure's
+    /// own id carries a `fig-` prefix (decision 63), so the link has to be
+    /// rewritten rather than passed through.
+    #[test]
+    fn a_markdown_link_to_a_fragment_points_at_the_resolved_anchor() {
+        let out = render_refs("See [the chart](#chart).\n");
+        assert!(out.contains("<a href=\"#fig-chart\">the chart</a>"), "{out}");
+        assert!(!out.contains("href=\"#chart\""), "{out}");
+    }
+
+    #[test]
+    fn a_markdown_link_to_an_unresolved_fragment_is_left_exactly_as_written() {
+        let out = render_refs("See [elsewhere](#other-page).\n");
+        assert!(out.contains("<a href=\"#other-page\">elsewhere</a>"), "{out}");
+    }
+
+    /// Decision 41 is narrowed, not repealed.
+    #[test]
+    fn a_wikilink_naming_another_file_still_renders_as_plain_text() {
+        let out = render_refs("See [[Other]] and [[Other#chart]].\n");
+        assert!(out.contains("See Other and Other#chart."), "{out}");
+        assert!(!out.contains("<a href=\"#Other"), "{out}");
+    }
+
     #[test]
     fn a_produced_artifact_nests_inside_the_pairs_own_figure_by_default() {
         let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
@@ -1711,6 +1819,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             false,
             None,
             &mut diags,
@@ -1732,7 +1842,7 @@ mod tests {
         let order: Vec<String> = order.iter().map(|s| s.to_string()).collect();
         let bib = Bibliography { entries: &entries, order: &order };
         let mut diags = Diags::new("t.md");
-        render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, Some(&bib), &mut diags)
+        render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, Some(&bib), &mut diags)
     }
 
     #[test]
@@ -1779,7 +1889,7 @@ mod tests {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse("[@a]\n\n@b argues\n", &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(out.contains("[@a]"), "{out}");
         assert!(out.contains("@b argues"), "{out}");
     }
