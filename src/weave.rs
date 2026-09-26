@@ -8,7 +8,7 @@
 use crate::cmd;
 use crate::config::Config;
 use crate::data::bib::{self, BibEntry};
-use crate::diag::Diags;
+use crate::diag::{Diags, Level};
 use crate::eval::files::Files;
 use crate::eval::session::corpus_graph_if_needed;
 use crate::eval::{plan, result};
@@ -64,15 +64,19 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
     let (labels, numbers) = figures(&doc, &tables, &images, &mut diags);
     let slugs = heading_slugs(&doc);
     let (typst_refs, html_refs) = references(&doc, &tables, &labels, &numbers, &slugs);
-    let unresolved = resolve_references(&doc, &typst_refs, &labels, &numbers, &mut diags);
+    resolve_references(&doc, &typst_refs, &labels, &numbers, &mut diags);
     let bib = bibliography(&doc, &entry_rel, &root, &mut diags);
 
-    // Every reference is reported before anything is rendered, so one run
-    // shows an author every bad line rather than the first (decision 64).
-    if unresolved > 0 {
+    // Every unresolved reference (decision 64) and every unresolved
+    // citation key (decision 66) is reported before anything is rendered,
+    // so one run shows an author every bad line rather than the first.
+    // Both passes have run by now, and both raise a real error, so the
+    // count in `diags` is the one thing to check.
+    let failed = diags.count(Level::Error);
+    if failed > 0 {
         diags.sort();
         diags.emit();
-        return Err(format!("{unresolved} unresolved reference(s); nothing rendered"));
+        return Err(format!("{failed} unresolved reference(s) or citation key(s); nothing rendered"));
     }
 
     let report = match format {
@@ -228,6 +232,13 @@ fn figures(
             numbers.insert(index, *counter);
         }
         let Some(label) = info.label().or_else(|| info.name()) else { continue };
+        if !usable_label(label) {
+            diags.warn(
+                *line,
+                format!("figure label `{label}` may hold only letters, digits, `-` and `_`; this one is dropped"),
+            );
+            continue;
+        }
         if let Some(&first) = claimed.get(label) {
             diags.warn(
                 *line,
@@ -239,6 +250,16 @@ fn figures(
         labels.insert(index, label.to_string());
     }
     (labels, numbers)
+}
+
+/// Whether a label is an anchor both backends can carry: the identical
+/// rule `graph::slug::slugify` already applies to a heading, which is
+/// what lets a figure label and a heading slug share one fragment
+/// namespace (decision 64). Typst itself allows `.` and `:` too, and
+/// both are left out because either one changes what a CSS selector
+/// means.
+fn usable_label(label: &str) -> bool {
+    !label.is_empty() && label.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Every heading's own slug, by its line. One `Slugger` for the whole
@@ -280,30 +301,30 @@ fn references(
 }
 
 /// Every same-file reference in `doc`, checked against `refs`. Reports
-/// each unresolved one at its own line and returns how many failed, so
+/// each unresolved one at its own line as a real error and returns, so
 /// `run` can walk the whole document before it gives up (decision 64).
+/// The count lives in `diags` rather than here, because decision 66's
+/// own unresolved citation keys land in the same place and `run` gives
+/// up on both together.
 fn resolve_references(
     doc: &Document,
     refs: &HashMap<String, String>,
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
     diags: &mut Diags,
-) -> usize {
+) {
     let mut slices = Vec::new();
     walk_inlines(&doc.blocks, &mut slices);
     let mut found = Vec::new();
     for (line, inlines) in slices {
         collect_fragments(inlines, line, &mut found);
     }
-    let mut failed = 0;
     for (fragment, line) in found {
         if refs.contains_key(&fragment) {
             continue;
         }
-        failed += 1;
         diags.error(line, unresolved_message(doc, &fragment, labels, numbers));
     }
-    failed
 }
 
 /// Every `[[#fragment]]` and `[text](#fragment)` in `inlines`, paired
@@ -504,7 +525,7 @@ fn collect_citation_keys(
             Inline::Citation { keys, .. } => {
                 for k in keys {
                     if !entries.contains_key(k) {
-                        diags.warn(line, format!("citation key `{k}` is not in the bibliography"));
+                        diags.error(line, format!("citation key `{k}` is not in the bibliography"));
                     }
                     if seen.insert(k.clone()) {
                         order.push(k.clone());
@@ -701,7 +722,7 @@ mod tests {
         let out = dir.join("out.html");
         let result = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false);
         let err = result.err().expect("an unresolved reference must fail the weave");
-        assert!(err.contains("3 unresolved reference(s)"), "{err}");
+        assert!(err.contains("3 unresolved reference(s) or citation key(s)"), "{err}");
         assert!(!out.exists(), "no page is written for a document that failed to resolve");
     }
 
@@ -1098,6 +1119,49 @@ mod tests {
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
+    /// `label=a+b` reached `typst compile` as `<fig:a+b>` and failed with
+    /// `unclosed label`, pointing into generated `.typ`. Dropping it here
+    /// is what keeps that error off an author's screen.
+    #[test]
+    fn a_label_typst_cannot_parse_warns_by_line_and_is_dropped() {
+        let d = doc("```python name=a label=\"a+b\" produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let images: HashMap<usize, (Vec<u8>, String)> = [(0, (Vec::new(), "one.png".to_string()))].into_iter().collect();
+        let mut diags = Diags::new("t.md");
+        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
+        assert!(labels.is_empty(), "an unusable label is dropped, never emitted");
+        assert_eq!(numbers.get(&0), Some(&1), "the figure itself still renders, so it still counts");
+        assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
+        assert_eq!(diags.items()[0].line, 1, "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("may hold only letters"), "{:?}", diags.items());
+    }
+
+    /// The same rule applies to a label defaulted from `name=`, since the
+    /// anchor that comes out is the same either way.
+    #[test]
+    fn an_unusable_name_is_dropped_as_a_label_too() {
+        let d = doc("```python name=\"a b\" produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=\"a b\" hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let images: HashMap<usize, (Vec<u8>, String)> = [(0, (Vec::new(), "one.png".to_string()))].into_iter().collect();
+        let mut diags = Diags::new("t.md");
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
+        assert!(labels.is_empty());
+        assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
+    }
+
+    /// Everything a heading slug can hold, a label can hold. `slugify` is
+    /// the rule both go through.
+    #[test]
+    fn usable_label_accepts_exactly_what_slugify_produces() {
+        for ok in ["chart", "corpus-edge-counts", "module_doc", "fig1", "1fig", "café"] {
+            assert!(usable_label(ok), "{ok}");
+            assert_eq!(crate::graph::slug::slugify(ok), ok.to_lowercase(), "slugify leaves it alone: {ok}");
+        }
+        // Typst parses `.` and `:`; both are left out because each changes
+        // what a CSS selector means.
+        for bad in ["", "a+b", "a b", "a.b", "a:b", "a/b", "a#b", "a(b"] {
+            assert!(!usable_label(bad), "{bad}");
+        }
+    }
+
     #[test]
     fn a_colliding_label_warns_by_line_and_the_second_one_is_dropped() {
         let d = doc("```python name=a label=chart produces=file:one.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote one.png\n```\n\n```python name=b label=chart produces=file:two.png\nsavefig()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nwrote two.png\n```\n");
@@ -1269,7 +1333,7 @@ mod tests {
         let slugs = heading_slugs(&d);
         let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs);
         let mut diags = Diags::new("t.md");
-        assert_eq!(resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &mut diags), 0);
+        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &mut diags);
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
@@ -1280,8 +1344,8 @@ mod tests {
         let slugs = heading_slugs(&d);
         let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs);
         let mut diags = Diags::new("t.md");
-        assert_eq!(resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &mut diags), 3);
-        assert_eq!(diags.count(crate::diag::Level::Error), 3, "{:?}", diags.items());
+        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &mut diags);
+        assert_eq!(diags.count(Level::Error), 3, "{:?}", diags.items());
     }
 
     #[test]
@@ -1324,7 +1388,7 @@ mod tests {
     fn a_wikilink_naming_another_file_is_not_checked_at_all() {
         let d = doc("See [[Other]] and [[Other#chart]].\n");
         let mut diags = Diags::new("t.md");
-        assert_eq!(resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags), 0);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
@@ -1333,7 +1397,8 @@ mod tests {
     fn a_reference_nested_in_emphasis_is_still_checked() {
         let d = doc("See *[[#nope]]* here.\n");
         let mut diags = Diags::new("t.md");
-        assert_eq!(resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags), 1);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        assert_eq!(diags.count(Level::Error), 1, "{:?}", diags.items());
     }
 
     #[test]
@@ -1402,12 +1467,64 @@ mod tests {
     }
 
     #[test]
-    fn a_cited_key_absent_from_every_entry_warns() {
+    fn a_cited_key_absent_from_every_entry_fails_the_weave() {
         let d = doc("```hayagriva\na:\n  title: A\n```\n\n[@missing]\n");
         let mut diags = Diags::new("t.md");
         let bib = bibliography(&d, "t.md", Path::new("."), &mut diags).unwrap();
-        assert_eq!(diags.count(crate::diag::Level::Warn), 1);
+        assert_eq!(diags.count(Level::Error), 1, "{:?}", diags.items());
+        assert_eq!(diags.count(Level::Warn), 0, "an error, not a warning (decision 66)");
         assert!(bib.order.contains(&"missing".to_string()));
+    }
+
+    /// One run reports every bad line, references and citation keys
+    /// alike, and writes nothing (decisions 64 and 66).
+    #[test]
+    fn an_unresolved_citation_key_fails_the_weave_and_writes_nothing() {
+        let dir = scratch(&[("a.md", "```hayagriva\na:\n  title: A\n```\n\nText [@a] and [@missing].\n")]);
+        let out = dir.join("out.html");
+        let result = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false);
+        let err = result.err().expect("an unresolved citation key must fail the weave");
+        assert!(err.contains("1 unresolved reference(s) or citation key(s)"), "{err}");
+        assert!(!out.exists(), "no page is written for a document that failed to resolve");
+    }
+
+    /// Decision 66 leaves a document configuring no bibliography exactly
+    /// as decision 59 wrote it. There is nothing to resolve a key
+    /// against, so there is no unresolved key to fail on. Without this
+    /// carve-out every document mentioning a handle in prose would fail,
+    /// since a bare `@` parses as a citation (decision 57b).
+    #[test]
+    fn the_same_key_with_no_bibliography_configured_still_builds() {
+        let dir = scratch(&[("a.md", "Ping me @dan on the forum, and see [@missing].\n")]);
+        let out = dir.join("out.html");
+        run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(content.contains("@dan"), "{content}");
+        assert!(content.contains("[@missing]"), "{content}");
+    }
+
+    /// The documented way out of decision 66, pinned by a test: an
+    /// escaped `\@key` is not a citation at all.
+    #[test]
+    fn an_escaped_at_key_raises_nothing_and_renders_as_written() {
+        let dir = scratch(&[("a.md", "```hayagriva\na:\n  title: A\n```\n\nPing me \\@dan, and see [@a].\n")]);
+        let out = dir.join("out.html");
+        run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(content.contains("@dan"), "{content}");
+        assert!(!content.contains("\\@dan"), "the backslash is an escape, not text: {content}");
+    }
+
+    /// A key the bibliography carries but cannot build `Smith (2020)`
+    /// from is not an unresolved key. It still falls back to its own
+    /// literal text, which is the one fallback decision 66 leaves alone.
+    #[test]
+    fn a_resolved_entry_with_no_author_still_falls_back_without_failing() {
+        let dir = scratch(&[("a.md", "```hayagriva\na:\n  title: A\n```\n\n@a argues this.\n")]);
+        let out = dir.join("out.html");
+        run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(content.contains("@a argues"), "{content}");
     }
 
     #[test]

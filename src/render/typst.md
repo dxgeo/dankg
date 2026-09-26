@@ -730,6 +730,20 @@ only). A link's own destination sits inside `#link("...")`'s quotes,
 not in markup position. It needs the string escaper, not the markup
 one.
 
+A same-file fragment resolves here (decision 64), against the map
+`weave::references` already built. A bare reference becomes `@label`,
+whose text Typst counts for itself. A labelled one becomes
+`#link(<label>)[text]`. Both forms reach the `Link` arm too, since a
+fragment destination is the same reference written another way. A
+wikilink naming another file still renders as its own plain text,
+which is decision 41's own single-file scope unchanged.
+
+Nothing here has a failure path. `weave::run` refuses to render a
+document holding a reference that does not resolve. This file is only
+ever handed ones that do.
+
+<!-- dankg:depends target=../../architecture.md#decision-64-a-same-file-wikilink-resolves-against-whatever-the-document-holds quote="`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads." -->
+
 ```rust name=inline_text path=render/typst.rs
 fn inline_text(
     inlines: &[Inline],
@@ -795,12 +809,12 @@ fn inline_text(
             Inline::Citation { keys, narrative } if bibliography.is_none() => {
                 out.push_str(&escape_typst(&citation_source(keys, *narrative)));
             }
-            // A bibliography exists: real Typst citation syntax always goes
-            // out, resolved or not -- decision 44's own "let a real
-            // incompatibility surface as the compiler's own error" stance.
-            // `weave::bibliography`'s own pre-pass has already warned about
-            // an unresolved key, with a real line number this function has
-            // no access to; `valid_keys` is not consulted again here.
+            // A bibliography exists: real Typst citation syntax goes out.
+            // Every key reaching here resolves, because decision 66 has
+            // `weave::bibliography` fail the weave on one the bibliography
+            // does not carry, at that key's own line. So `valid_keys` is
+            // not consulted again here, and this arm cannot hand Typst a
+            // key it will refuse.
             Inline::Citation { keys, narrative } => {
                 if *narrative {
                     let _ = write!(out, "#cite(<{}>, form: \"prose\")", keys[0]);

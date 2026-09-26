@@ -33,7 +33,8 @@ pub struct Bibliography<'a> {
     /// Every cited key, resolved or not, in first-appearance order.
     /// Numbering (both the in-text link and the reference list's own
     /// `<li>`) counts only the resolved subset -- an unresolved key never
-    /// consumes a number, matching its own unlinked `[?]` in-text marker.
+    /// consumes a number. Decision 66 makes an unresolved key fail the
+    /// weave outright, so a rendered document has none to skip.
     pub order: &'a [String],
 }
 
@@ -702,10 +703,12 @@ fn inline_html(
 
 /// No bibliography configured at all: the identical literal-text fallback
 /// `render::typst` gets, escaped exactly like ordinary prose (decision 59).
-/// `weave::bibliography`'s own pre-pass has already warned about an
-/// unresolved key with a real line number. An unresolved key here is
-/// still shown -- unlinked `[?]`, or the literal `@key` text for a
-/// narrative citation -- but not warned about a second time.
+/// With one configured, every key reaching here resolves: decision 66 has
+/// `weave::bibliography` fail the weave on a key the bibliography does not
+/// carry, at that key's own line, before either renderer runs. The one
+/// fallback left is a resolved entry carrying no author or no four-digit
+/// year, which a narrative citation cannot build `Smith (2020)` from. It
+/// shows the literal `@key` text, and nothing here warns.
 fn citation_html(out: &mut String, keys: &[String], narrative: bool, bibliography: Option<&Bibliography>) {
     let Some(bib) = bibliography else {
         out.push_str(&escape(&citation_source(keys, narrative)));
@@ -726,7 +729,11 @@ fn citation_html(out: &mut String, keys: &[String], narrative: bool, bibliograph
         .iter()
         .map(|k| match citation_position(bib, k) {
             Some(n) => format!("<a href=\"#ref-{}\">{}</a>", escape_attr(k), n + 1),
-            None => "[?]".to_string(),
+            // Decision 66 fails the weave on a key the bibliography
+            // does not carry, so a document reaching here has none.
+            // The arm exists because the lookup returns an `Option`,
+            // not because anything can take it.
+            None => escape(k),
         })
         .collect();
     out.push_str(&links.join(", "));

@@ -514,9 +514,11 @@ adjacent-citation merging; a narrative citation emits `#cite(<key>, form: "prose
 produces Typst's default (non-prose) form. Real citation syntax goes
 out whether or not a key actually resolves -- decision 44's own "let a
 real incompatibility surface as the compiler's own error" stance;
-`weave::bibliography`'s own warning already covers the unresolved
+`weave::bibliography`'s own report already covers the unresolved
 case, with a real line number `render::typst` has no access to, so
-nothing warns a second time here. `render::typst::render` appends one
+nothing reports a second time here. (Decision 66 turns that report
+into an error and fails the weave, so a document reaching either
+renderer carries no unresolved key at all.) `render::typst::render` appends one
 `#bibliography("bibliography.yml")` call after every body block,
 unconditionally, never at the `hayagriva` fence's own position.
 `render_pdf` writes the merged raw Hayagriva text to
@@ -536,9 +538,10 @@ entry; `N` is the key's own position among *resolved* cited keys only,
 so an unresolved key never consumes a number another citation would
 have to skip over. A narrative citation renders a fixed author-year
 link, `<a href="#ref-KEY">Smith (2020)</a>`, built from the resolved
-entry's own first author and date; an unresolved key, or one with no
-author or no four-digit leading year to build a link from, falls back
-to the citation's own literal text, unlinked. `<ol class="reference-list">` appends after every body block, one `<li id="ref-KEY">` per
+entry's own first author and date; a key with no author or no
+four-digit leading year to build a link from falls back to the
+citation's own literal text, unlinked. An unresolved key did too,
+until decision 66 made it fail the weave instead. `<ol class="reference-list">` appends after every body block, one `<li id="ref-KEY">` per
 resolved cited key in citation order -- the browser's own list
 numbering *is* the citation numbering. Each entry's own text is one
 fixed, hand-built, non-CSL format, covering every field `BibEntry` can
@@ -801,9 +804,12 @@ Each backend turns that one label into its own identifier. Typst gets `<fig:char
 
 Two figures claiming one label warns at the second one's own line. The second one is dropped. The rule is about the label that comes out, not about which attribute it came from. A `label=` colliding with another block's own defaulted `name=` therefore collides just the same.
 
+A label holds letters, digits, `-` and `_`, and nothing else. That is the identical rule `graph::slug::slugify` already applies to a heading, which is what lets a figure label and a heading slug share one fragment namespace (decision 64). A label failing it warns at its own line and is dropped, exactly as a collision does. The rule is Typst's own, tightened by CSS: Typst parses a label holding a letter, a digit, `-`, `_`, `.` or `:`, and refuses anything else. `label=a+b` reached `typst compile` as `<fig:a+b>` and failed with `unclosed label`, pointing into generated `.typ` -- the error decision 64 exists to keep an author from ever seeing. `.` and `:` are dropped from the set on top of that, because each changes what a CSS selector means: `#fig-a.b` selects an id and a class rather than one id, which is the same reason this decision chose `-` over `:` in an HTML id.
+
 **Rationale:** `label=` exists because `name` is also the block's eval identity and its tangle identity. Renaming a block for a code reason should not break every reference the prose already wrote. Suffixing a collision the way `Slugger` suffixes a duplicate heading is the alternative and the wrong one here: a silently suffixed label is a reference that silently points at the wrong figure. It warns rather than refuses, which is where it parts from the `name=` collision it takes its default from. `check_unique_names` returns a hard `PlanError::DuplicateName` there. Refusing to render a whole document over one label typo is a harsher trade than refusing to run one eval chain.
 
 <!-- dankg:depends target=#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="An artifact with no caption at all renders unwrapped" -->
+<!-- dankg:depends target=src/graph/slug.md#slugify quote="c.is_alphanumeric() || c == '-' || c == '_'" -->
 
 ## Decision 65: One numbering pre-pass feeds HTML, and Typst still counts for itself
 
@@ -813,13 +819,30 @@ So `weave::figures` numbers every figure in document order and hands both render
 
 The count is per kind, never sequential. Typst numbers a table and an image on two separate counters, confirmed by a real compile read back with `pdftotext`. A single counter would disagree with the PDF on every document holding both. `kind: table` and `kind: image` are declared rather than inferred (decision 54) so that both backends count off one declaration, rather than dankg predicting Typst's own inference.
 
-Where the walk sits is not free, for the same reason decision 61's own heading drop is not. It must count exactly the figures each backend will actually emit. So it runs after `drop_repeated_title_heading`. It takes its candidates from the artifact maps `produced_artifacts` already built. It skips a figure neither backend renders. `weave=hidden` drops the whole pair, and `weave=output-hidden` drops the artifact half with it (decision 53); neither leaves a figure on the page to count. `weave=source-hidden` keeps the artifact (decision 60). Its own figure renders and counts like any other. A skipped figure still keeps its label, which is how a reference to a hidden figure stays distinguishable from a reference to nothing.
+Where the walk sits is not free, for the same reason decision 61's own heading drop is not. It must count exactly the figures each backend will actually emit. So it runs after `drop_repeated_title_heading`. It takes its candidates from the artifact maps `produced_artifacts` already built. It skips a figure neither backend renders. `weave=hidden` drops the whole pair. `weave=output-hidden` drops the artifact half with it (decision 53). Neither leaves a figure on the page to count. `weave=source-hidden` keeps the artifact (decision 60). Its own figure renders and counts like any other. A skipped figure still keeps its label, which is how a reference to a hidden figure stays distinguishable from a reference to nothing.
 
 Numbering and labelling are separate. A figure whose `label=` was dropped as a collision (decision 63) still renders. It therefore still counts.
 
 **Rationale:** HTML's own figcaption number comes from the same walk, which adds to decision 54 rather than amending it in substance. That decision offered a stylesheet an element to key a counter off. No shipped stylesheet took the offer: `WEAVE_CSS` has no `counter-increment` in it, and carries no rule at all for the `table-figure` and `image-figure` classes. So the walk displaces nothing that renders today. Letting each backend count alone was the alternative and the wrong one: Typst would number one sequence and HTML another. A document mixing the two kinds would then disagree with itself across formats. Configurable supplement wording is refused for the same reason the wording is Typst's in the first place -- a reader who restyles `Figure` to `fig.` through a `[weave.pdf] template` changes the PDF alone. dankg cannot read that template to match it in HTML.
 
 <!-- dankg:depends target=#decision-53-weavesource-hidden-and-weaveoutput-hidden-split-a-pairs-own-two-halves quote="`weave=output-hidden` drops" -->
+<!-- dankg:depends target=src/render/assets.md#weave_css quote="pub const WEAVE_CSS" -->
+
+## Decision 66: An unresolved citation fails the weave too
+
+Decision 59 is amended. A citation key that a configured bibliography does not carry fails the weave. `weave::bibliography` already finds every such key and already reported it by line. That report becomes an error. `run` gives up once the whole document is walked, which is the same walk-then-fail shape decision 64 uses. Both land in the same `Diags` count. One run therefore shows an author every bad reference and every bad key together.
+
+This ends a disagreement the two backends had. A probe confirmed both halves of it. With a bibliography configured, Typst refuses to compile a missing key and writes no PDF, which is decision 44's own "let the compiler's own error surface" stance working as written. HTML rendered the same key as an unlinked `[?]` for a bracketed citation, or as literal `@key` text for a narrative one, and wrote a finished-looking page. One document failed one way and built the other. Failing both ways is the only answer that keeps them honest. `citation_html`'s own `[?]` marker is gone with the case that produced it.
+
+The failure is dankg's own, raised before either backend runs, for the reason decision 64 already gives. Typst's message points into generated `.typ`. The author never wrote that file.
+
+A document configuring no bibliography is untouched. That carve-out needs no new code: `collect_citation_keys` is only reached from `bibliography`, which returns `None` before that walk when neither a fence nor a frontmatter file is configured. Decision 59's literal-text fallback stands for that case exactly as written. This is not a softening. A bare `@` in ordinary prose parses as a citation under decision 57b, which a probe confirms: `Ping me @dan on the forum` reports the citation key `dan`. Failing a document that configures no bibliography would fail every document that mentions a handle in prose.
+
+One shape that built before now fails: a document that configures a bibliography and writes a bare `@` in ordinary prose. The fix is decision 57b's own escape, `\@dan`, which raises nothing, renders as `@dan`, and survives `dankg fmt` with its backslash intact. The break is worth taking. The alternative on offer is a document whose PDF failed to build for one reason, and whose HTML page renders `[?]` beside it and looks finished.
+
+**Rationale:** A resolved entry that cannot build `Smith (2020)` -- no author, or no four-digit leading year -- is a different case and keeps its own literal-text fallback. The key resolved; only the display string could not be built. Decision 59 already treated those two as one. Separating them is what lets this decision fail the first without touching the second.
+
+<!-- dankg:depends target=#decision-59-citations-and-a-references-list-render-in-both-weave-backends quote="the identical literal-text fallback Typst gets." -->
 
 ## Decision 64: A same-file wikilink resolves against whatever the document holds
 
@@ -842,7 +865,7 @@ An unresolved reference fails the weave. It does not render as its own literal s
 
 The run fails after the whole document is walked, never on the first bad reference. An author who mistyped three labels wants all three lines from one run. Each carries its own message, because the next action differs in each: nothing in the document carries that name, or a block carries it but is not a figure, or the figure is real and hidden by `weave=hidden`/`weave=output-hidden`. The third message is free because hiding is applied inside each backend rather than by filtering the document. A hidden block is therefore still in `doc.blocks` when the walk reaches it.
 
-**Rationale:** dankg resolves and fails first so that the author's own error stays readable. Typst refuses an unresolvable label too, with `label <nope> does not exist in the document`, exit 1, and no PDF. Typst is right to refuse. Its message points into generated `.typ` though, a build artifact nobody wrote by hand. Building the reference on decision 57's own `@key` citation syntax was the alternative and the wrong one: `:` is already inside that key charset, so `@fig:chart` would have needed no parser change at all. A bare `@key` reaches Typst as `#cite(<key>, form: "prose")` though, which resolves against a bibliography and never against a figure label. The bibliography pre-pass would also have warned on the `fig:` key and consumed a citation number, shifting every later citation by one. `Inline::Citation` is untouched by this decision. A wikilink needed no parser change either.
+**Rationale:** dankg resolves and fails first so that the author's own error stays readable. Typst refuses an unresolvable label too, with `label <nope> does not exist in the document`, exit 1, and no PDF. Typst is right to refuse. Its message points into generated `.typ` though, a build artifact nobody wrote by hand. Building the reference on decision 57's own `@key` citation syntax was the alternative and the wrong one: `:` is already inside that key charset, which would have made `@fig:chart` parse with no parser change at all. A bare `@key` reaches Typst as `#cite(<key>, form: "prose")` though, which resolves against a bibliography and never against a figure label. The bibliography pre-pass would also have warned on the `fig:` key and consumed a citation number, shifting every later citation by one. `Inline::Citation` is untouched by this decision. A wikilink needed no parser change either.
 
 <!-- dankg:depends target=#decision-41-weave-scope quote="Single-file only -- no corpus-wide walk exists yet." -->
 
@@ -860,7 +883,9 @@ A bare `[[#intro]]` renders in HTML as a link carrying the heading's own title. 
 
 HTML numbers no heading, which is why a number would be wrong here. A woven page carries no counter rule at all. Every heading renders bare. A reference reading `Section 1` would point at a heading with no visible 1 anywhere near it. The reader would click `Section 1` and land on `Intro`.
 
-**Rationale:** Decision 65's own "both backends must agree" rule does not reach this case. That rule exists because a figure is numbered twice, by Typst's own counter and by dankg's own walk. Two counts must not drift apart. A heading is numbered once, in the PDF alone. One source and none is not two in conflict. Counting headings inside dankg is refused for the reason decision 67 already gives: the template owns the numbering format, so `1.`, `A.` and `I.` are all possible and dankg never sees which one is set. A number dankg invented would match nothing on the HTML page and nothing in the PDF either. The asymmetry with a figure is principled rather than an exception -- HTML numbers its figures and does not number its headings -- and an author wanting one string in both backends writes `[[#intro|the introduction]]`.
+**Rationale:** Decision 65's own "both backends must agree" rule does not reach this case. That rule exists because a figure is numbered twice, by Typst's own counter and by dankg's own walk. Two counts must not drift apart. A heading is numbered once, in the PDF alone. One source and none is not two in conflict. Counting headings inside dankg is refused for the reason decision 67 already gives: the template owns the numbering format. `1.`, `A.` and `I.` are all possible. dankg never sees which one is set. A number dankg invented would match nothing on the HTML page and nothing in the PDF either. The asymmetry with a figure is principled rather than an exception -- HTML numbers its figures and does not number its headings -- and an author wanting one string in both backends writes `[[#intro|the introduction]]`.
+
+<!-- dankg:depends target=src/render/weave_html.md#toc quote="escape(&Inline::plain(inlines))" -->
 
 ## Block nodes
 

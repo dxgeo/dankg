@@ -45,7 +45,8 @@ pub struct Bibliography<'a> {
     /// Every cited key, resolved or not, in first-appearance order.
     /// Numbering (both the in-text link and the reference list's own
     /// `<li>`) counts only the resolved subset -- an unresolved key never
-    /// consumes a number, matching its own unlinked `[?]` in-text marker.
+    /// consumes a number. Decision 66 makes an unresolved key fail the
+    /// weave outright, so a rendered document has none to skip.
     pub order: &'a [String],
 }
 
@@ -300,6 +301,17 @@ caption sits within it (decision 56, decoupled from decision 54's own
 concern above): `source_info.figure_outside()`'s own `figure=inside`/
 `figure=outside` when present, otherwise `dankg weave`'s own
 document-wide `--figures-inside`/`--figures-outside` default.
+
+A figure's own `<figcaption>` carries the number `weave::figures`
+counted for it, written as literal text with Typst's own supplement
+word and its own `: ` separator (decision 65). HTML cannot count for
+itself. This page has no stylesheet counter to key one off either. Its
+`id` comes from that same walk's own label (decision 63), on the
+nested `<figure>` and never on the pair's own outer one: a reference
+has to land on the artifact, not on the source block above it.
+
+<!-- dankg:depends target=../../architecture.md#decision-65-one-numbering-pre-pass-feeds-html-and-typst-still-counts-for-itself quote="HTML writes the number as literal text, using Typst's own supplement word" -->
+<!-- dankg:depends target=../../architecture.md#decision-63-a-figures-label-comes-from-its-blocks-own-name-or-from-label quote="on the nested `<figure>`, never on the pair's own outer" -->
 
 ```rust name=blocks_and_block path=render/weave_html.rs
 /// A named `Code` block immediately followed by its recorded eval
@@ -747,6 +759,17 @@ fn data_table(out: &mut String, data: &TableData) {
 
 ## Inline HTML and escaping
 
+A same-file fragment resolves here (decision 64), against the map
+`weave::references` already built. A bare figure reference reads as
+the number that walk counted. A bare heading reference reads as the
+heading's own title (decision 68), the identical text `toc` above
+already writes for the same target. HTML numbers no heading. A number
+there would point at nothing visible on the page. A wikilink naming
+another file still renders as its own plain text.
+
+<!-- dankg:depends target=../../architecture.md#decision-68-a-bare-heading-reference-takes-the-headings-own-title-in-html quote="already emits exactly that for the same target" -->
+<!-- dankg:depends target=#toc quote="escape(&Inline::plain(inlines))" -->
+
 ```rust name=inline_html path=render/weave_html.rs
 fn inline_html(
     inlines: &[Inline],
@@ -822,10 +845,12 @@ fn inline_html(
 
 /// No bibliography configured at all: the identical literal-text fallback
 /// `render::typst` gets, escaped exactly like ordinary prose (decision 59).
-/// `weave::bibliography`'s own pre-pass has already warned about an
-/// unresolved key with a real line number. An unresolved key here is
-/// still shown -- unlinked `[?]`, or the literal `@key` text for a
-/// narrative citation -- but not warned about a second time.
+/// With one configured, every key reaching here resolves: decision 66 has
+/// `weave::bibliography` fail the weave on a key the bibliography does not
+/// carry, at that key's own line, before either renderer runs. The one
+/// fallback left is a resolved entry carrying no author or no four-digit
+/// year, which a narrative citation cannot build `Smith (2020)` from. It
+/// shows the literal `@key` text, and nothing here warns.
 fn citation_html(out: &mut String, keys: &[String], narrative: bool, bibliography: Option<&Bibliography>) {
     let Some(bib) = bibliography else {
         out.push_str(&escape(&citation_source(keys, narrative)));
@@ -846,7 +871,11 @@ fn citation_html(out: &mut String, keys: &[String], narrative: bool, bibliograph
         .iter()
         .map(|k| match citation_position(bib, k) {
             Some(n) => format!("<a href=\"#ref-{}\">{}</a>", escape_attr(k), n + 1),
-            None => "[?]".to_string(),
+            // Decision 66 fails the weave on a key the bibliography
+            // does not carry, so a document reaching here has none.
+            // The arm exists because the lookup returns an `Option`,
+            // not because anything can take it.
+            None => escape(k),
         })
         .collect();
     out.push_str(&links.join(", "));

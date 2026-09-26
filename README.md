@@ -508,8 +508,10 @@ are Typst's own figure counter. The HTML page's are `dankg`'s, since
 no browser can put one element's counter value into a link elsewhere
 on the page.
 
+<!-- dankg:depends target=architecture.md#decision-65-one-numbering-pre-pass-feeds-html-and-typst-still-counts-for-itself quote="The count is per kind, never sequential." -->
+
 A figure can be referenced from prose. Its label is the block's own
-`name=`, so `[[#chart]]` points at the figure the block named `chart`
+`name=`. `[[#chart]]` points at the figure the block named `chart`
 produced. A bare reference reads as the figure's own number; add a
 `|` and your own words to say something else:
 
@@ -551,6 +553,11 @@ reference rather than the first. A figure hidden by `weave=hidden` is
 reported as hidden rather than as missing. A wikilink naming another
 file is untouched and still renders as plain text. `weave` reads one
 file, so there is no corpus to resolve that against.
+
+<!-- dankg:depends target=architecture.md#decision-63-a-figures-label-comes-from-its-blocks-own-name-or-from-label quote="A label holds letters, digits, `-` and `_`, and nothing else." -->
+<!-- dankg:depends target=architecture.md#decision-64-a-same-file-wikilink-resolves-against-whatever-the-document-holds quote="An unresolved reference fails the weave." -->
+<!-- dankg:depends target=architecture.md#decision-67-heading-numbering-belongs-to-the-template-not-to-dankg quote="The fix is one line in the author's own `[weave.pdf] template`" -->
+<!-- dankg:depends target=architecture.md#decision-68-a-bare-heading-reference-takes-the-headings-own-title-in-html quote="renders in HTML as a link carrying the heading's own title" -->
 
 Whether that figure sits inside the pair's own block, or stands
 apart from it as a sibling, is `dankg weave`'s own call:
@@ -642,6 +649,21 @@ rather than broken markup.
 <!-- dankg:depends target=architecture.md#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="gives a reader genuine, automatic" -->
 <!-- dankg:depends target=architecture.md#decision-55-a-captioned-figure-renders-outside-the-pairs-own-block-in-typst quote="nothing to unwrap a figure out of a box from the outside" -->
 <!-- dankg:depends target=architecture.md#decision-58-a-hayagriva-tagged-fence-or-a-frontmatter-bibliography-path-as-a-documents-bibliography-source----full-hayagriva-schema-fidelity quote="Everything Hayagriva's own format supports parses, not a curated" -->
+A citation key your bibliography does not carry fails the weave, on
+the line you wrote it, the same way an unresolved figure reference
+does. A bare `@` in prose parses as a citation. Escape one you meant
+literally:
+
+```markdown
+Ping me \@dan on the forum.
+```
+
+That escape raises nothing, renders as `@dan`, and survives
+`dankg fmt` with its backslash intact. A document that configures no
+bibliography at all is unaffected. There is nothing to resolve a key
+against there, so both `[@key]` and `@key` stay literal text.
+
+<!-- dankg:depends target=architecture.md#decision-66-an-unresolved-citation-fails-the-weave-too quote="A document configuring no bibliography is untouched." -->
 <!-- dankg:depends target=architecture.md#decision-59-citations-and-a-references-list-render-in-both-weave-backends quote="HTML has no such engine to defer to." -->
 
 ### `init` — scaffold a new corpus

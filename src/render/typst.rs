@@ -612,12 +612,12 @@ fn inline_text(
             Inline::Citation { keys, narrative } if bibliography.is_none() => {
                 out.push_str(&escape_typst(&citation_source(keys, *narrative)));
             }
-            // A bibliography exists: real Typst citation syntax always goes
-            // out, resolved or not -- decision 44's own "let a real
-            // incompatibility surface as the compiler's own error" stance.
-            // `weave::bibliography`'s own pre-pass has already warned about
-            // an unresolved key, with a real line number this function has
-            // no access to; `valid_keys` is not consulted again here.
+            // A bibliography exists: real Typst citation syntax goes out.
+            // Every key reaching here resolves, because decision 66 has
+            // `weave::bibliography` fail the weave on one the bibliography
+            // does not carry, at that key's own line. So `valid_keys` is
+            // not consulted again here, and this arm cannot hand Typst a
+            // key it will refuse.
             Inline::Citation { keys, narrative } => {
                 if *narrative {
                     let _ = write!(out, "#cite(<{}>, form: \"prose\")", keys[0]);
