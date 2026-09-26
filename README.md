@@ -606,6 +606,17 @@ draw_chart(data, "chart.png")
 stylesheet, a Typst preamble, and the compiler invocation (see
 Configuration below).
 
+A worked example lives in `example/weave_example`. One file exercises
+every feature above, with the recorded eval results and produced
+artifacts committed alongside it, so it renders without running
+anything first:
+
+```sh
+cd example/weave_example
+dankg weave report.md --format html -o report.html
+dankg weave report.md --format pdf
+```
+
 A woven document can also carry real citations and a real references
 list. `[@key]` cites one entry, `[@a; @b]` cites several together; a
 bare `@key`, with no brackets, is a narrative citation, read as part

@@ -1,0 +1,16 @@
+/* Appended after WEAVE_CSS, so these rules win on specificity ties
+   without the built-in stylesheet being replaced. */
+
+figure.table-figure figcaption,
+figure.image-figure figcaption {
+  font-variant: small-caps;
+  letter-spacing: 0.02em;
+}
+
+/* The number in a figcaption comes from dankg's own walk, written as
+   literal text, because no browser can read one element's counter from
+   a link elsewhere on the page. */
+figure.image-figure img {
+  border: 1px solid var(--rule);
+  background: #fff;
+}

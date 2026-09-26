@@ -1,0 +1,21 @@
+# Marks weave_example/ as its own DanKG root, separate from ../example_1
+# and ../data_example. Everything here exists to exercise `dankg weave`.
+
+# Every block in report.md is `sh`, so the example needs no interpreter
+# beyond the one already running it. An artifact has to be produced by a
+# real run before weave can render it, and `sh` keeps that reproducible
+# on any machine.
+[lang.sh]
+command = sh {file}
+
+# Appended after the page's own built-in stylesheet, never swapping it
+# out (decision 43).
+[weave.html]
+css = weave.css
+
+# `template` is prepended to the generated `.typ`; `command` compiles it.
+# Without `command`, weave still writes the `.typ` and says no PDF was
+# produced, rather than refusing to run.
+[weave.pdf]
+template = template.typ
+command = typst compile {typ} {pdf}
