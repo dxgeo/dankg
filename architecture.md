@@ -252,6 +252,333 @@ A `SELECT` result's row count, or any other captured output, never enters the st
 
 **Rationale:** No new execution engine and no new trust model -- this reuses `eval`'s existing spawn/capture/write-back machinery outright, and the same configured-by-the-reader trust boundary `[lang.*] command` already has (decision 9). A binding that collides with a built-in, or with another command in the same file, is refused individually rather than reverting the whole set the way `Keymap` reverts wholesale on a collision (decision 18): commands load one file at a time, independently, with no single moment a whole table is parsed atomically the way `[keys]` has.
 
+## Decision 41: Weave scope
+
+`dankg weave <path> --format html|pdf` turns one markdown file into a readable document. Single-file only -- no corpus-wide walk exists yet. Unlike `tangle`/`eval`, weave walks every `Block` in document order: headings, paragraphs, lists, thematic breaks, tables, passthrough, and code blocks alike, not just named, top-level ones. Code blocks render read-only. Weave never executes anything. (Decision 47 narrows this: weave reads `name=`/`deps=`/`xdeps=` too, but read-only, to check a recorded result's own staleness -- never to plan or run anything. Decision 64 narrows it again, for a wikilink alone: a fragment with no file name in it is resolved, because resolving one needs no corpus.)
+
+**Rationale:** Weave produces something a person reads, not a program. `plan::top_level_blocks`'s own narrowing (decision 23) exists to match what `eval` can run. Nothing here runs. Nothing here needs that scope.
+
+## Decision 42: GFM tables enter the markdown subset
+
+A pipe table is no longer `Block::Passthrough`. A new `Block::Table { aligns, header, rows, line }` is parsed from a header row plus a matching delimiter row -- the same two-line lookahead GFM itself uses -- with `Align` read off each delimiter cell's `:`-flanking. A short or long data row is kept exactly as parsed, never padded or truncated by the parser or by `dankg fmt`. A table interrupts an in-progress paragraph with no blank line required, the same as a heading or a fence. A `|` inside a backtick code span still splits a cell; wrapping it as `\|` is the escape hatch.
+
+**Rationale:** A raw `| a | b |` line surviving into a woven PDF or HTML page as literal pipes is not a table. It is a formatting bug. Tables had to become real structure before either weave backend could render one. This benefits `dankg fmt` too: a table now gets normalized the same way a list or a heading already does. Padding a ragged row at parse time or at format time would make `fmt::verify`'s round-trip check disagree with the original document. Padding is deferred to render time instead, where it has no round-trip obligation to satisfy.
+
+## Decision 43: Weave HTML rendering
+
+`render::weave_html` is a fresh renderer, not a reuse of `render::html` (the graph page) or of `tests/support/html.rs`'s CommonMark conformance oracle. One self-contained page: `WEAVE_CSS` (a new constant in `render/assets.rs`) inlined into a `<style>` tag, heading anchors from `graph::slug::Slugger`, and a table of contents whose expand/collapse toggle is pure CSS -- a hidden checkbox, a `<label>`, a `:checked` sibling selector, no JavaScript. `[weave.html] css` names a stylesheet appended after `WEAVE_CSS` rather than replacing it. Overriding one rule this way never costs the built-in toggle or table styling.
+
+**Rationale:** A woven HTML page is the one deliberate exception to *Markdown subset*'s own claim that DanKG never renders markdown to HTML at runtime -- true before weave existed, not after. Keeping it in its own renderer, rather than folding it into `render::html`, matches the fact that a prose reading page and a pan/zoom SVG canvas share nothing but the word "HTML."
+
+<!-- dankg:depends target=#markdown-subset quote="The woven HTML page is the one deliberate exception" -->
+
+## Decision 44: Weave PDF via Typst
+
+`render::typst` emits Typst markup only -- a sibling to `render::dot`/`render::mermaid`, never a PDF generator. The document's title and its own frontmatter render on a dedicated cover page: title large and centered, `author` beneath it as its own unlabeled byline (comma-joined for a list of several), `date` beneath that as a real Typst `datetime` -- `2026-09-18` reads as "September 18, 2026", built by Typst's own formatter, never a raw string -- and every remaining frontmatter entry beneath that as its own generic labeled line. `title`, `author`, `date`, `bibliography`, `cover`, and any `dankg.*` key are excluded from that generic dump -- none of the six is reader-facing content. Frontmatter's own `cover: false` (decision 61) drops the page entirely; `cover: true` keeps it and drops the document's own repeated leading heading instead. `Frontmatter::date_parts` parses `YYYY`/`YYYY-MM`/`YYYY-MM-DD`; anything else falls back to the same generic scalar-or-list text every other key gets, never silently dropped. The whole page ends with `#pagebreak()`, before the outline and body. `weave::run` always writes the result to `.dankg/build/weave/<name>.typ`, then spawns a configured `[weave.pdf] command` (`typst compile {typ} {pdf}`) against it, the same `cmd::build` substitution-then-split every other configured command already goes through. Unconfigured, weave still writes the `.typ` and reports that no PDF was produced, the same graceful degradation an unconfigured `[tangle.*] command` already gets. `[weave.pdf] template` names a Typst file concatenated in front of the emitted cover page, verbatim, before the `.typ` is written -- a plain-text prepend rather than a Typst `#import`, since an `#import`'s own path resolves relative to the compiled `.typ`, not to the config that named it. Typst's own version is targeted by documentation (0.15.1, confirmed by `tests/typst.rs`'s own real-compile check), never pinned by a runtime `typst --version` check or an optional Cargo dependency.
+
+**Rationale:** Zero crates stays intact the same way it does for `tangle`: DanKG never links a PDF library, only emits text and spawns an external command. A runtime version check has no precedent to justify its own maintenance cost. Pandoc's own Typst writer and Org-mode's LaTeX/`ox-typst` export backends solve the identical "emit markup, shell out to compile it" problem the identical way: document a target version, and let a real incompatibility surface as the compiler's own error. `duckdb` already gets exactly this treatment from `[db.*] command` in this codebase. The cover page exists because inlining the title directly in front of the outline and body, the first cut's own shape, visibly duplicated it whenever a file's frontmatter `title` matched its own first heading -- a pattern several static-site generators expect. A separate page has no such collision.
+
+<!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
+
+## Decision 45: Data tables from CSV/JSON/TSV fenced blocks
+
+A fenced code block tagged `csv`, `tsv`, or `json` renders as a table too, built by `data::table`'s hand-rolled readers (`from_delimited`, `from_json`) instead of from `Block::Table`. Both readers converge on one `TableData { header, rows }` shape, which both weave renderers consume through one shared table emitter regardless of which source produced it. The language tag is the only signal; content is never sniffed. A `json` block that is not an array of objects or an array of arrays renders as an ordinary code block instead, with a diagnostic.
+
+**Rationale:** DanKG's own eval blocks already produce table-shaped output (`duckdb -csv`). Content-sniffing would make weave's output depend on a heuristic nobody asked for, the same reasoning that already keeps `dankg eval` from inferring a block's language from its output. Tagging an eval result fence with its own output format automatically is deferred: `eval::result::write_back` has no config key today that records what format a command's output is in. Teaching it one is a separate feature.
+
+## Decision 48: `weave=hidden` drops a block from woven output
+
+A fenced code block tagged `weave=hidden` produces nothing in either weave backend -- not a placeholder, not a collapsed toggle, absent as if it were never in the document. `weave` joins `KNOWN_ATTRS` alongside `db`/`path`/`protocol`. `InfoString::weave_hidden()` reads it the same loose way `protocol_lines()` already reads `protocol=lines`: `hidden` is the one recognized value. Anything else is silently ignored rather than rejected. The attribute is weave-only. `dankg tangle` and `dankg eval` never look at it. A hidden block still tangles and still evaluates exactly as it would without the tag.
+
+**Rationale:** A block worth keeping in the source -- readable in an editor, tangled into a real file, evaluated for its result -- is not always a block worth showing a reader of the woven document. Forcing an author to delete or comment it out to get it out of the page would cost the source its own value. A separate attribute, rather than overloading an existing one, keeps tangle's and eval's own scope untouched: neither command gained a reason to care what a reader of the *rendered* document sees.
+
+## Decision 46: A recorded eval result renders paired with its source
+
+A named `Code` block immediately followed by a `<!-- dankg:result ... -->` marker for that same name, then the recorded output fence, renders as one visual unit in both weave backends instead of three unrelated blocks. `eval::result::recognize_pair` is the read-only sibling of `locate_existing` that finds this shape from a block index alone, without a caller-supplied name, and hands back the marker's own `failed`/`produces`/`reads` alongside the output text. The marker itself is never rendered as text again. A `failed` result gets a visually distinct pairing (HTML: an added CSS class; Typst: a different stroke color); `produces`/`reads`, when either is non-empty, prints as a short line under the output -- what the block wrote, what it read.
+
+**Rationale:** Before this, the marker fell into the same catch-all `Block::Passthrough` arm every other unparsed construct does, and rendered as literal escaped comment text -- a bug visible the moment weave meets any file `dankg eval` has touched. A reader of a woven document has no reason to see the marker's own machinery; they came for the code and the answer it produced, shown together.
+
+## Decision 47: Weave staleness is reported, never rendered
+
+Each recognized pair (decision 46) gets one freshness check: `eval::result::is_stale`'s own `expected_hash` against the marker's own stored `hash`, the same comparison `dankg check` and `dankg eval --if-stale` already make. `weave::warn_stale_pairs` builds the one target's own chain with `plan::top_level_blocks`/`plan::plan_for`, resolving a cross-file `deps=`/`xdeps=` chain by loading exactly what it reaches through `eval::files::Files`. A `Graph` is built only if the chain actually carries a `table:` xdep. `eval::session::corpus_graph_if_needed` is reused directly rather than reimplemented here -- the same lazy, file-scoped shape `run_one`'s own `--if-stale` precheck already established (decision 19), never a whole-corpus walk. A real hash mismatch, a `plan::PlanError`, and a missing `[lang.*]`/`[db.*]` config section all get the same treatment: a stderr warning through `diags`, naming the block. A confirmed match warns about nothing at all. This narrows decision 41's "never consults `deps=`/`name=`": weave now reads `name=`/`deps=`/`xdeps=`, read-only, to ask whether a stored answer still matches its own inputs. It still never plans or runs anything.
+
+The rendered document itself never changes because of this check. `warn_stale_pairs` writes only to `diags`, never to the HTML or Typst output either backend builds. Two `dankg weave` runs against the same file produce byte-identical output regardless of whatever state a `deps=`/`xdeps=` chain is in elsewhere at the time.
+
+**Rationale:** Showing a recorded result without saying whether it is still trustworthy would tell a reader something false: that what they are reading is current. A stderr warning says so without it. Folding that warning into the rendered page itself was considered and rejected: it would make the woven document's own content depend on the state of files outside the one being woven, action at a distance a reader has no way to see coming from the source alone. A warning next to the output, the same way a missing CSS file or an unclosed fence already gets one, keeps the document itself predictable and puts the judgment call -- rerun `dankg eval` or not -- back with the reader.
+
+<!-- dankg:depends target=#decision-19-eval-scope quote="One file; `deps`/`--all` never cross files." -->
+<!-- dankg:depends target=#decision-41-weave-scope quote="Decision 47 narrows this: weave reads" -->
+
+## Decision 49: eval spawns in the declaring file's own directory
+
+`eval::run::run`/`run_db`/`run_at` take a `dir: &Path`, spawned via `Command::current_dir`. `eval::session::run_one` -- their one and only caller -- computes it as `root.join(dir_of(entry_file))` and passes it through. `run_one`'s own public signature is unchanged. `run_single`, `tui::eval`, and the existing test suite need no changes beyond the two functions whose signature did change.
+
+**Rationale:** Before this, a spawned block's process inherited whatever directory `dankg` itself was invoked from, never the directory its own source file lives in -- not where `produces=file:PATH` already resolves relative to (decision 33). A script's own relative file access only landed where a reader of its source would expect if `dankg` happened to be run from exactly the right place. This was always a latent gap. It only becomes load-bearing once something actually reads a `produces=file:` artifact back (decision 50). A chain concatenating blocks from more than one directory still has no single correct answer -- accepted as a known limitation, not solved here.
+
+<!-- dankg:depends target=#decision-33-file-artifact-dependency quote="each paired with an ordinary" -->
+
+## Decision 50: A `produces=file:` CSV/TSV/JSON artifact renders as a table
+
+For a recognized pair (decision 46) whose source block also declares `produces=file:PATH` (decision 33), a `.csv`/`.tsv`/`.json` extension is resolved the same way `dankg check` already verifies one -- `plan::parse_artifact`/`resolve_artifact`, made `pub(crate)` for this reuse -- then read off disk. The raw content and a lang tag, never a parsed `TableData`, are handed to both renderers' own existing `code_or_data_table`: the identical csv/tsv/json-or-fallback dispatch a `csv`/`json`-tagged fence's own inline content already goes through (decision 45), fed from a file instead of the fence's own text. It renders inside the same paired unit, after the captured stdout -- both show, since stdout might be a log line while the real content lives in the file. A missing or unreadable artifact warns on stderr and adds nothing to the page, matching decision 47's own "misconfigured is reported, not fatal" stance. Any other extension adds nothing either, silently -- the extension is the only signal, never content-sniffed (decision 45's own stance, unchanged).
+
+**Rationale:** A block whose real point is a table usually does not print one; it writes a file (`df.to_csv(...)`) and maybe logs a line. Decision 45's own rationale already named this gap and deferred it. Reusing `code_or_data_table` rather than a second parser keeps exactly one place responsible for "does this csv/tsv/json content become a table," whether it came from a fence or a file.
+
+<!-- dankg:depends target=#decision-45-data-tables-from-csvjsontsv-fenced-blocks quote="Tagging an eval result fence with its own output format automatically is deferred" -->
+
+## Decision 51: A `produces=file:` image renders as a real image
+
+`produced_artifacts` resolves a `png`/`jpg`/`jpeg`/`gif`/`svg`/`webp` extension the identical way decision 50 resolves a table one, into raw bytes and the artifact's own root-relative path, keyed by the source block's index. Neither renderer parses an image; each embeds it its own way. In HTML, the bytes are base64-encoded by a hand-rolled encoder (decision 1: zero crates, the same choice `data::table`'s own CSV/JSON readers already made) and inlined as `<img src="data:…;base64,…">`, keeping the woven page one self-contained file with nothing to ship alongside it (decision 43). In Typst, `render_pdf` copies the bytes into `.dankg/build/weave/assets/<root-relative-path>` before compiling -- `render::typst` only ever emits markup, never touches a filesystem. The emitted `#image("assets/<root-relative-path>")` reference and the copy's own destination are computed from that identical string. The two can never name different files. A copy that fails stops the weave, at the block's own line, before Typst runs; it was dropped from the map the Typst renderer sees and merely warned about until decision 64 made a reference to that figure outlive it, which left Typst refusing an `@fig:` with no label to match and naming generated `.typ` to say so. A missing or unreadable source artifact gets decision 50's own treatment: a stderr warning, nothing added to the page.
+
+**Rationale:** A chart is the ordinary case decision 50 does not cover -- `plt.savefig(...)` writes an image, not a table. Two backends that display an image at all necessarily display it two different ways: an inline data URI has no Typst equivalent; a compiled asset path has no HTML one. Unlike decision 50's table, there is no single shared emitter to reuse here. Keeping each backend's own handling in its own module, fed from the same resolved bytes and path, is the least duplication the two real constraints allow.
+
+<!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
+<!-- dankg:depends target=#decision-43-weave-html-rendering quote="A woven HTML page is the one deliberate exception" -->
+
+## Decision 52: `caption=` overrides a pair's own synthesized caption
+
+A new `caption` key joins `KNOWN_ATTRS`. `InfoString::caption()` reads it raw, free text unlike every other attribute here, since `parse_info` now tokenizes a fence's whole info string through `cmd::split` rather than `str::split_whitespace` -- the same quote-aware scanner `dankg:depends`'s own `quote="..."` marker already relies on -- so a caption can carry its own spaces (`caption="Quarterly revenue"`). In a recognized pair (decision 46), it overrides whichever caption is the pair's own payload: the artifact's own figcaption/label when a `produces=file:` table or image (decisions 50/51) is present, otherwise the eval result's own `Output`/`Output (failed)` label, with `(failed)` still appended so that signal survives a custom caption. It replaces exactly one of the two, never both, so a pair with both a captured stdout line and a produced chart never repeats an identical caption twice. `dankg fmt`'s own `info_text` quotes a known attribute's value back on write-back whenever it contains whitespace; every other attribute's own value never does, so this changes nothing else about how `dankg fmt` already canonicalizes an info string.
+
+**Rationale:** Before this, a pair's own caption text was always synthesized -- `Output`/`Output (failed)`, or an artifact's own raw `produces=file:PATH` string echoed back verbatim, a path rather than a description. A reader-facing document deserves reader-facing prose there, the same way a photo's own caption is authored rather than generated from its filename.
+
+<!-- dankg:depends target=#decision-46-a-recorded-eval-result-renders-paired-with-its-source quote="renders as one visual unit in both weave backends instead of three unrelated blocks" -->
+<!-- dankg:depends target=src/depends.md#the-marker quote="so it is written quoted" -->
+
+## Decision 53: `weave=source-hidden` and `weave=output-hidden` split a pair's own two halves
+
+Two more recognized values join `weave=hidden` (decision 48), read the same loose way `weave_hidden()` already reads it: `weave=source-hidden` drops only the source's own rendering from a recognized pair (decision 46), leaving its output, artifact, and provenance exactly as they already render (narrowed by decision 60, which drops the output and provenance with it and keeps the artifact alone); `weave=output-hidden` drops that entire second half instead -- output, artifact, and provenance together -- leaving the source exactly as it already renders. Since `weave=` holds one value, the two are mutually exclusive by construction; hiding both halves at once is already `weave=hidden`, not a new combination. On a block with no recorded result, there is no second half for either value to act on: `source-hidden` falls back to `hidden`'s own "absent as if it were never in the document" (decision 48), since hiding a lone source with nothing left to show is indistinguishable from hiding the block outright; `output-hidden` is a no-op there, rendering the block exactly as if the attribute were absent. Neither value changes the pair's own `failed` class (HTML) or stroke color (Typst): whichever half is visible still carries the identical status signal it already would.
+
+**Rationale:** `weave=hidden` (decision 48) is all-or-nothing. A reader sometimes wants only one half: a walkthrough that shows a chart without the plotting code behind it, or a snippet worth showing without spoiling the answer it produces. Splitting the existing pair into its own two already-distinct halves -- source, and everything decision 46 already renders after it -- needed no new structure, only two more values of the attribute decision 48 already introduced for exactly this kind of weave-only rendering hint.
+
+<!-- dankg:depends target=#decision-48-weavehidden-drops-a-block-from-woven-output quote="absent as if it were never in the document" -->
+
+## Decision 54: A produced artifact renders as a real, captioned figure
+
+A `produces=file:` table (decision 50) or image (decision 51) with a caption -- reader-authored (decision 52) or the artifact's own `produces=file:PATH` echo -- wraps its content in a real figure in both backends, rather than a bare caption line beside raw content. In HTML, a nested `<figure class="table-figure">`/`<figure class="image-figure">` sits inside the pair's own outer `<figure class="eval-pair">`, with its `<figcaption>` placed first for a table and last for an image -- the only two positions HTML allows a `<figcaption>` to occupy in its own `<figure>`, and the conventional caption-above-table, caption-below-figure split. In Typst, the content is wrapped in `#figure(caption: [...])` -- `kind: table` declared for a table and `kind: image` declared for an image -- which gives a reader genuine, automatic "Table N"/"Figure N" numbering through Typst's own counter, not anything counted here. An artifact with no caption at all renders unwrapped, exactly as it did before decision 52 -- there is nothing for either backend to attach a figure to. Neither position nor numbering format is fixed by this decision: a stylesheet can still reposition either backend's own caption (HTML: CSS `order` inside a flex `<figure>`; Typst: `#show figure.where(kind: table): set figure.caption(position: top)` in `[weave.pdf] template`). The numbering format is Typst's own default supplement text in the PDF. This decision only gives each backend a real element to hang that styling off of. HTML's own number was left to a stylesheet's CSS counter when this decision was written. No shipped stylesheet ever wrote that counter. Decision 65 gives HTML a real number instead.
+
+**Rationale:** Decision 52 made a produced artifact's own label reader-authored, but the markup around it stayed a bare line of text -- no real figure, no real caption element, nothing a stylesheet or a reader's own tooling could recognize as "this is a captioned figure" rather than an arbitrary line. Numbering compounds the gap: neither CSS nor Typst can count "the third thing styled like a caption" without a real element carrying that role. A real `<figure>`/`<figcaption>` pair, and a real Typst `#figure`, are also what a screen reader and Typst's own outline machinery already understand -- free correctness a hand-rolled caption line never had.
+
+<!-- dankg:depends target=#decision-52-caption-overrides-a-pairs-own-synthesized-caption quote="a pair's own caption text was always synthesized" -->
+<!-- dankg:depends target=#decision-50-a-producesfile-csvtsvjson-artifact-renders-as-a-table quote="warns on stderr and adds nothing to the page" -->
+
+## Decision 55: A captioned figure renders outside the pair's own block, in Typst
+
+Decision 54's `#figure(...)` sat inside the same `#block(stroke: ...)` decision 46 wraps a pair's source and output in. That nesting made the figure's own box unconfigurable from a `[weave.pdf] template` alone: a `#show`/`#set` rule restyles an element it matches, but it cannot undo a stroke a block already applies to its own body -- there is nothing to unwrap a figure out of a box from the outside. `eval_pair` now appends a captioned artifact's `#figure(...)` after that block's own closing `]`, as a sibling, never inside it. An uncaptioned artifact is not a real figure (decision 54's own unwrapped-fallback case) and still renders inside the block, exactly as before -- there is no figure to place outside. HTML needs no matching change: its own nested `<figure class="table-figure">`/`<figure class="image-figure">` (decision 54) is already a stylesheet-reachable element inside `figure.eval-pair`'s own box, so a stylesheet alone, no renderer change, already decides whether it looks boxed together with the pair or detached from it.
+
+**Rationale:** Confirmed with the user: whether a produced figure sits inside the pair's own stroked box, or stands alone, should be the stylesheet's or template's own call, the same way `[weave.pdf] template`'s own `#show heading.where(...)` already restyles every heading with no `dankg` config key standing in for it. A `#show` rule can only add structure around an element it matches, never remove structure a renderer already wrapped it in. Changing which side of the wrap dankg's own default puts the figure on, and letting a template wrap it back in with its own `#show figure: it => block(stroke: ..., inset: ...)[#it]` rule if it wants the old look, is the only way to make this genuinely configurable from a template rather than from `dankg` itself.
+
+<!-- dankg:depends target=#decision-46-a-recorded-eval-result-renders-paired-with-its-source quote="renders as one visual unit in both weave backends instead of three unrelated blocks" -->
+<!-- dankg:depends target=#decision-44-weave-pdf-via-typst quote="a plain-text prepend rather than a Typst" -->
+
+## Decision 56: `--figures-inside`/`--figures-outside`, with a per-block `figure=` override
+
+`dankg weave` gains a boolean pair, `--figures-inside`/`--figures-outside`, parsed in `cli::weave` exactly the way `--toc`/`--no-toc` already are (decision 44), defaulting to `inside` when neither is given -- decision 54's own original placement, restored as the default; decision 55's own placement is still reachable, now through `--figures-outside` rather than being unconditional. Unlike `--toc`, this is not `--format`-specific: decision 54 already gave both backends a captioned artifact's own real figure, so both backends get a real placement toggle here, not just Typst -- HTML's own nested `<figure>` can now genuinely sit as a DOM-level sibling after the pair's own outer `<figure>` closes, not only look that way through a stylesheet's own `order` trick. The resolved value threads down into both `render::html::render`/`render::typst::render` as `figures_outside: bool`, read at the one place each backend's own `eval_pair` builds a captioned artifact's figure. A new `figure` attribute, added to `KNOWN_ATTRS`, lets one block override that document-wide default for its own artifact alone: `figure=inside`/`figure=outside`, read through `InfoString::figure_outside() -> Option<bool>`, resolved as `info.figure_outside().unwrap_or(figures_outside)`. `figure=` on a block with no captioned artifact at all is inert, the same "meaningless here, ignored" stance `weave=output-hidden` already takes on an unpaired block.
+
+**Rationale:** Decision 55's own template-only lever worked, but only by asking a `[weave.pdf] template` to reconstruct decision 54's "inside" placement out of two independently-laid-out pieces -- a stroke color matched by hand to whichever of `gray`/`red` decision 46 happened to choose, and a negative `above` margin sized to Typst's own default block spacing, memorized rather than looked up. A `#show`/`#set` rule, or a CSS rule, can restyle an element it matches; neither can undo *structure* a renderer already committed to. Placement is structure, not style, so it belongs in the renderer's own hands, exposed as a real toggle -- a document-wide CLI default, with a per-block attribute free to override it, mirroring exactly the layering `weave=hidden` and its own per-block siblings (decisions 48/53) already established.
+
+<!-- dankg:depends target=#decision-55-a-captioned-figure-renders-outside-the-pairs-own-block-in-typst quote="nothing to unwrap a figure out of a box from the outside" -->
+<!-- dankg:depends target=#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="An artifact with no caption at all renders unwrapped" -->
+
+## Decision 57: `[@key]` inline citation syntax and `Inline::Citation`
+
+A new inline construct, recognized the same way `[[wikilink]]` is: a
+`[` immediately followed by `@` opens it, one or more citation keys
+separated by `;` and optional whitespace, closed by `]` --
+`[@netwok2019]` or `[@netwok2019; @smith2020]`. A key matches
+`[A-Za-z0-9_:.-]+`. Anything else inside the brackets, or a bracket
+that never closes, falls through to ordinary bracket-as-literal-text
+handling, the same fallback `close_bracket` already gives a bracket
+with no destination. A new `Inline::Citation { keys: Vec<String>, narrative: bool }` joins `Inline` in `md/mod.rs`, parsed in
+`md/inline.rs` by `citation()`, triggered from `open_bracket` the same
+way `wiki_link()` is, with `narrative: false`.
+
+`@key` is Typst's own native citation shorthand. `[@key]` is Pandoc's
+own bracketed form, one character different. Adopting it costs a
+reader nothing new to learn who already knows either tool.
+
+<!-- dankg:depends target=src/md/mod.md#markdown quote="`[[target]]` or `[[target|label]]`. Not standard markdown." -->
+<!-- dankg:depends target=src/md/inline.md#markdown-inline quote="fallback an unterminated wikilink already gets." -->
+
+## Decision 57b: A bare, unbracketed `@key` as a narrative citation
+
+Pandoc's own narrative-citation form -- `@key` with no surrounding
+brackets -- is also recognized, a second trigger in `citation()`
+alongside the bracketed one, guarded by one rule: the `@` is a
+citation only when it is not immediately preceded by
+`[A-Za-z0-9_]`. `user@example.com` stays ordinary text, because its
+`@` immediately follows the alphanumeric local part of an email
+address. `(see @smith2020)`, `@smith2020 argues`, and a `@key` at the
+very start of a line are all citations, because their `@` is preceded
+by punctuation, whitespace, or nothing at all. A bare key is matched
+with the identical `[A-Za-z0-9_:.-]+` charset as the bracketed form,
+greedily, then trimmed of any trailing `.`, `,`, `;`, or `:`. A bare
+citation always holds exactly one key; citing two together in one
+narrative mention still needs the bracketed form.
+
+`md/fmt.rs`'s own round-trip formatter gets one new escape rule to
+match: a literal `@` in plain text is escaped whenever it would
+otherwise be read back as a bare citation on the next parse -- not
+preceded by a word character, and followed by at least one real key
+character -- the same reasoning that already makes `[`/`]` always
+escape there.
+
+**Rationale:** the ambiguity between a bare citation and an email
+address turns entirely on what sits immediately to the left of the
+`@`, never on anything inside the key itself. That makes the
+lookbehind exact rather than a heuristic that could misfire.
+
+<!-- dankg:depends target=src/md/inline.md#markdown-inline quote="A narrative citation's `@` never does." -->
+
+## Decision 58: A `hayagriva`-tagged fence, or a frontmatter `bibliography:` path, as a document's bibliography source -- full Hayagriva schema fidelity
+
+A fenced code block tagged `hayagriva` is read for its data only by a
+new `data::bib::parse`. Rendering is untouched: like any lang tag
+`code_or_data_table` does not specifically recognize, it falls through
+to `code_block`'s own existing literal rendering in both backends,
+shown by default, hidden only if the author writes `weave=hidden`
+themselves (decision 48, unmodified). A document's frontmatter may
+additionally, or instead, name `bibliography: PATH`, a path resolved
+through `plan::resolve_artifact` and read off disk the same way a
+`produces=file:` table already is (decision 50). `Frontmatter` gains
+`bibliography() -> Option<&str>`, reading the new key through the
+existing `scalar()` accessor.
+
+Both sources converge on one `Vec<BibEntry>` before either renderer
+sees them, merged by `weave::bibliography`: the external file's
+entries load first, the inline fence's entries load second and win on
+a duplicate key, the same "last wins" convention `md/frontmatter.rs`'s
+own duplicate-key handling already established. At most one
+`hayagriva` fence is recognized per document; a second one warns and
+is ignored.
+
+Everything Hayagriva's own format supports parses, not a curated
+subset. Two layers make that bounded rather than a general YAML
+implementation: `data::yaml::parse` is a generic, indentation-driven
+tree parser (`YamlNode::Scalar`/`Seq`/`Map`) with no notion of
+Hayagriva's own field names -- block and flow collections, quoted and
+bare scalars, comments, and nothing else. Anchors/aliases, tags,
+multi-document markers, and merge keys are not part of Hayagriva's own
+spec. None of them are supported here. `data::bib::from_yaml` is the schema layer on top, walking that
+tree against Hayagriva's own documented field names into `BibEntry`,
+`Person`, `Affiliated`, and `SerialNumber`. An unsupported YAML
+construct warns by line and that node is dropped, the rest of the
+document kept; `data::bib`'s own diagnostics -- today, only an
+unrecognized field name -- report line 0 instead, since a `YamlNode`
+carries no position of its own once parsed. `KNOWN_FIELDS` is a reject
+list, not an allow list: an entry's own unrecognized key always warns,
+so a future Hayagriva field dankg does not yet know about shows up as
+a diagnostic rather than silent data loss.
+
+`author`/`editor` accept a bare scalar, a list of scalars, or a list
+mixing structured mapping items (`name`/`given-name`/`prefix`/`suffix`/`alias`); a scalar person string is `Family, Suffix, Given` or
+`Family, Given`, comma-split. `affiliated` is always a list of
+`{person, role}` pairs -- Hayagriva has no separate top-level
+`translator` field; a translator is an affiliated person with `role: translator`. `serial-number` is a bare scalar or a mapping of
+`doi`/`isbn`/`issn`/`pmid`/`pmcid`/`arxiv`/`serial`. `parent` is one
+mapping or a list of mappings, each recursively a full `BibEntry`,
+with no depth limit -- an issue's own `parent` names its journal, and
+so on outward.
+
+**Rationale:** the recursive two-layer split keeps `data::yaml`
+genuinely reusable and genuinely bounded -- exactly as general as
+Hayagriva's real file format needs and no further, the same discipline
+`md/frontmatter.rs` already holds at a shallower depth. It is also
+what keeps a future Hayagriva spec update cheap: a new field is one
+line in `data::bib`, never a change to `data::yaml`'s own grammar.
+
+<!-- dankg:depends target=src/data/yaml.md#data-yaml quote="handles both, with no notion of Hayagriva's own field names at all." -->
+<!-- dankg:depends target=src/data/bib.md#data-bib quote="This module is the only place in dankg that knows what `affiliated` or `serial-number` mean in Hayagriva's own file format." -->
+<!-- dankg:depends target=#decision-1-dependency-policy quote="Zero crates, std only, forever." -->
+
+## Decision 59: Citations and a references list render in both weave backends
+
+`weave::bibliography` is the pre-pass, run once before either
+renderer: locate the fence and/or the frontmatter file, parse and
+merge them (decision 58), then walk every inline in the whole
+document -- headings, paragraphs, list items, table cells, the same
+full-document reach decision 41 already gives weave -- collecting each
+`Inline::Citation`'s own keys in first-appearance order. That order is
+the numbering both renderers use; nothing counts it a second time. A
+cited key absent from every parsed entry warns at that citation's own
+enclosing block -- a heading or paragraph's own `line`, the finest
+position the AST tracks for one of its inlines. An uncited entry is
+simply never placed in either rendered list, matching Typst's own
+default `#bibliography(...)` behavior (never `full: true`).
+
+**Typst.** `render::typst::render` gains a `bibliography: Option<&BibliographySummary>` parameter carrying only what it needs --
+the set of valid keys and the resolved asset path -- decoupled from
+`weave::Bibliography` the same way a produced image's copied path is
+decoupled from its bytes (decision 51). `inline_text` gains an
+`Inline::Citation` arm: a non-narrative citation emits its keys
+space-separated, `@netwok2019 @smith2020`, relying on Typst's own
+adjacent-citation merging; a narrative citation emits `#cite(<key>, form: "prose")` instead, since `@key`'s own shorthand only ever
+produces Typst's default (non-prose) form. Real citation syntax goes
+out whether or not a key actually resolves -- decision 44's own "let a
+real incompatibility surface as the compiler's own error" stance;
+`weave::bibliography`'s own report already covers the unresolved
+case, with a real line number `render::typst` has no access to, so
+nothing reports a second time here. (Decision 66 turns that report
+into an error and fails the weave, so a document reaching either
+renderer carries no unresolved key at all.) `render::typst::render` appends one
+`#bibliography("bibliography.yml")` call after every body block,
+unconditionally, never at the `hayagriva` fence's own position.
+`render_pdf` writes the merged raw Hayagriva text to
+`.dankg/build/weave/bibliography.yml` before compiling, the identical
+copy-before-compile shape `images` already gets (decision 51). No
+bibliography configured at all: a `[@key]` or bare `@key` renders as
+its own literal source text, escaped exactly like ordinary prose.
+`escape_typst` already escapes a bare `@`. This needs no rule of its
+own beyond reconstructing the citation's own original text.
+
+**HTML.** `render::weave_html` gets its own `Bibliography` --
+`entries` and the cited-key `order`, the two fields it actually needs,
+not a dependency on `weave` itself. A non-narrative `Inline::Citation`
+renders `<span class="citation">[<a href="#ref-KEY">N</a>, ...]</span>`,
+one link per key, `[?]` unlinked for a key absent from every parsed
+entry; `N` is the key's own position among *resolved* cited keys only,
+so an unresolved key never consumes a number another citation would
+have to skip over. A narrative citation renders a fixed author-year
+link, `<a href="#ref-KEY">Smith (2020)</a>`, built from the resolved
+entry's own first author and date; a key with no author or no
+four-digit leading year to build a link from falls back to the
+citation's own literal text, unlinked. An unresolved key did too,
+until decision 66 made it fail the weave instead. `<ol class="reference-list">` appends after every body block, one `<li id="ref-KEY">` per
+resolved cited key in citation order -- the browser's own list
+numbering *is* the citation numbering. Each entry's own text is one
+fixed, hand-built, non-CSL format, covering every field `BibEntry` can
+carry, each shown only when present, in one fixed order: authors, then
+`(year)`, title, editors, any `affiliated` persons, the container
+chain (`parent`, walked outward -- `In *Journal*, vol. N, no. M` for
+an issue-then-journal chain, any further `parent` entries appended as
+`also in: ...`), edition, location, organization, publisher,
+page-range/page-total, volume-total, chapter, time-range/runtime,
+language, genre, a `serial-number` (a `doi` as a real link, any other
+identifier as labeled text), a `url` with `url_date` beside it as
+`(accessed <date>)`, archive/archive-location/call-number, and finally
+note/abstract as trailing free text. The author-year formatter driving
+both the narrative-citation link and an entry's own author line uses
+the identical family-name extraction: two authors join as `Family & Family`, three or more as `Family et al.`. No bibliography configured
+at all: the identical literal-text fallback Typst gets.
+
+**Rationale:** Typst already owns real citation resolution and
+formatting once it has a file to read; dankg's own job there is
+narrow. HTML has no such engine to defer to. Decision 1 rules out a
+CSL/citeproc crate. There is no external command to shell out to
+either, the way `typst compile`/`duckdb` get one -- this has to run
+inline during HTML rendering, not as a spawnable post-process. HTML
+gets dankg's own complete field-by-field formatter instead of feature
+parity with Typst's. "Complete" here means every field shows when
+present, not that the format adapts per `kind` the way a real citation
+style would. One fixed reference-list entry format is the smallest
+thing that is still genuinely useful: a reader can find "\[3\]" in the
+list from the in-text link, which is the one property an un-styled
+reference list absolutely has to have.
+
+<!-- dankg:depends target=#decision-44-weave-pdf-via-typst quote="let a real incompatibility surface as the compiler's own error." -->
+<!-- dankg:depends target=#decision-50-a-producesfile-csvtsvjson-artifact-renders-as-a-table quote="misconfigured is reported, not fatal" -->
+<!-- dankg:depends target=src/weave.md#weave quote="That order *is* the numbering both renderers use; nothing counts it a second time." -->
+<!-- dankg:depends target=src/render/typst.md#render-typst quote="filesystem or an entry's own fields beyond its key." -->
+<!-- dankg:depends target=src/render/weave_html.md#render-weave-html quote="What HTML needs to render both citations and a real reference list" -->
+
 # Terminology
 
 - root :: The directory defining one knowledge base. Everything under it is in
@@ -310,9 +637,283 @@ struct Edge {
 Extent is a line range rather than a byte range. The parser carries line numbers
 throughout. A line range is what diagnostics and editors both want.
 
-A file with no headings, or with links written above its first heading, gets a
-synthetic level-0 node named from its frontmatter title or file name, so that
-`[text](file.md)` always has something to land on.
+A file that declares a frontmatter `title` gets a synthetic level-0 node named
+from it, and every heading in the file hangs off that node (decision 62). A
+file that declares none still gets one when it has no headings at all, or when
+something is written above its first heading, named from the file name instead,
+so that `[text](file.md)` always has something to land on.
+
+## Decision 60: `weave=source-hidden` drops the output half too, keeping only the artifact
+
+Decision 53 gave `source-hidden` one job: drop the source, leave the
+output, artifact, and provenance untouched. That is not what a block
+declaring it usually wants. A block whose whole purpose is a chart or
+a table asks to be seen as that artifact; its captured stdout is a
+line like `wrote chart.png`, and its provenance line names tables the
+figure above already stands for. `source-hidden` now drops the output
+caption, the captured text, and the provenance line along with the
+source, and renders the block's own `produces=file:` artifact alone.
+`output-hidden` is unchanged: it still returns before the artifact is
+built, so it still drops the artifact with the rest of that half, and
+still leaves the source exactly as it already renders. The two remain
+mutually exclusive, and remain distinguishable -- `source-hidden` is
+now "the artifact only," `output-hidden` is "the source only," and
+`weave=hidden` is still "none of it."
+
+Two consequences follow. Hiding both halves can leave a pair's own
+wrapper -- Typst's `#block(stroke: ...)` (decision 46), HTML's
+`<figure class="eval-pair">` -- with nothing inside it, and an empty
+wrapper is a visible artifact of its own: a rule beside blank space,
+or a bordered void. Both backends now omit the wrapper entirely when
+its body comes out empty, leaving whichever figure the pair produced
+standing on its own. And a *failed* run is never hidden, whichever
+value is set: `hides_output` returns false for a failed pair in both
+backends, so the output caption, the captured text, and decision 53's
+own status signal all survive.
+
+**Rationale:** The narrowed behaviour is what the attribute was
+already being used for. A report that hides the source of every
+figure block did not want `wrote chart.png` rendered under each one,
+and had no way to suppress it -- `output-hidden` would have taken the
+figure too, and `weave=hidden` takes everything. Keeping the failure
+case visible is the one exception worth hard-coding rather than
+leaving to the author: hiding a half is a statement about a working
+block's own typeset shape, not a licence to swallow an error. A
+reader handed a page with no trace of a failure has no way to know
+the artifact above it is stale, which is exactly the silent-staleness
+failure decision 47's own stale badge exists to prevent.
+
+<!-- dankg:depends target=#decision-53-weavesource-hidden-and-weaveoutput-hidden-split-a-pairs-own-two-halves quote="Since `weave=` holds one value, the two are mutually exclusive by construction" -->
+
+## Decision 61: A frontmatter `cover` switch for the woven title
+
+A woven document prints its title twice. The PDF backend prints it on
+the cover page (decision 44), and the document's own leading heading
+usually repeats it -- `title: Weave` over `# Weave`, the shape a
+static-site generator expects. HTML prints the same two without a
+page break between them: a generated `<h1>` directly above the
+document's own `<h1>`. A frontmatter `cover` key now settles which of
+the two a reader sees.
+
+`cover: true` keeps each backend's own title block -- the PDF cover
+page, HTML's `<h1>` and byline. It drops the repeated heading
+instead. `cover: false` drops the title block and keeps the repeated
+heading, which then carries the title alone. Typst loses the cover
+page and its `#pagebreak()` with it; HTML loses the generated `<h1>`,
+the byline, and the date line. No `cover` key at all is what every
+document written before the key existed already gets: the title
+block, the repeated heading, and neither one touched.
+
+`Frontmatter::cover` returns `Option<bool>` for exactly those three
+states. It matches `true` and `false` without regard to case, since
+`True` and `TRUE` are the same boolean to a YAML reader. Any other
+value reads as no answer at all and leaves the default standing --
+the same "never guessed at" stance the rest of the frontmatter subset
+holds.
+
+The repeated heading is dropped in `weave::run`, once, before either
+renderer sees the document. Both backends want the identical
+document. HTML's own table of contents is built from the same blocks
+its body is, so a heading dropped there leaves the outline too, in
+both formats. Only the document's very first block qualifies, and
+only on an exact match of the title once both sides are trimmed. A
+heading further down is the author's own structure, and weave never
+guesses at which. `cover` itself never prints as a labeled line on
+the cover page. It joins `bibliography` and every `dankg.*` key as a
+directive rather than reader-facing content.
+
+**Rationale:** The duplication was a real defect that the cover page
+only half-hid. Decision 44 made the repeat *look* deliberate by
+putting a page break in front of it, which is not the same as a
+reader wanting to read the title twice. Dropping the repeated heading
+unconditionally was the obvious alternative and the wrong one: it
+silently edits a document that never asked, and it breaks the author
+who wrote the title block and the repeated heading on purpose. Three
+states are what let the existing default stay exactly where it is
+while each of the two real preferences gets a way to say itself. One
+key covers both backends rather than one key each, because the
+question it answers -- where does this document's title live -- is a
+property of the document, not of the format it is typeset into.
+
+<!-- dankg:depends target=src/md/frontmatter.md#markdown-frontmatter quote="Unsupported input warns with its line number and is skipped, never guessed at." -->
+
+## Decision 62: A declared frontmatter `title` is the document's top-level node
+
+`graph/build.rs` has always had a synthetic level-0 file node, but it
+only ever built one lazily, from the orphan-content path: a paragraph,
+a table, or a named top-level block appearing *before* the first
+heading needed an owner, and the file node was that owner. A document
+opening straight into `# Heading` never reached the call, so its
+declared `title` was read and thrown away. `architecture.md` got
+`architecture#dankg-architecture` because it happens to open with a
+sentence; `src/hash.md` declared `title: Hash` and got nothing. Same
+key, same corpus, two shapes, decided by whether the author wrote a
+line of prose first.
+
+A declared `title` now builds that node up front, before the walk.
+Every heading in the file hangs off it, the way an `h1` in a
+prose-first document already did. A file that declares no `title`
+keeps exactly the shape it has today: the first heading is the entry
+node, and the lazy fallback still covers orphan content and a file
+with no headings at all. The node exists because the author declared
+a title, not because every file must have one.
+
+The document's own leading heading is absorbed when it repeats that
+title. The rule is `weave::drop_repeated_title_heading`'s, reused
+rather than reinvented: only the very first block qualifies, and only
+on an exact match once both sides are trimmed by the same
+`Inline::plain` flattening a heading node's own title comes from. So
+`title: Hash` over `# Hash` yields one node, `src/hash#hash`, at level
+0 -- the identical id the heading alone used to produce, which is why
+the change moves no link target in this corpus. A leading heading
+saying something else is the author's own structure and keeps its own
+node beneath the title's.
+
+The title's slug is reserved through the same per-file `Slugger` a
+heading's is. It used to come from a bare `slugify` call that reserved
+nothing, which was a live bug rather than a latent one: a file node
+and a heading sharing a name produced two `Node`s carrying one id,
+`Graph::sort`'s `dedup_by` kept the first and dropped the second, and
+the heading lost its node, its extent, and its children's real parent
+while the containment edge it had already pushed survived as a
+self-loop. The one-file probe that found it produced exactly one node
+and the edge `a#hash -> a#hash`.
+
+**Rationale:** Frontmatter is where a document declares what it is. A
+key the parser reads, `Frontmatter::title` exposes, and both weave
+backends typeset should not also depend on the shape of the prose
+underneath it to reach the graph. Making the node unconditional for
+every file was the alternative and the wrong one: it adds a synthetic
+node to every file in the corpus, and it makes `[text](file.md)` land
+on a node named after the filename rather than on the heading the
+author actually wrote -- `src/md/frontmatter#frontmatter` instead of
+`src/md/frontmatter#markdown-frontmatter`. Absorbing the repeated
+heading rather than suffixing it is what keeps the change free: a
+`-1` suffix on the heading would have moved every fragment already
+pointing at it.
+
+<!-- dankg:depends target=#decision-61-a-frontmatter-cover-switch-for-the-woven-title quote="Only the document's very first block qualifies, and only on an exact match of the title once both sides are trimmed." -->
+
+## Decision 63: A figure's label comes from its block's own `name=`, or from `label=`
+
+(Decision 70 narrows this twice. The attribute is `artifact=`, not `label=`. The default is the artifact's own path stem, not the block's `name=`. Everything below about the charset, the collision rule, and each backend's own identifier stands unchanged.)
+
+A captioned `produces=file:` artifact renders as a real figure in both backends (decision 54). Nothing named it until now. Nothing could point at it. Its label is the block's own `name=`. That name is already unique within its file by construction (decision 19), and already that block's own graph node slug. A block written `name=chart produces=file:chart.png caption="Revenue"` is therefore labelled with no new attribute written at all.
+
+A `label` attribute joins `KNOWN_ATTRS` beside `caption` and `figure`, and overrides that default for one block. `weave::figure_labels` is the one walk that resolves the two, keyed by the block index each pair starts at -- the same key `produced_artifacts` already hands both renderers its own artifacts under. A block with no artifact in either map is not a figure and takes no label. A figure hidden by `weave=hidden` or `weave=output-hidden` (decision 53) does take one, because each backend applies its own hiding and the block is still in `doc.blocks` when the walk reaches it.
+
+Each backend turns that one label into its own identifier. Typst gets `<fig:chart>`, appended to the `#figure(...)` under either placement (decision 56). HTML gets `id="fig-chart"` on the nested `<figure>`, never on the pair's own outer `<figure class="eval-pair">`: a reference has to land on the artifact, not on the source block above it.
+
+Two figures claiming one label warns at the second one's own line. The second one is dropped. The rule is about the label that comes out, not about which attribute it came from. A `label=` colliding with another block's own defaulted `name=` therefore collides just the same.
+
+A label holds letters, digits, `-` and `_`, and nothing else. That is the identical rule `graph::slug::slugify` already applies to a heading, which is what lets a figure label and a heading slug share one fragment namespace (decision 64). A label failing it warns at its own line and is dropped, exactly as a collision does. The rule is Typst's own, tightened by CSS: Typst parses a label holding a letter, a digit, `-`, `_`, `.` or `:`, and refuses anything else. `label=a+b` reached `typst compile` as `<fig:a+b>` and failed with `unclosed label`, pointing into generated `.typ` -- the error decision 64 exists to keep an author from ever seeing. `.` and `:` are dropped from the set on top of that, because each changes what a CSS selector means: `#fig-a.b` selects an id and a class rather than one id, which is the same reason this decision chose `-` over `:` in an HTML id.
+
+**Rationale:** `label=` exists because `name` is also the block's eval identity and its tangle identity. Renaming a block for a code reason should not break every reference the prose already wrote. Suffixing a collision the way `Slugger` suffixes a duplicate heading is the alternative and the wrong one here: a silently suffixed label is a reference that silently points at the wrong figure. It warns rather than refuses, which is where it parts from the `name=` collision it takes its default from. `check_unique_names` returns a hard `PlanError::DuplicateName` there. Refusing to render a whole document over one label typo is a harsher trade than refusing to run one eval chain.
+
+<!-- dankg:depends target=#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="An artifact with no caption at all renders unwrapped" -->
+<!-- dankg:depends target=src/graph/slug.md#slugify quote="c.is_alphanumeric() || c == '-' || c == '_'" -->
+
+## Decision 65: One numbering pre-pass feeds HTML, and Typst still counts for itself
+
+HTML cannot number a figure reference without dankg counting. CSS cannot put a counter value from one element into an `<a>` elsewhere in the document. The one feature that does exactly that is `target-counter()`. Only print processors such as Prince and WeasyPrint implement it. JavaScript could count at load, at the cost of a page that is no longer static. Neither is a real option for a self-contained HTML page.
+
+So `weave::figures` numbers every figure in document order and hands both renderers the same count. HTML writes the number as literal text, using Typst's own supplement word and its own `: ` separator -- `Table 1: `, `Figure 2: ` -- so the two backends read alike for the same document. Typst is handed no number at all. It still counts for itself off the `#figure` it already receives, which keeps the PDF's own outline machinery, its own supplement text, and everything a `[weave.pdf] template` can already restyle. Both backends walk the same figure sequence, which is what lands them on the same number.
+
+The count is per kind, never sequential. Typst numbers a table and an image on two separate counters, confirmed by a real compile read back with `pdftotext`. A single counter would disagree with the PDF on every document holding both. `kind: table` and `kind: image` are declared rather than inferred (decision 54) so that both backends count off one declaration, rather than dankg predicting Typst's own inference.
+
+Where the walk sits is not free, for the same reason decision 61's own heading drop is not. It must count exactly the figures each backend will actually emit. So it runs after `drop_repeated_title_heading`. It takes its candidates from the artifact maps `produced_artifacts` already built. It skips a figure neither backend renders. `weave=hidden` drops the whole pair. `weave=output-hidden` drops the artifact half with it (decision 53). Neither leaves a figure on the page to count. `weave=source-hidden` keeps the artifact (decision 60). Its own figure renders and counts like any other. A skipped figure still keeps its label, which is how a reference to a hidden figure stays distinguishable from a reference to nothing. An *uncaptioned* artifact needs no skip of its own, and cannot be tested for: a produced artifact always carries a caption, its own `produces=file:PATH` echo when the reader wrote none. Every entry in the two artifact maps therefore renders as a real figure already. Decision 54's uncaptioned case is reachable only by handing a renderer an artifact map built by hand.
+
+Numbering and labelling are separate. A figure whose `label=` was dropped as a collision (decision 63) still renders. It therefore still counts.
+
+**Rationale:** HTML's own figcaption number comes from the same walk, which adds to decision 54 rather than amending it in substance. That decision offered a stylesheet an element to key a counter off. No shipped stylesheet took the offer: `WEAVE_CSS` has no `counter-increment` in it, and carries no rule at all for the `table-figure` and `image-figure` classes. So the walk displaces nothing that renders today. Letting each backend count alone was the alternative and the wrong one: Typst would number one sequence and HTML another. A document mixing the two kinds would then disagree with itself across formats. Configurable supplement wording is refused for the same reason the wording is Typst's in the first place -- a reader who restyles `Figure` to `fig.` through a `[weave.pdf] template` changes the PDF alone. dankg cannot read that template to match it in HTML.
+
+<!-- dankg:depends target=#decision-53-weavesource-hidden-and-weaveoutput-hidden-split-a-pairs-own-two-halves quote="`weave=output-hidden` drops" -->
+<!-- dankg:depends target=src/render/assets.md#weave_css quote="pub const WEAVE_CSS" -->
+
+## Decision 66: An unresolved citation fails the weave too
+
+Decision 59 is amended. A citation key that a configured bibliography does not carry fails the weave. `weave::bibliography` already finds every such key and already reported it by line. That report becomes an error. `run` gives up once the whole document is walked, which is the same walk-then-fail shape decision 64 uses. Both land in the same `Diags` count. One run therefore shows an author every bad reference and every bad key together.
+
+This ends a disagreement the two backends had. A probe confirmed both halves of it. With a bibliography configured, Typst refuses to compile a missing key and writes no PDF, which is decision 44's own "let the compiler's own error surface" stance working as written. HTML rendered the same key as an unlinked `[?]` for a bracketed citation, or as literal `@key` text for a narrative one, and wrote a finished-looking page. One document failed one way and built the other. Failing both ways is the only answer that keeps them honest. `citation_html`'s own `[?]` marker is gone with the case that produced it.
+
+The failure is dankg's own, raised before either backend runs, for the reason decision 64 already gives. Typst's message points into generated `.typ`. The author never wrote that file.
+
+A document configuring no bibliography is untouched. That carve-out needs no new code: `collect_citation_keys` is only reached from `bibliography`, which returns `None` before that walk when neither a fence nor a frontmatter file is configured. Decision 59's literal-text fallback stands for that case exactly as written. This is not a softening. A bare `@` in ordinary prose parses as a citation under decision 57b, which a probe confirms: `Ping me @dan on the forum` reports the citation key `dan`. Failing a document that configures no bibliography would fail every document that mentions a handle in prose.
+
+One shape that built before now fails: a document that configures a bibliography and writes a bare `@` in ordinary prose. The fix is decision 57b's own escape, `\@dan`, which raises nothing, renders as `@dan`, and survives `dankg fmt` with its backslash intact. The break is worth taking. The alternative on offer is a document whose PDF failed to build for one reason, and whose HTML page renders `[?]` beside it and looks finished.
+
+**Rationale:** A resolved entry that cannot build `Smith (2020)` -- no author, or no four-digit leading year -- is a different case and keeps its own literal-text fallback. The key resolved; only the display string could not be built. Decision 59 already treated those two as one. Separating them is what lets this decision fail the first without touching the second.
+
+<!-- dankg:depends target=#decision-59-citations-and-a-references-list-render-in-both-weave-backends quote="the identical literal-text fallback Typst gets." -->
+
+## Decision 64: A same-file wikilink resolves against whatever the document holds
+
+Decision 41 narrows. Weave resolves a wikilink whose name half is empty. A same-file fragment needs no corpus, which is the whole of decision 41's own reason for rendering a wikilink as plain text. A wikilink naming another file still renders as its own plain text, unchanged.
+
+Every same-file fragment that finds a target resolves, not figure labels alone. `graph::resolve::find_slug` searches a file's nodes, which hold headings and blocks alike. A rule admitting only figures would carve an exception out of machinery that does not want one. This is strictly larger than the figure case and strictly additive: a `[[#some-heading]]` that renders as plain text in an already-woven document starts rendering as a link. Nothing renders as less than it does today.
+
+`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads. Typst gets the fragment's own label, `fig:NAME` or `sec:SLUG`. HTML gets the fragment's own anchor id and the text a bare reference shows. Figures go in before headings. A figure label therefore wins a clash with a heading slug. A label is declared, by `label=` or by a block's own `name=`. A slug is derived from prose. (Decision 70 removes that last justification, since a figure slug is derived from a path unless `artifact=` says otherwise. The precedence itself is unchanged, on the narrower ground that a figure is one element where a heading is a whole section.)
+
+`WikiLink`'s own two fields carry exactly what a reference needs. A bare `[[#chart]]` renders as a reference whose text the backend supplies. A labelled `[[#chart|the revenue chart]]` renders as a reference whose text the author wrote.
+
+| written | Typst | HTML |
+| --- | --- | --- |
+| `[[#chart]]` | `@fig:chart` | `<a href="#fig-chart">Table 3</a>` |
+| `[[#chart\|text]]` | `#link(<fig:chart>)[text]` | `<a href="#fig-chart">text</a>` |
+
+The markdown link form `[text](#chart)` resolves through the same lookup and emits the same two things. Typst's own `Link` arm wrote `#link("#chart")` before this, a URL link to a literal string, which means nothing in a PDF. HTML's wrote `href="#chart"`, which is the fragment rather than the figure's own `fig-chart` id (decision 63). It pointed at nothing. Both are bugs on their own terms and both are fixed here.
+
+An unresolved reference fails the weave. It does not render as its own literal source text. It does not render as anything else either. `weave::run` reports it through `Diags::error` at the reference's own line and returns `Err`. No `.typ` is written. No HTML is written. No PDF is built. Falling back was the earlier design here and it was wrong. A document that renders with a broken reference in it is a document an author ships. The warning scrolls past. The page looks like prose. The reader is the one who finds the hole. That is the silent staleness decision 47's own stale badge exists to prevent.
+
+The run fails after the whole document is walked, never on the first bad reference. An author who mistyped three labels wants all three lines from one run. Each carries its own message, because the next action differs in each: nothing in the document carries that name, or a block carries it but is not a figure, or the figure is real and hidden by `weave=hidden`/`weave=output-hidden`. The third message is free because hiding is applied inside each backend rather than by filtering the document. A hidden block is therefore still in `doc.blocks` when the walk reaches it.
+
+**Rationale:** dankg resolves and fails first so that the author's own error stays readable. Typst refuses an unresolvable label too, with `label <nope> does not exist in the document`, exit 1, and no PDF. Typst is right to refuse. Its message points into generated `.typ` though, a build artifact nobody wrote by hand. Building the reference on decision 57's own `@key` citation syntax was the alternative and the wrong one: `:` is already inside that key charset, which would have made `@fig:chart` parse with no parser change at all. A bare `@key` reaches Typst as `#cite(<key>, form: "prose")` though, which resolves against a bibliography and never against a figure label. The bibliography pre-pass would also have warned on the `fig:` key and consumed a citation number, shifting every later citation by one. `Inline::Citation` is untouched by this decision. A wikilink needed no parser change either.
+
+<!-- dankg:depends target=#decision-41-weave-scope quote="Single-file only -- no corpus-wide walk exists yet." -->
+
+## Decision 67: Heading numbering belongs to the template, not to dankg
+
+A bare `[[#some-heading]]` emits `@sec:...` in Typst, the same way a bare `[[#chart]]` emits `@fig:...`. dankg does not turn heading numbering on to make that work, and does not suppress the reference to avoid needing it. Every heading carries a `<sec:SLUG>` label so that a reference has something real to reach, from the same per-file `Slugger` a heading's own HTML `id` comes from.
+
+Typst answers `@sec:intro` against an unnumbered heading with `cannot reference heading without numbering`, and writes no PDF. The fix is one line in the author's own `[weave.pdf] template`, `#set heading(numbering: "1.")`, which is prepended to the generated `.typ` and therefore applies document-wide. A real compile confirms all three halves: the labelled form compiles against an unnumbered heading, the bare form does not, and that one line makes the bare form read `Section 1`.
+
+**Rationale:** This is not the case decision 64 fails on. The line between them matters. An unresolved reference is an error in the markdown, which is the document dankg owns. dankg can see it. dankg therefore reports it. An unnumbered heading is not an error in the markdown at all: the reference is correct and the target exists. What is missing is a typesetting setting living in the author's own file. dankg cannot fix it and should not guess at it, which is decision 44's own "let a real incompatibility surface as the compiler's own error" stance applied unchanged. An author who wants a heading reference without touching a template writes the labelled form.
+
+## Decision 68: A bare heading reference takes the heading's own title in HTML
+
+A bare `[[#intro]]` renders in HTML as a link carrying the heading's own title. `weave_html`'s own table of contents already emits exactly that for the same target. This is a rule the renderer follows already, applied to one more construct.
+
+HTML numbers no heading, which is why a number would be wrong here. A woven page carries no counter rule at all. Every heading renders bare. A reference reading `Section 1` would point at a heading with no visible 1 anywhere near it. The reader would click `Section 1` and land on `Intro`.
+
+**Rationale:** Decision 65's own "both backends must agree" rule does not reach this case. That rule exists because a figure is numbered twice, by Typst's own counter and by dankg's own walk. Two counts must not drift apart. A heading is numbered once, in the PDF alone. One source and none is not two in conflict. Counting headings inside dankg is refused for the reason decision 67 already gives: the template owns the numbering format. `1.`, `A.` and `I.` are all possible. dankg never sees which one is set. A number dankg invented would match nothing on the HTML page and nothing in the PDF either. The asymmetry with a figure is principled rather than an exception -- HTML numbers its figures and does not number its headings -- and an author wanting one string in both backends writes `[[#intro|the introduction]]`.
+
+<!-- dankg:depends target=src/render/weave_html.md#toc quote="escape(&Inline::plain(inlines))" -->
+
+## Decision 70: An artifact's slug comes from its path, or from `artifact=`
+
+Decision 63 gave a figure a label and defaulted it to the block's own `name=`. Both halves are narrowed here.
+
+The attribute is `artifact=`. `label=` was too generic to keep: one attribute became a Typst label, an HTML id, and a graph node slug at once. The rename is mechanical. `dankg fmt` canonicalizes attribute order. `artifact` simply takes `label`'s own slot in `KNOWN_ATTRS`. `InfoString::label()` is `InfoString::artifact()`. 0.9.0 has no external users. There was nothing downstream to migrate.
+
+The default is the artifact's own path stem, slugified. A block writing `produces=file:data/quarterly.csv` gives a figure addressed as `[[#quarterly]]`. A reference names the thing on the page. The thing on the page is the artifact, not the source block above it. A block renamed for a code reason therefore breaks no reference at all, which is what decision 63 wanted `label=` for in the first place.
+
+A derived slug is slugified rather than checked, and suffixed rather than refused. Both follow from it not being something the author typed: warning about a path's own shape would name a mistake nobody made. `produces=file:Q3 revenue.csv` gets `q3-revenue`. Two artifacts sharing one stem -- `out.csv` and `out.png` both stem to `out` -- get `out` and `out-1` from the same `Slugger` a repeated heading already goes through. A stem that slugifies to nothing is dropped instead, since `Slugger`'s own empty-base fallback is `section`, a word no figure should answer to.
+
+A *declared* `artifact=` keeps decision 63's own treatment exactly: checked, never repaired, warned and dropped on a collision. The reason is decision 63's own. A silently repaired slug is a reference that silently points at the wrong figure. So the two rules differ by which side wrote the slug, not by which check runs.
+
+The check itself changed shape while this was built, and the reason is worth recording. Decision 63 stated it as a charset: letters, digits, `-` and `_`. Reserving a declared slug through `Slugger` -- which this decision needs, so a later derived slug cannot collide with it -- puts it through `slugify` as well, and `slugify` lowercases. `artifact=Chart` passed the charset check, came back as `chart`, and left `[[#Chart]]` resolving against nothing: `resolve_references` compares a fragment verbatim. That is a silently repaired slug pointing at the wrong figure, the exact failure decision 63 refuses. `usable_label` is now stated as a fixed point instead -- `slugify(s) == s` -- which subsumes the charset, rejects the uppercase input outright, and names the slug `slugify` would have produced so the author can paste it. The charset was never the whole rule. It only looked like it while nothing downstream rewrote the value.
+
+**Rationale:** decision 63's own default was the wrong half of the pair. A block's `name=` is its eval identity and its tangle identity; `label=` existed to stop a code-driven rename from breaking prose. Defaulting to the artifact's path instead removes the need for the override in the ordinary case. The prose already points at the artifact. The artifact's name does not change when the block's does. The override survives for the case the path itself is the wrong word.
+
+## Decision 72: A reference naming a block says which slug its figure has
+
+`weave::unresolved_message` gains one answer ahead of both its artifact branches: a fragment naming a real block whose artifact resolved under a different slug reports that slug, and reports nothing about reading a file.
+
+Decision 70 is what makes this reachable often enough to matter. `[[#chart]]` against a block named `chart` writing `revenue.png` used to resolve. It now misses. The old message claimed the artifact could not be read. The artifact read fine. It answers to `revenue`.
+
+The message names the slug that would have worked rather than only saying the fragment is wrong, for the same reason decision 64 gives each unresolved reference its own message. The next action differs per case. Here it is one word.
+
+**Deferred.** Decisions 69, 71, 73, 74 and 75 of `plans/plan-label-resolution.md` are not built. A `produces=file:` artifact is still not a graph node. `dankg graph`, `dankg check` and the TUI therefore still resolve a figure slug to nothing. `example/weave_example/report.md`'s own *A gap worth knowing about* section is the live demonstration. The plan is the record of how it closes.
 
 ## Block nodes
 
@@ -413,8 +1014,12 @@ src/
     json.rs          canonical graph dump
     dot.rs           graphviz
     mermaid.rs       flowchart
-    html.rs          single self-contained file
+    html.rs          single self-contained graph page
     assets.rs        CSS + JS as const &str, inlined at build
+    typst.rs         weave --format pdf's own markup emitter
+    weave_html.rs    weave --format html's own self-contained page
+  data/
+    table.rs         CSV/TSV/JSON readers for weave's data tables
   eval/
     plan.rs          dep DAG, topological order, "what will run" report
     files.rs         loads the (usually zero) extra files a cross-file
@@ -422,6 +1027,7 @@ src/
     run.rs           process spawn, timeout, output capture
     result.rs        hashing, write-back, staleness detection
   tangle.rs          heading -> file placement, tree assembly, build spawn
+  weave.rs           single-file document -> HTML or PDF via Typst
   depends.rs         dankg:depends marker: quote-anchored prose staleness
 ```
 
@@ -429,10 +1035,11 @@ src/
 
 Implemented: ATX headings, fenced code with info strings, inline and reference
 links, wikilinks, unordered and ordered lists including nesting, emphasis and
-strong, code spans, paragraphs, thematic breaks, hard breaks.
+strong, code spans, paragraphs, thematic breaks, hard breaks, GFM pipe tables
+(decision 42).
 
-Passed through as literal text: setext headings, HTML blocks, tables, block
-quotes, indented code blocks, entity references, autolinks, images, and link
+Passed through as literal text: setext headings, HTML blocks, block quotes,
+indented code blocks, entity references, autolinks, images, and link
 reference definitions.
 
 Link titles are parsed and kept even though DanKG has no use for them. An AST
@@ -442,8 +1049,10 @@ field costs nothing.
 The vendored CommonMark `spec.json` lives at `tests/data/commonmark/spec.json`.
 It is test *data*, not a dependency. Scoring it requires rendering the AST to
 HTML. So `tests/support/html.rs` implements a CommonMark HTML renderer used
-*only* as a conformance oracle. DanKG itself never renders markdown to HTML.
-It renders a graph.
+*only* as a conformance oracle. DanKG's own graph renderer never turns
+markdown into HTML; it renders a graph. The woven HTML page is the one
+deliberate exception, kept in its own renderer (`render::weave_html`,
+decision 43) rather than folded into the graph's.
 
 The harness is a regression gate. Unimplemented sections never fail a build,
 but a section that loses ground does.
@@ -529,7 +1138,7 @@ would undo that.
 
 - `[t](#heading)` -- Slug within the current file.
 - `[t](other.md#heading)` -- Path relative to the current file, then slug.
-- `[t](other.md)` -- That file's first heading; else a file-level node.
+- `[t](other.md)` -- That file's own level-0 title node (decision 62); else its first heading; else a file-level node.
 - `[[Heading]]` -- Slug search across the root; ambiguity warns and picks the lexicographically first path.
 - `[[other#Heading]]` -- Filename stem search across the root, then slug.
 - `[t](https://...)` -- External. Recorded on the node, never a graph node.
@@ -1916,6 +2525,18 @@ dependency side effects re-run on every eval, and there is no persistent state
 between separate `dankg eval` invocations. Both are the price of not writing a
 PTY session manager, and both keep evaluation reproducible.
 
+The spawned process's own working directory (decision 49) is the
+declaring file's own directory, not wherever `dankg` itself was
+invoked from. `run`/`run_db`/`run_at` take a `dir: &Path`, set via
+`Command::current_dir`; `session::run_one`, their one and only caller,
+computes it as `root.join(dir_of(entry_file))`. Before this fix, a
+block's own relative file access only landed where a reader of its
+source would expect if `dankg` happened to already be running from
+that exact directory -- harmless until `dankg weave` started reading
+a `produces=file:PATH` artifact back off disk (see *Produced
+artifacts* under *Weave*, below), which made a wrong working
+directory a wrong result rather than an unnoticed inconsistency.
+
 Timeout defaults to 30s, overridable per block via `timeout`. The
 target's own value governs the one spawn covering its whole chain.
 stdout and stderr are captured on their own threads, not read after
@@ -2560,6 +3181,303 @@ reason pilot 1 needed none either. That arrives once a second module
   other purely-authorial, per-file glue preferences ever justify their own
   `dankg.tangle.*` key, versus staying a `glue` script's own problem to
   solve by reading the block source it is free to read, is open.
+
+# Weave
+
+Tangle assembles a program. Weave is the literate-programming term for
+the other half: typesetting the same source as a document a person
+reads, rather than compiling it into one a machine runs. `dankg weave`
+turns one markdown file into HTML or a PDF (compiled through Typst).
+
+```
+dankg weave <path> --format html|pdf [-o <file>] [--toc | --no-toc]
+```
+
+<!-- dankg:depends target=#tangle quote="extracting and reassembling code chunks into compilable source, as opposed to" -->
+
+## Weave's own scope
+
+Single-file only (decision 41). Unlike `tangle`/`eval`, there is no
+directory-or-several-paths branch: naming a corpus-wide walk is out of
+scope for now, confirmed with the user during design. Weave walks
+every `Block` in the parsed document, in order -- headings,
+paragraphs, lists, thematic breaks, tables, passthrough, and code
+blocks alike -- not the named, top-level subset `tangle`/`eval`
+narrow to (decision 23), since weave has nothing to run and nothing to
+place in a source tree. A construct outside DanKG's markdown subset
+(`Block::Passthrough`) renders as escaped literal text in both
+backends, never as raw markup: an unparsed construct must never become
+unvalidated HTML or Typst.
+
+## Tables
+
+A GFM pipe table is real structure, `Block::Table`, not
+`Block::Passthrough` (decision 42). A fenced block tagged `csv`,
+`tsv`, or `json` is a second table source, read by `data::table`'s
+hand-rolled CSV/TSV and JSON readers into the same `TableData { header, rows }` shape regardless of which produced it (decision 45). Both
+weave backends consume both sources through one shared table emitter
+apiece. The language tag alone decides; content is never sniffed.
+
+## Recorded eval output
+
+A named `Code` block immediately followed by its own recorded
+`<!-- dankg:result ... -->` marker and output fence renders as one
+paired unit instead of three unrelated blocks (decision 46): an
+HTML `<figure>`, a Typst `#block(stroke: ...)`. Before this, the
+marker fell into the same `Block::Passthrough` arm every other
+unparsed construct does, and rendered as literal escaped comment
+text -- a bug visible the moment weave met any file `dankg eval` had
+touched. `eval::result::recognize_pair` finds the shape by index
+alone: a named `Code`, a one-line `Passthrough` matching that name's
+marker, then a plain `Code`. A `failed` run gets a visually distinct
+pairing (an added CSS class in HTML, a different stroke color in
+Typst); `produces=`/`reads=`, decision 36's own inferred SQL relation
+names, print as a short "writes: X" / "reads: Y" line when either is
+non-empty.
+
+## Hiding a block from the page
+
+`weave=hidden` (decision 48) drops a code block from the woven page
+entirely -- not a placeholder, not a collapsed toggle, absent as if
+it were never in the document. A hidden source block's paired result,
+if it has one, is hidden with it. The attribute is weave-only.
+`dankg tangle` and `dankg eval` never look at it. A hidden block
+still tangles and still evaluates exactly as it would without the
+tag.
+
+## Staleness
+
+Each recognized pair gets one freshness check (decision 47): the same
+`expected_hash`-against-stored-`hash` comparison `dankg check` and
+`dankg eval --if-stale` already make, built the same lazy, file-scoped
+way `run_one`'s own `--if-stale` precheck already is (decision 19). A
+cross-file `deps=`/`xdeps=` chain loads only what it reaches. A
+`Graph` is built only if the chain actually carries a `table:` xdep.
+A real hash mismatch, a changed plan, or a language/database dropped
+from config all print the same stderr warning naming the block. The
+rendered page itself never changes because of this: two `dankg weave`
+runs against the same file produce byte-identical output regardless
+of what state a `deps=`/`xdeps=` chain is in elsewhere, the same way a
+missing `[weave.html] css` warns without altering the page around it.
+This narrows decision 41's own "never consults `deps=`/`name=`":
+weave now reads them too, read-only, only ever to ask whether a
+stored answer still matches its own inputs.
+
+## Produced artifacts
+
+A recognized pair's source block may also declare `produces=file:PATH`
+(*File dependencies*, below) -- a real table or a real image sitting
+on disk, not just captured stdout, since a block whose real point is
+a chart or a table usually does not print either one. `weave::produced_artifacts`
+resolves that path the same way `dankg check` already verifies one
+(`plan::parse_artifact`/`resolve_artifact`, made `pub(crate)` for this
+reuse) and reads it once its extension says which of the two it is
+(decisions 50 and 51). A `.csv`/`.tsv`/`.json` extension is handed to
+both renderers' own existing `code_or_data_table` as raw text and a
+lang tag -- never a parsed `TableData` -- so a `.json` file that is
+not table-shaped still gets that function's own existing fallback to
+an ordinary code block, with a warning, rather than a second copy of
+the same dispatch. A `png`/`jpg`/`jpeg`/`gif`/`svg`/`webp` extension
+is embedded instead: base64-inlined as an HTML `data:` URI (a new
+hand-rolled RFC 4648 encoder, decision 1), or copied into
+`.dankg/build/weave/assets/<root-relative-path>` and referenced by
+that same path in a Typst `#image(...)` call, since `render::typst`
+only ever emits markup and never touches a filesystem itself. Either
+kind renders below the captured stdout inside the same paired unit --
+both show, since stdout might be a log line while the real content
+lives in the file. A missing or unreadable artifact warns on stderr
+and adds nothing to the page; any other extension adds nothing
+either, silently, the same never-content-sniff stance decision 45
+already takes.
+
+## Captions
+
+A recognized pair's own caption is normally synthesized: `Output`/
+`Output (failed)`, or an artifact's own raw `produces=file:PATH`
+string echoed back verbatim (decisions 50/51). Decision 52's
+`caption=` overrides whichever of those is the pair's own payload --
+the artifact's, when a table or image is present, otherwise the eval
+result's own label, with `(failed)` still appended so that signal
+survives a custom caption. It is free text, unlike every other
+attribute here: `parse_info` tokenizes a fence's whole info string
+through `cmd::split`, the same quote-aware scanner `dankg:depends`'s
+own `quote="..."` marker already relies on, so a caption can carry
+its own spaces (`caption="Quarterly revenue"`).
+
+A captioned artifact is a real figure, not a caption line beside raw
+content (decision 54): a nested `<figure class="table-figure">`/
+`<figure class="image-figure">` in HTML, `#figure(caption: [...])`
+in Typst -- genuine, automatically numbered "Table N"/"Figure N" in
+the PDF, through Typst's own counter. A table's own `<figcaption>`
+sits first, an image's own sits last, the conventional
+caption-above-table, caption-below-figure split; a stylesheet can
+still reposition either.
+
+Whether that figure sits inside the pair's own block, or as a
+sibling right after it, is `dankg weave`'s own call, not a
+template's (decision 56): `--figures-inside`/`--figures-outside`
+sets the document-wide default -- `inside`, decision 54's original
+placement, when neither is given -- and one block's own `figure=`
+attribute overrides it for its own artifact alone. Decision 55 first
+tried leaving this to a `[weave.pdf] template`'s own `#show`/`#set`
+rules, but a `#show` rule can only add structure around an element
+it matches, never remove structure the renderer already committed
+to; reconstructing "inside" from the template's own side needed a
+stroke color matched by hand and a negative margin sized to Typst's
+own default spacing. `--figures-outside` gives a template decision
+55's own placement back without either. HTML gains the identical
+toggle here for the first time: its own nested `<figure>` can now
+genuinely close as a sibling after the pair's own outer `<figure>`,
+not merely look detached through a stylesheet's own `order` trick.
+An uncaptioned artifact is not a real figure in either backend and
+keeps rendering inside the pair, exactly as before -- there is no
+figure for a placement choice to apply to.
+
+## Hiding one half of a pair
+
+`weave=hidden` (above) drops both of a pair's own halves together.
+`weave=source-hidden` and `weave=output-hidden` (decisions 53 and 60)
+each keep exactly one thing: `source-hidden` keeps the block's own
+`produces=file:` artifact and drops the source, the output caption,
+the captured text, and the provenance line; `output-hidden` keeps the
+source and drops that whole second half, artifact included. Since
+`weave=` holds one value, the two are mutually exclusive by
+construction -- hiding everything is already `weave=hidden`. On a
+block with no recorded result, `source-hidden` falls back to
+`hidden`'s own "absent as if it were never in the document," since
+there is no artifact left to show; `output-hidden` is a no-op there,
+since there is no separate output half to drop.
+
+Hiding both of a pair's own visible halves can leave its wrapper --
+Typst's `#block(stroke: ...)`, HTML's `<figure class="eval-pair">` --
+with nothing in it, and an empty wrapper still draws its own rule and
+spacing. Both backends omit the wrapper when its body comes out
+empty. A failed run is the one thing neither value hides: `hides_output`
+returns false for a failed pair, so the captured text and the pair's
+own status signal survive whichever value is set.
+
+<!-- dankg:depends target=#decision-52-caption-overrides-a-pairs-own-synthesized-caption quote="It replaces exactly one of the two, never both" -->
+<!-- dankg:depends target=#decision-53-weavesource-hidden-and-weaveoutput-hidden-split-a-pairs-own-two-halves quote="Since `weave=` holds one value, the two are mutually exclusive by construction" -->
+
+## Figures, numbered and referenced
+
+A captioned artifact is a real figure in both backends (decision 54). A figure carries a slug (decisions 63 and 70). The slug is the stem of the file the block produced, or an `artifact=` overriding it. Each backend turns that one slug into its own identifier: `<fig:SLUG>` in Typst, `id="fig-SLUG"` in HTML. A declared slug holds letters, digits, `-` and `_`, the identical charset `slugify` gives a heading. A derived one is put through `slugify` itself, and suffixed on a collision. A figure slug and a heading slug are therefore interchangeable as a fragment.
+
+`weave::figures` is the walk that resolves a label and numbers a figure at once (decision 65). Numbering is per kind, because Typst counts tables and images on two separate counters. HTML writes the number as literal text, since no browser can put one element's counter value into a link elsewhere on the page. Typst still counts for itself, off the `#figure` it already receives. Both backends walk the same sequence, which is what lands them on the same number.
+
+Prose points at a figure with a same-file wikilink (decision 64). `[[#chart]]` reads as the figure's own number, and `[[#chart|the revenue chart]]` as the author's own words. The markdown link form `[text](#chart)` resolves through the same lookup. A heading resolves the same way, by its own slug: the PDF reads it as a section number, which the author's own `[weave.pdf] template` has to turn on (decision 67). HTML reads it as the heading's own title instead, since HTML numbers no heading (decision 68). A wikilink naming another file is untouched, because weave reads one file (decision 41).
+
+Every reference resolves in `weave::references`, once, for both backends. An unresolved one fails the whole weave at its own markdown line, after the document is walked, with one message per next action. An unresolved citation key fails the same way (decision 66), through the same count. One run therefore shows an author every bad line of either kind.
+
+<!-- dankg:depends target=#decision-64-a-same-file-wikilink-resolves-against-whatever-the-document-holds quote="`weave::references` is the one walk that resolves a fragment, for both backends." -->
+<!-- dankg:depends target=#decision-65-one-numbering-pre-pass-feeds-html-and-typst-still-counts-for-itself quote="The count is per kind, never sequential." -->
+
+## HTML backend
+
+`render::weave_html` (decision 43) is a single self-contained page:
+`WEAVE_CSS` inlined into a `<style>` tag, heading anchors from
+`graph::slug::Slugger`, and a table of contents whose expand/collapse
+toggle is pure CSS -- a hidden checkbox, a `<label>`, a `:checked`
+sibling selector. No JavaScript exists on the page for it to misfire.
+`--format html` defaults to stdout, the same as every other
+`--format`'s own default.
+
+`author`/`date` never render as raw frontmatter text beneath the page's
+own `<h1>`, the same non-literal treatment the PDF cover page gives
+them: `author` as an unlabeled `<p class="byline">`, `date` as a real
+formatted date -- "September 18, 2026", not "2026-09-18" -- built by
+this module's own hand-rolled month-name table (decision 1: no
+date-handling crate here either, the same constraint Typst's own
+`datetime` sidesteps only because Typst is doing the formatting
+there). Every other frontmatter key is left alone; this page has never
+dumped the rest of a document's frontmatter the way the PDF cover page
+does. That whole title block -- `<h1>`, byline, date -- is this
+backend's own cover. Frontmatter's own `cover: false` (decision 61)
+drops it, and the document's own first heading carries the title. The `<title>` in `<head>` is never dropped with it: a browser
+tab still needs a name, and nothing about it repeats on the page.
+
+## PDF backend
+
+`render::typst` (decision 44) emits Typst markup only -- a sibling to
+`render::dot`/`render::mermaid`, never a PDF generator. The document's
+title and frontmatter render on a dedicated cover page first --
+title large and centered, `author` beneath it as its own unlabeled
+byline, `date` beneath that as a real Typst `datetime` (never a raw
+string), every remaining entry beneath that as its own generic line.
+`title`, `author`, `date`, `bibliography`, `cover`, and any `dankg.*`
+key are excluded from that generic dump. The page ends with
+`#pagebreak()` before the outline and body, and frontmatter's own
+`cover: false` (decision 61) drops the whole page, `#pagebreak()`
+included. `weave::run` always
+writes `.dankg/build/weave/<name>.typ`, then spawns a configured
+`[weave.pdf] command` (typically `typst compile {typ} {pdf}`) against
+it. Unconfigured, weave still writes the `.typ` and reports that no
+PDF was produced, the same graceful degradation an unconfigured
+`[tangle.*] command` already gets. `--toc`/`--no-toc` control Typst's
+own `#outline()`, placed right after the cover page; HTML's table of
+contents always ships with its in-page toggle instead, so combining
+either flag with `--format html` is a parse error.
+
+## Custom templates
+
+`[weave.pdf] template` names a Typst file `weave::run` reads once and
+concatenates in front of the emitted body, verbatim, before the `.typ`
+is written. A plain-text prepend, deliberately, not a Typst `#import`:
+an `#import`'s own path resolves relative to the *compiled* `.typ`
+under `.dankg/build/weave/`, not to the config that named it, which is
+exactly the mismatch string concatenation has no path to get wrong.
+`[weave.html] css` is the same idea for the HTML backend: a stylesheet
+appended after `WEAVE_CSS` inside the page's own `<style>` tag, rather
+than replacing it. Overriding one rule this way never costs the
+built-in toggle or table styling. Either file missing or unreadable warns and
+is skipped, the same "misconfigured is reported, not fatal" shape
+`Config::load` itself already takes for an unreadable `.dankg/config`.
+
+## Typst's version is never pinned
+
+Typst is still pre-1.0. `render::typst`'s own syntax targets 0.15.1,
+documented in its module doc and confirmed by `tests/typst.rs`'s real
+`typst compile` check, never enforced by a runtime `typst --version`
+check or by linking a Typst crate. Pandoc's own Typst writer and
+Org-mode's LaTeX/`ox-typst` export backends solve the identical "emit
+markup, shell out to compile it" problem the identical way: document a
+target version, let a real incompatibility surface as the compiler's
+own error. `duckdb` already gets exactly this treatment from `[db.*] command` in this codebase.
+
+## Open questions (Weave)
+
+- Corpus-wide weave -- `paths: Vec<String>`, directory walking, the
+  way tangle's decision 26 does it -- is confirmed out of scope for
+  now, not ruled out permanently.
+- Tagging the *captured-stdout* result fence with its own output
+  format automatically (`duckdb -csv` implying a `csv` tag) is still
+  deferred (decision 45): no config key today records what format a
+  `[db.*]`/`[lang.*]` command's output is in. Decisions 50 and 51
+  reach the same practical goal a different way instead -- a block
+  writes its table or image to a real file and declares
+  `produces=file:PATH` by hand, rather than dankg guessing a format
+  from a command string.
+- A reference to a figure in another file. Weave reads one file
+  (decision 41), and decision 64 narrows that for a fragment with no
+  file name in it alone.
+- Labelling a plain markdown table. It is not a figure: `table_block`
+  emits a bare table, the only `kind: table` figure is the
+  produced-artifact path, and a markdown table has no info string to
+  write `caption=` or `artifact=` on. Deferred rather than refused.
+- A list of figures, a references list, or an index. Typst's own
+  `#outline(target: figure)` already builds the first for a reader who
+  asks for it in a template.
+- More than one `produces=file:` artifact per block (decision 50/51) --
+  `InfoString::produces()` returns its whole raw value unsplit, unlike
+  `deps()`/`xdeps()`'s own comma-split. One block, one artifact, for
+  now.
+- Solving the working-directory question (decision 49) for a chain
+  whose concatenated blocks live in more than one directory. The fix
+  covers the single-file case, which is the overwhelming common one.
+- Syntax highlighting in the HTML backend's code blocks is out of
+  scope. Typst gets it for free in the PDF backend; HTML code blocks
+  stay plain `<pre><code>`, the same as the graph page's own
+  conformance oracle.
 
 # File dependencies
 
@@ -3897,7 +4815,7 @@ echo "$contains Contains edges against $link Link edges"
 <!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
 
 ```
-596 Contains edges against 56 Link edges
+921 Contains edges against 72 Link edges
 ```
 
 # Open questions

@@ -5,20 +5,23 @@ digraph dankg {
   node [shape=box, style="rounded,filled", fillcolor="#ffffff", color="#3c3c3c", fontname="Helvetica", fontsize=11];
   edge [color="#707070", arrowsize=0.7];
 
-  "notes/ideas#ideas" [label="Ideas", pos="112,242!", width=1.00, height=0.50, tooltip="notes/ideas.md:4"];
-  "orphan#orphan" [label="orphan", pos="214,242!", width=1.06, height=0.50, tooltip="orphan.md:1"];
-  "project#code-eval" [label="Code Eval", pos="330,242!", width=1.39, height=0.50, tooltip="project.md:14"];
+  "notes/ideas#ideas" [label="Ideas", pos="84,242!", width=1.00, height=0.50, tooltip="notes/ideas.md:4"];
+  "orphan#orphan" [label="orphan", pos="186,242!", width=1.06, height=0.50, tooltip="orphan.md:1"];
+  "project#dankg" [label="DanKG", pos="288,242!", width=1.00, height=0.50, tooltip="project.md:1"];
   "project#overview" [label="Overview", pos="161,142!", width=1.28, height=0.50, tooltip="project.md:5"];
-  "nowhere#lost" [label="lost", pos="330,142!", width=1.00, height=0.50, style="rounded,dashed", color="#a0a0a0", fontcolor="#a0a0a0", tooltip="nowhere#lost (unresolved)"];
+  "project#code-eval" [label="Code Eval", pos="310,142!", width=1.39, height=0.50, tooltip="project.md:14"];
   "notes/ideas#future" [label="Future", pos="62,42!", width=1.06, height=0.50, tooltip="notes/ideas.md:8"];
   "project#constraints" [label="Constraints", pos="186,42!", width=1.61, height=0.50, tooltip="project.md:10"];
-  { rank=same; "notes/ideas#ideas"; "orphan#orphan"; "project#code-eval"; }
-  { rank=same; "project#overview"; "nowhere#lost"; }
-  { rank=same; "notes/ideas#future"; "project#constraints"; }
+  "nowhere#lost" [label="lost", pos="310,42!", width=1.00, height=0.50, style="rounded,dashed", color="#a0a0a0", fontcolor="#a0a0a0", tooltip="nowhere#lost (unresolved)"];
+  { rank=same; "notes/ideas#ideas"; "orphan#orphan"; "project#dankg"; }
+  { rank=same; "project#overview"; "project#code-eval"; }
+  { rank=same; "notes/ideas#future"; "project#constraints"; "nowhere#lost"; }
 
   "notes/ideas#ideas" -> "notes/ideas#future" [weight=2, color="#c0c0c0"];
   "notes/ideas#ideas" -> "project#overview" [dir=none];
   "project#code-eval" -> "nowhere#lost";
+  "project#dankg" -> "project#code-eval" [weight=2, color="#c0c0c0"];
+  "project#dankg" -> "project#overview" [weight=2, color="#c0c0c0"];
   "project#overview" -> "notes/ideas#future";
   "project#overview" -> "project#constraints" [weight=2, color="#c0c0c0"];
   "project#overview" -> "project#constraints" [dir=none];

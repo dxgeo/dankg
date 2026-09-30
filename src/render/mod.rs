@@ -5,3 +5,5 @@ pub mod dot;
 pub mod html;
 pub mod json;
 pub mod mermaid;
+pub mod typst;
+pub mod weave_html;

@@ -61,9 +61,14 @@ pub fn run(paths: &[String], lang: &str, output: Option<&str>, cache: bool) -> R
         }
         _ => {
             let mut diags = Diags::new("dankg");
-            let corpus = index::load(paths, cache, &mut diags)?;
+            // Emitted before the load's own failure propagates: a bare `?`
+            // here returns without emitting, and the warnings `index::load`
+            // collected on its way to failing are exactly the ones that
+            // explain it.
+            let loaded = index::load(paths, cache, &mut diags);
             diags.sort();
             diags.emit();
+            let corpus = loaded?;
 
             // A directory names a corpus. Several explicit files name
             // just themselves. `session::list_corpus_text` already makes

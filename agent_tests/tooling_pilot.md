@@ -83,8 +83,8 @@ variable under test here.
 
 # Results
 
-| | Raw (`deps_pilot.md`) | Literate (`deps_pilot.md`) | Make |
-|---|---|---|---|
+|  | Raw (`deps_pilot.md`) | Literate (`deps_pilot.md`) | Make |
+| --- | --- | --- | --- |
 | Correct (5 stale / 3 safe) | no -- found only 1 stale, 7 safe | yes, exact | no -- found 3 stale, 5 safe |
 | Tool calls | 7 | 9 | 7 |
 | Wall-clock | ~69s | ~42s | ~146s |

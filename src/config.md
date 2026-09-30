@@ -60,10 +60,14 @@ const KNOWN: &[(&str, &[&str])] = &[
 /// program, never DanKG's own code, that adds language-specific structural
 /// glue (Rust's `mod` declarations, say) to the assembled tree before
 /// `command` builds it.
+/// `weave.`'s `command` is optional the same way (decision 44): unconfigured,
+/// `dankg weave --format pdf` still writes the `.typ` source and says so,
+/// the same graceful degradation an unconfigured `[tangle.*] command` gets.
 const FAMILIES: &[(&str, &[&str])] = &[
     ("lang.", &["command", "ext"]),
     ("db.", &["command", "path", "list"]),
     ("tangle.", &["command", "ext", "glue"]),
+    ("weave.", &["command", "template", "css"]),
     ("kind.", &["icon"]),
 ];
 
@@ -203,6 +207,32 @@ pub struct Tangle {
     pub command: Option<String>,
     pub glue: Option<String>,
     pub ext: Option<String>,
+}
+
+/// One `[weave.*]` section (decision 44). `command` is optional, the same
+/// as `Tangle`'s: unconfigured, `dankg weave --format pdf` still writes
+/// the `.typ` source and reports that no PDF was produced, rather than
+/// refusing to run. Two named sections are meaningful today, each using
+/// only some of these fields -- `Db`'s own `path`/`list` split already
+/// set this "one struct, not every field always set" precedent:
+///
+/// - `[weave.pdf] command`/`template`: `command` compiles the `.typ`;
+///   `template` is a path to a Typst preamble `weave::run` concatenates
+///   in front of the emitted body, verbatim, before writing the `.typ`
+///   file. A plain text prepend rather than a Typst `#import` -- an
+///   import's own path resolves relative to the *compiled* `.typ` file
+///   under `.dankg/build/weave/`, not to the config, which is exactly
+///   the mismatch string concatenation has no path to get wrong.
+/// - `[weave.html] css`: a path to CSS appended after `WEAVE_CSS`
+///   inside the page's own `<style>` tag (decision 43). Appended, not
+///   swapped in, so overriding one rule never costs the reader the
+///   built-in table-of-contents toggle or table borders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Weave {
+    pub name: String,
+    pub command: Option<String>,
+    pub template: Option<String>,
+    pub css: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -488,6 +518,21 @@ impl Config {
                 command: s.get("command").map(str::to_string),
                 glue: s.get("glue").map(str::to_string),
                 ext: s.get("ext").map(str::to_string),
+            })
+        })
+    }
+
+    /// `[weave.<name>]`, if configured. Unconfigured, `weave::run` still
+    /// writes the `.typ` and reports no PDF, the same shape `tangle`'s own
+    /// unconfigured `command` already gets (decision 44).
+    pub fn weave(&self, name: &str) -> Option<Weave> {
+        self.sections.iter().find_map(|s| {
+            let n = s.name.strip_prefix("weave.")?;
+            (n == name).then(|| Weave {
+                name: n.to_string(),
+                command: s.get("command").map(str::to_string),
+                template: s.get("template").map(str::to_string),
+                css: s.get("css").map(str::to_string),
             })
         })
     }
@@ -889,6 +934,50 @@ mod tests {
                 glue: Some("dankg-glue-rust {dir}".into()),
                 ext: Some("rs".into()),
             })
+        );
+    }
+
+    #[test]
+    fn weave_sections_parse_with_an_optional_command() {
+        let (c, d) = parse("[weave.pdf]\ncommand = typst compile {typ} {pdf}\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(
+            c.weave("pdf"),
+            Some(Weave {
+                name: "pdf".into(),
+                command: Some("typst compile {typ} {pdf}".into()),
+                template: None,
+                css: None,
+            })
+        );
+        assert_eq!(c.weave("ghost"), None);
+    }
+
+    #[test]
+    fn an_unconfigured_weave_command_is_a_complete_section() {
+        let (c, d) = parse("[weave.pdf]\n");
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(c.weave("pdf"), Some(Weave { name: "pdf".into(), command: None, template: None, css: None }));
+    }
+
+    #[test]
+    fn weave_pdf_template_and_weave_html_css_are_independent_sections() {
+        let (c, d) = parse(
+            "[weave.pdf]\ncommand = typst compile {typ} {pdf}\ntemplate = docs/template.typ\n\n[weave.html]\ncss = docs/theme.css\n",
+        );
+        assert!(d.is_empty(), "{:?}", d.items());
+        assert_eq!(
+            c.weave("pdf"),
+            Some(Weave {
+                name: "pdf".into(),
+                command: Some("typst compile {typ} {pdf}".into()),
+                template: Some("docs/template.typ".into()),
+                css: None,
+            })
+        );
+        assert_eq!(
+            c.weave("html"),
+            Some(Weave { name: "html".into(), command: None, template: None, css: Some("docs/theme.css".into()) })
         );
     }
 

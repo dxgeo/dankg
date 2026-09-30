@@ -4,15 +4,18 @@ flowchart TB
     classDef block fill:#eef2ff,stroke:#3c3c3c
     n0["Ideas"]
     n1["orphan"]
-    n2["Code Eval"]
+    n2["DanKG"]
     n3["Overview"]
-    n4["lost"]
+    n4["Code Eval"]
     n5["Future"]
     n6["Constraints"]
+    n7["lost"]
     n0 ==> n5
     n0 --- n3
-    n2 --> n4
+    n4 --> n7
+    n2 ==> n4
+    n2 ==> n3
     n3 --> n5
     n3 ==> n6
     n3 --- n6
-    class n4 dangling
+    class n7 dangling

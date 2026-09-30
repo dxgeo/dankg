@@ -90,9 +90,13 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool, if_sta
     diags.absorb(cfg_diags);
 
     let mut files = Files::new(root);
-    files.discover(&entry_file, &mut diags)?;
+    // Emitted before discovery's own failure propagates. `diags` already
+    // carries every `[lang.*]`/`[db.*]` config warning by this point, and
+    // a bare `?` here would drop those along with discovery's own.
+    let discovered = files.discover(&entry_file, &mut diags);
     diags.sort();
     diags.emit();
+    discovered?;
 
     // `--if-stale`'s own precheck (below) needs the whole corpus exactly
     // when a chain reaches a `table:` xdep, the same condition `run_one`
@@ -269,9 +273,10 @@ fn run_single(path: &str, target: &EvalTarget, yes: bool, no_write: bool, if_sta
 /// covering everything the reader named.
 fn list(paths: &[String], cache: bool) -> Result<(), String> {
     let mut diags = Diags::new("dankg");
-    let corpus = index::load(paths, cache, &mut diags)?;
+    let loaded = index::load(paths, cache, &mut diags);
     diags.sort();
     diags.emit();
+    let corpus = loaded?;
 
     match list_corpus_text(paths, &corpus) {
         Some(out) => print!("{out}"),
@@ -343,8 +348,11 @@ fn list_blocks(path: &str, blocks: &[BlockRef], doc: &Document, config: &Config)
 /// `table:` xdep -- the common case stays exactly as file-scoped and
 /// cheap as it always was (decision 19). Otherwise, a fresh whole-corpus
 /// `Files` plus its resolved `Graph`, for `xdep_hashes` to resolve a
-/// `table:` entry against.
-fn corpus_graph_if_needed(path: &str, files: Files) -> Result<(Files, Option<Graph>), String> {
+/// `table:` entry against. `pub(crate)`, not private: `weave::warn_stale_pairs`
+/// (decision 47) reuses this exact precheck for its own staleness check,
+/// rather than a second copy of "build a graph only if something actually
+/// needs one."
+pub(crate) fn corpus_graph_if_needed(path: &str, files: Files) -> Result<(Files, Option<Graph>), String> {
     let needs_corpus = files.all_blocks().iter().any(|b| !plan::table_xdeps(b).is_empty());
     if !needs_corpus {
         return Ok((files, None));
@@ -379,8 +387,20 @@ fn corpus_graph_if_needed(path: &str, files: Files) -> Result<(Files, Option<Gra
 /// relative order.
 pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> Result<RunSummary, String> {
     let (root, entry_file) = locate(path);
+    // Decision 49: the spawned process's own working directory, so a
+    // block's relative file access lands where its source file's own
+    // directory would suggest, not wherever `dankg` itself was invoked
+    // from. Computed before `root` moves into `Files::new` below.
+    let dir = root.join(resolve::dir_of(&entry_file));
     let mut diags = Diags::new("dankg");
     let mut files = Files::new(root);
+    // Deliberately never emitted, on either path. `run_single` has
+    // already discovered the same corpus and emitted the identical
+    // diagnostics before it calls this in a loop, so emitting here would
+    // repeat every one of them once per target. The TUI is the other
+    // caller (`tui::eval`), and writing to stderr from inside it would
+    // scribble over the drawn screen. `diags` exists here only because
+    // `discover` requires one.
     files.discover(&entry_file, &mut diags)?;
 
     let (files, graph) = corpus_graph_if_needed(path, files)?;
@@ -411,14 +431,14 @@ pub fn run_one(path: &str, config: &Config, position: usize, no_write: bool) -> 
         // targets (`eval::sql`). Neither signal alone is trustworthy --
         // see `infer_provenance`'s own doc comment.
         let before = eval_run::list_relations(&db, timeout)?;
-        let output = eval_run::run_db(&db, &code, timeout)?;
+        let output = eval_run::run_db(&db, &code, &dir, timeout)?;
         let after = eval_run::list_relations(&db, timeout)?;
         let (produces, reads) = infer_provenance(before, after, &code);
         (output, produces, reads)
     } else {
         let lang = eval_run::command_for(config, &chain)
             .ok_or_else(|| format!("`{name}` has no configured language"))?;
-        let output = eval_run::run(&lang, &code, timeout)?;
+        let output = eval_run::run(&lang, &code, &dir, timeout)?;
         (output, Vec::new(), Vec::new())
     };
 

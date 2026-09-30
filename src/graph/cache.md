@@ -44,9 +44,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAGIC: &str = "!dankg-cache";
-/// Bumped whenever the record format changes. An entry from another version is
-/// a miss, not an error. 2: a node row grew a `kind` field (block nodes).
-const VERSION: u32 = 2;
+/// Bumped whenever the record format changes, or whenever the same bytes
+/// would now build different nodes. An entry from another version is a miss,
+/// not an error. 2: a node row grew a `kind` field (block nodes). 3: a
+/// declared frontmatter `title` became the file's own top-level node
+/// (decision 62), so an unchanged file's node set changed underneath an
+/// entry that still hashes as fresh.
+const VERSION: u32 = 3;
 /// Separates the items of a list field. `escape` guarantees it never survives
 /// inside one, so splitting on it is exact.
 const UNIT: char = '\u{1f}';
@@ -203,6 +207,15 @@ struct Stamp {
 count per kind that `decode` checks strictly. An entry with the wrong
 number of fields for its own row kind is treated exactly like one from a
 stale `VERSION`. It is a miss rather than a crash.
+
+`VERSION` covers a second kind of staleness the `Stamp` cannot. The
+stamp answers "is this file the one I indexed", and a change to how
+`graph::build` reads a file it already indexed leaves every stamp
+field correct while the cached nodes are wrong. Decision 62 was
+exactly that: no byte of any document moved, and a declared
+frontmatter `title` started producing a top-level node it had not
+produced before. A bump is the only thing that invalidates an entry
+whose file genuinely has not changed.
 
 ```rust name=encode path=graph/cache.rs
 fn encode(stamp: &Stamp, file: &ParsedFile, diags: &[Diagnostic]) -> String {

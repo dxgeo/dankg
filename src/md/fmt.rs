@@ -19,7 +19,7 @@
 //! `inline.rs` rather than reimplemented, because an escaper that disagrees
 //! with the parser about flanking silently mangles emphasis.
 
-use super::{Block, Document, Inline, InfoString, List, KNOWN_ATTRS};
+use super::{Align, Block, Document, Inline, InfoString, List, KNOWN_ATTRS};
 use crate::diag::Diags;
 
 /// Render a document to its normal form.
@@ -94,6 +94,9 @@ fn strip_block(b: &Block) -> Block {
                 .collect(),
             line: 0,
         }),
+        Block::Table { aligns, header, rows, .. } => {
+            Block::Table { aligns: aligns.clone(), header: header.clone(), rows: rows.clone(), line: 0 }
+        }
     }
 }
 
@@ -121,6 +124,7 @@ fn block(b: &Block) -> String {
         // bullet inside a list item. `***` is a thematic break everywhere.
         Block::ThematicBreak { .. } => "***\n".to_string(),
         Block::Passthrough { text, .. } => format!("{text}\n"),
+        Block::Table { aligns, header, rows, .. } => table(aligns, header, rows),
     }
 }
 
@@ -138,6 +142,43 @@ fn heading(level: u8, inlines: &[Inline]) -> String {
         text.insert(text.len() - run, '\\');
     }
     format!("{hashes} {text}\n")
+}
+
+fn table(aligns: &[Align], header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
+    let mut out = table_row(header);
+    out.push_str(&delimiter_row(aligns));
+    for r in rows {
+        out.push_str(&table_row(r));
+    }
+    out
+}
+
+fn table_row(cells: &[Vec<Inline>]) -> String {
+    let mut out = String::from("|");
+    for cell in cells {
+        out.push(' ');
+        out.push_str(&inlines_text_cell(cell));
+        out.push_str(" |");
+    }
+    out.push('\n');
+    out
+}
+
+fn delimiter_row(aligns: &[Align]) -> String {
+    let mut out = String::from("|");
+    for a in aligns {
+        let seg = match a {
+            Align::None => "---",
+            Align::Left => ":--",
+            Align::Right => "--:",
+            Align::Center => ":-:",
+        };
+        out.push(' ');
+        out.push_str(seg);
+        out.push_str(" |");
+    }
+    out.push('\n');
+    out
 }
 
 fn code(info: &InfoString, text: &str, fence: char) -> String {
@@ -159,7 +200,11 @@ fn code(info: &InfoString, text: &str, fence: char) -> String {
 /// Canonical info string: language, then known attributes in the order
 /// `KNOWN_ATTRS` declares them, then anything the parser did not recognise, in
 /// the order it was written. Unknown words are ignored everywhere else.
-/// Deleting them would make `fmt` lossy.
+/// Deleting them would make `fmt` lossy. A value containing whitespace
+/// (`caption=`, decision 52) is written back quoted, so re-parsing it
+/// through `parse_info`'s own `cmd::split` tokenizer round-trips to the
+/// identical value; every other known attribute never contains
+/// whitespace today, so this changes nothing about how they render.
 fn info_text(info: &InfoString) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(lang) = &info.lang {
@@ -167,7 +212,11 @@ fn info_text(info: &InfoString) -> String {
     }
     for key in KNOWN_ATTRS {
         if let Some(value) = info.get(key) {
-            parts.push(format!("{key}={value}"));
+            if value.contains(char::is_whitespace) {
+                parts.push(format!("{key}=\"{value}\""));
+            } else {
+                parts.push(format!("{key}={value}"));
+            }
         }
     }
     parts.extend(info.unknown.iter().cloned());
@@ -231,7 +280,20 @@ fn item_text(marker: &str, body: &str, width: usize) -> String {
 }
 
 fn inlines_text(inlines: &[Inline]) -> String {
-    let mut w = Writer { out: String::new(), prev: '\n', line_start: true };
+    let mut w = Writer { out: String::new(), prev: '\n', line_start: true, esc_pipe: false };
+    w.run(inlines, ' ');
+    w.out
+}
+
+/// Render one table cell's own inline content. Unlike `inlines_text`, a
+/// cell never starts a fresh line -- it always follows `| `, mid-line -- so
+/// `line_start` starts `false`. Otherwise a cell beginning with `#`, `-`,
+/// `~`, or the like would be escaped as if it could open a new block, which
+/// it never can from inside a cell. A bare `|` is escaped on the way out
+/// instead: a literal pipe in a cell would otherwise be read back as a new
+/// column boundary on the next parse.
+fn inlines_text_cell(inlines: &[Inline]) -> String {
+    let mut w = Writer { out: String::new(), prev: ' ', line_start: false, esc_pipe: true };
     w.run(inlines, ' ');
     w.out
 }
@@ -242,6 +304,9 @@ struct Writer {
     /// must not change what the flanking rules see.
     prev: char,
     line_start: bool,
+    /// Set only when rendering a table cell (`inlines_text_cell`): escapes a
+    /// bare `|` so it round-trips instead of becoming a new column.
+    esc_pipe: bool,
 }
 
 impl Writer {
@@ -258,6 +323,7 @@ impl Writer {
                 Inline::Strong { delim, inner } => self.wrap(*delim, 2, inner),
                 Inline::Link { dest, title, text } => self.link(dest, title.as_deref(), text),
                 Inline::WikiLink { target, label } => self.wikilink(target, label.as_deref()),
+                Inline::Citation { keys, narrative } => self.citation(keys, *narrative),
                 Inline::SoftBreak => self.newline(""),
                 // The backslash form, not two trailing spaces: trailing
                 // whitespace is exactly what normalizing is supposed to remove.
@@ -313,11 +379,22 @@ impl Writer {
                 // writes an unescaped `[`. A stray `]` in its text would
                 // close it early.
                 '\\' | '`' | '[' | ']' => self.out.push('\\'),
+                '|' if self.esc_pipe => self.out.push('\\'),
                 '*' | '_' => {
                     let (open, close) = super::inline::can_open_close(c, before, after);
                     if open || close {
                         self.out.push('\\');
                     }
+                }
+                // A literal `@` reads back as a bare citation (decision
+                // 57b) unless it is escaped, exactly when the parser's own
+                // `citation_bare` would otherwise trigger on it: not
+                // preceded by a word character, and followed by at least
+                // one real key character.
+                '@' if !(before.is_ascii_alphanumeric() || before == '_')
+                    && super::inline::is_citation_key_char(after) =>
+                {
+                    self.out.push('\\');
                 }
                 _ => {}
             }
@@ -393,6 +470,18 @@ impl Writer {
         };
         self.push(&body);
     }
+
+    /// A bare citation always holds exactly one key (decision 57b) --
+    /// there is no delimiter to bundle a second one the way `[@a; @b]`
+    /// does, so `narrative` never needs more than `keys[0]`.
+    fn citation(&mut self, keys: &[String], narrative: bool) {
+        let body = if narrative {
+            format!("@{}", keys[0])
+        } else {
+            format!("[{}]", keys.iter().map(|k| format!("@{k}")).collect::<Vec<_>>().join("; "))
+        };
+        self.push(&body);
+    }
 }
 
 /// The first character a rendered inline contributes, used as the right-hand
@@ -403,6 +492,8 @@ fn lead_char(i: &Inline) -> char {
         Inline::Code(_) => '`',
         Inline::Emph { delim, .. } | Inline::Strong { delim, .. } => *delim,
         Inline::Link { .. } | Inline::WikiLink { .. } => '[',
+        Inline::Citation { narrative: true, .. } => '@',
+        Inline::Citation { narrative: false, .. } => '[',
         Inline::SoftBreak | Inline::HardBreak => ' ',
     }
 }
@@ -525,6 +616,14 @@ mod tests {
     }
 
     #[test]
+    fn a_caption_with_spaces_round_trips_quoted() {
+        assert_eq!(
+            stable("```python caption=\"Quarterly revenue\"\n```\n"),
+            "```python caption=\"Quarterly revenue\"\n```\n"
+        );
+    }
+
+    #[test]
     fn thematic_breaks_avoid_the_frontmatter_and_bullet_spellings() {
         // `---` at the top of a file would be read back as frontmatter.
         assert_eq!(stable("---\n"), "***\n");
@@ -549,6 +648,39 @@ mod tests {
         assert_eq!(stable("\\# not a heading\n"), "\\# not a heading\n");
         assert_eq!(stable("the year\n1986\\. it was\n"), "the year\n1986\\. it was\n");
         assert_eq!(stable("a \\[bracket\\]\n"), "a \\[bracket\\]\n");
+    }
+
+    #[test]
+    fn table_normalizes_delimiter_spelling() {
+        assert_eq!(
+            stable("A|B\n:-|-:\na|b\n"),
+            "| A | B |\n| :-- | --: |\n| a | b |\n"
+        );
+    }
+
+    #[test]
+    fn ragged_table_row_round_trips_without_padding() {
+        let source = "| A | B |\n| --- | --- |\n| only one |\n";
+        let once = stable(source);
+        assert_eq!(once, "| A | B |\n| --- | --- |\n| only one |\n");
+
+        let mut diags = Diags::new("t.md");
+        let original = Document::parse(source, &mut diags);
+        let mut again = Diags::new("t.md");
+        let reparsed = Document::parse(&once, &mut again);
+        assert_eq!(without_lines(&reparsed), without_lines(&original), "meaning changed");
+    }
+
+    #[test]
+    fn literal_pipe_in_a_cell_round_trips() {
+        let source = "| A |\n| --- |\n| a \\| b |\n";
+        let once = stable(source);
+
+        let mut diags = Diags::new("t.md");
+        let original = Document::parse(source, &mut diags);
+        let mut again = Diags::new("t.md");
+        let reparsed = Document::parse(&once, &mut again);
+        assert_eq!(without_lines(&reparsed), without_lines(&original), "meaning changed");
     }
 
     #[test]
@@ -588,5 +720,25 @@ mod tests {
     fn an_empty_document_stays_empty() {
         assert_eq!(f(""), "");
         assert_eq!(f("\n\n"), "");
+    }
+
+    #[test]
+    fn citations_round_trip() {
+        assert_eq!(stable("[@key]\n"), "[@key]\n");
+        assert_eq!(stable("[@a; @b]\n"), "[@a; @b]\n");
+        assert_eq!(stable("@key\n"), "@key\n");
+        assert_eq!(stable("Cited by @smith2020.\n"), "Cited by @smith2020.\n");
+    }
+
+    #[test]
+    fn an_escaped_at_sign_stays_escaped_so_it_never_becomes_a_citation() {
+        // Without the escape this would read back as a bare citation on the
+        // next parse, changing what the document means.
+        assert_eq!(stable("See \\@handle for updates.\n"), "See \\@handle for updates.\n");
+    }
+
+    #[test]
+    fn an_at_sign_in_an_email_address_needs_no_escaping() {
+        assert_eq!(stable("user@example.com\n"), "user@example.com\n");
     }
 }

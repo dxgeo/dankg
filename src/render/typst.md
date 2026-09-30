@@ -1,0 +1,1665 @@
+# Render typst
+
+`dankg weave --format pdf` never links a PDF library (decision 1). It
+emits Typst markup and spawns a configured external `typst compile`,
+the same external-command shape `cmd::build` already gives `tangle`'s
+own build step. This module is only the markup emitter -- a sibling to
+`dot.rs`/`mermaid.rs`, not a PDF generator. `weave.rs` owns writing the
+`.typ` file and spawning the command; this module only turns a
+`Document` into the text that goes in it.
+
+Weave walks the whole document (plan-weave.md, decision 41), not the
+named/top-level blocks `tangle`/`eval` narrow to. A GFM table (decision
+42\) and a `csv`/`tsv`/`json`-tagged code block (decision 45) both
+become a Typst `#table()`, converging on one internal `emit_table` so
+the two sources share one code path and one set of tests. A block
+outside DanKG's markdown subset -- `Block::Passthrough` -- is emitted
+as escaped literal text, never as raw Typst: an unparsed construct must
+never become unvalidated markup.
+
+Typst is still pre-1.0. Its own syntax has changed between releases
+before. This module has no way to pin one. `weave.rs` spawns whatever
+`typst` binary the reader's own `[weave.pdf] command` configures --
+the same trust boundary `[db.*] command` already gives `duckdb`. Pandoc's own Typst writer and Org-mode's export backends
+solve the identical problem the identical way: emit text, shell out to
+compile it, document a target version, and let a real incompatibility
+surface as the compiler's own error rather than a runtime check this
+module would otherwise have to maintain. The syntax below was written
+and tested against Typst 0.15.1, confirmed by `tests/typst.rs`'s own
+real-compile check.
+
+```rust name=module_doc path=render/typst.rs
+//! Typst markup emitter for `dankg weave --format pdf`.
+//!
+//! Emits Typst source only -- never a PDF, never links a Typst library.
+//! `weave.rs` spawns a configured external `typst compile` against what
+//! this module writes, the same escape hatch `cmd::build` already gives
+//! `tangle`'s own build step.
+//!
+//! Walks the whole document, not just named/top-level blocks. A GFM table
+//! and a `csv`/`tsv`/`json`-tagged code block both become a Typst
+//! `#table()`, converging on one `emit_table` so the two sources share one
+//! code path.
+//!
+//! The document's own frontmatter renders on a dedicated cover page, not
+//! inline with the outline and body -- see this file's own *Cover page*
+//! prose for why. Frontmatter's own `cover: false` turns that page off
+//! entirely; `cover: true` is the default shape, already what a document
+//! with no `cover` key at all gets.
+//!
+//! Targets Typst 0.15.1's syntax (confirmed by `tests/typst.rs`'s own
+//! real-compile check). Typst is still pre-1.0; no `typst --version`
+//! check guards this, the same as `duckdb` gets none from `[db.*]
+//! command` -- see this file's own prose for why.
+
+use crate::data::table::{self, TableData};
+use crate::diag::Diags;
+use crate::eval::result::{self, Pair};
+use crate::md::{Align, Block, Document, Frontmatter, InfoString, Inline, List, Value};
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+
+/// What `render` needs to resolve a citation against, decoupled from
+/// `weave.rs`'s own full `Bibliography` (decision 59) the same way
+/// `render_pdf`'s copied image path is decoupled from the image bytes
+/// (decision 51): this module only ever emits markup, never touches a
+/// filesystem or an entry's own fields beyond its key.
+pub struct BibliographySummary {
+    /// Every entry's own citation key -- checked before Typst's own compile
+    /// step would report the identical problem, redundantly but earlier.
+    pub valid_keys: HashSet<String>,
+    /// The path `#bibliography(...)` reads, root-relative to the `.typ`
+    /// file -- `render_pdf` has already written the real file there.
+    pub asset_path: String,
+}
+
+/// `title` becomes the cover page's own large centered heading, with the
+/// rest of the document's frontmatter printed beneath it, unless
+/// frontmatter's own `cover: false` (decision 61) drops that page and
+/// leaves the document's own first heading to carry the title instead.
+/// `#outline()`
+/// (Typst's table of contents) is inserted right after the page break
+/// that follows only when `toc` is true -- a PDF has no runtime to
+/// toggle one, so the choice is made once, at compile time, unlike the
+/// HTML backend's own in-page toggle. `tables` (decision 50) names
+/// which recognized pairs' `produces=file:` artifact was read off disk
+/// as a table, keyed by the source block's own index. `images`
+/// (decision 51) is the same idea for an image artifact -- its bytes
+/// are never used here, only the root-relative path `render_pdf`
+/// already copied it to under `assets/`, since this module only ever
+/// emits markup. `figures_outside` (decision 56) is `dankg weave`'s
+/// own `--figures-inside`/`--figures-outside` default, read at the
+/// one place a recognized pair's own captioned artifact places its
+/// figure; a block's own `figure=` attribute overrides it there.
+pub fn render(
+    doc: &Document,
+    title: &str,
+    toc: bool,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
+    slugs: &HashMap<u32, String>,
+    refs: &HashMap<String, String>,
+    figures_outside: bool,
+    bibliography: Option<&BibliographySummary>,
+    diags: &mut Diags,
+) -> String {
+    let mut out = match doc.frontmatter.cover() {
+        Some(false) => String::new(),
+        _ => cover_page(title, &doc.frontmatter),
+    };
+    if toc {
+        out.push_str("#outline()\n\n");
+    }
+    out.push_str(&blocks(&doc.blocks, tables, images, labels, slugs, refs, figures_outside, bibliography, diags));
+    // Unconditionally at the end, never at the `hayagriva` fence's own
+    // position (decision 59) -- the same fixed structural placement the
+    // cover page and outline above already get.
+    if let Some(bib) = bibliography {
+        let _ = write!(out, "\n#bibliography(\"{}\")\n", escape_typst_string(&bib.asset_path));
+    }
+    out
+}
+```
+
+## Cover page
+
+A dedicated title page, not a `= title` heading inline with the rest
+of the document. The alternative -- what this replaced -- put the
+title directly in front of the outline and the body, which duplicated
+it visibly whenever a file's own frontmatter `title` matched its first
+real heading (a common pattern: many static-site generators expect
+exactly this, a frontmatter title standing in for a stripped `<h1>`).
+A separate page, ended with `#pagebreak()`, has no such collision --
+the document's own first heading is free to repeat the title without
+looking like a mistake.
+
+Free to, but not made to. Frontmatter's own `cover` key (decision 61)
+settles it. `cover: true` keeps this page, and has `weave.rs` drop
+the repeated heading before either backend sees the document.
+`cover: false` drops this page instead, and the repeated heading
+carries the title alone. No `cover` key at all is what every document
+written before the key existed gets: the page, the repeated heading,
+and neither one touched.
+
+```rust name=cover_page path=render/typst.rs
+fn cover_page(title: &str, frontmatter: &Frontmatter) -> String {
+    let mut out = String::new();
+    out.push_str("#align(center)[\n");
+    out.push_str("#v(1fr)\n\n");
+    let _ = write!(out, "#text(size: 28pt, weight: \"bold\")[{}]\n\n", escape_typst(title));
+    if let Some(author) = author_line(frontmatter) {
+        let _ = write!(out, "#text(size: 14pt)[{author}]\n\n");
+    }
+    if let Some(date) = date_line(frontmatter) {
+        let _ = write!(out, "#text(size: 12pt, fill: gray)[{date}]\n\n");
+    }
+    for line in frontmatter_lines(frontmatter) {
+        let _ = write!(out, "#text(size: 12pt, fill: gray)[{line}]\n\n");
+    }
+    out.push_str("#v(1fr)\n");
+    out.push_str("]\n#pagebreak()\n\n");
+    out
+}
+```
+
+Five frontmatter keys never print as a generic labeled line, in
+frontmatter's own declared order otherwise: `title` (already the
+page's own large heading), `author` (its own unlabeled byline, right
+beneath the title), `date` (its own unlabeled line beneath that, a
+real Typst date rather than raw text -- see below), and any `dankg.*`
+key, `bibliography`, or `cover`, none of the three ever meant for a
+reader -- an internal hint (decision 27's `dankg.tangle.public`,
+say), a directive naming a data file (decision 58), or a directive
+naming this very page (decision 61), not reader-facing content any of
+the three ways.
+Nothing else is assumed about what a corpus author's frontmatter
+contains. DanKG's own frontmatter has no fixed schema
+(`md/frontmatter.rs`'s own "flat key: value subset"). The cover page
+does not invent one either: whatever key a reader wrote is whatever
+label they see.
+
+```rust name=cover_frontmatter path=render/typst.rs
+const NON_GENERIC_FRONTMATTER_KEYS: &[&str] = &["title", "author", "date", "bibliography", "cover"];
+
+fn frontmatter_lines(frontmatter: &Frontmatter) -> Vec<String> {
+    frontmatter
+        .entries
+        .iter()
+        .filter(|(k, _)| !NON_GENERIC_FRONTMATTER_KEYS.contains(&k.as_str()) && !k.starts_with("dankg."))
+        .map(|(k, v)| format!("{}: {}", humanize_key(k), frontmatter_value_text(v)))
+        .collect()
+}
+
+/// `author`'s own byline, joined the identical comma-separated way every
+/// other list-valued frontmatter key already is on this same page --
+/// `tags: [a, b]` reads as "Tags: a, b". `author: [a, b]` reads as "a,
+/// b" beneath the title the same way, not a different join convention
+/// of its own.
+fn author_line(frontmatter: &Frontmatter) -> Option<String> {
+    frontmatter.entries.iter().find(|(k, _)| k == "author").map(|(_, v)| frontmatter_value_text(v))
+}
+
+/// `date`'s own line, a real Typst `datetime` reader-facing date rather
+/// than raw text -- `2026-09-18` reads as "September 18, 2026", built by
+/// Typst's own formatter (decision 1: no date-handling crate here to do
+/// it instead). `Frontmatter::date_parts` already rejected anything that
+/// is not `YYYY`/`YYYY-MM`/`YYYY-MM-DD`. That raw text still deserves a
+/// line of its own rather than silently disappearing. It falls back to
+/// the same generic scalar-or-list text every other key gets.
+fn date_line(frontmatter: &Frontmatter) -> Option<String> {
+    let value = frontmatter.entries.iter().find(|(k, _)| k == "date").map(|(_, v)| v)?;
+    match frontmatter.date_parts() {
+        Some((year, month, day)) => Some(typst_date_display(year, month, day)),
+        None => Some(frontmatter_value_text(value)),
+    }
+}
+
+fn typst_date_display(year: u32, month: Option<u32>, day: Option<u32>) -> String {
+    match (month, day) {
+        (Some(m), Some(d)) => format!(
+            "#datetime(year: {year}, month: {m}, day: {d}).display(\"[month repr:long] [day padding:none], [year]\")"
+        ),
+        (Some(m), None) => {
+            format!("#datetime(year: {year}, month: {m}, day: 1).display(\"[month repr:long] [year]\")")
+        }
+        (None, _) => year.to_string(),
+    }
+}
+
+fn frontmatter_value_text(v: &Value) -> String {
+    match v {
+        Value::Scalar(s) => escape_typst(s),
+        Value::List(items) => items.iter().map(|s| escape_typst(s)).collect::<Vec<_>>().join(", "),
+    }
+}
+
+fn humanize_key(key: &str) -> String {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+```
+
+## Blocks
+
+Every block in document order, joined by a blank line -- Typst reads a
+blank line as a paragraph break the same way markdown does. A block
+outside the subset is escaped literal text; an unparsed construct must
+never become unvalidated Typst markup.
+
+A code block tagged `weave=hidden` (decision 48) contributes nothing:
+no text, no separator blank line either, as if it were never in the
+document at all. It is a weave-only rendering hint. `dankg tangle`
+and `dankg eval` never look at it. A hidden block still tangles and
+still evaluates exactly as it would without the tag.
+
+A recognized pair (decision 46) can also hide just one of its own two
+halves (decision 53). `weave=source-hidden` drops the source's own
+`code_or_data_table` call but renders its output, artifact, and
+provenance exactly as before. `weave=output-hidden` drops that entire
+second half -- output, artifact, and provenance together -- and
+renders the source exactly as before. Both read the same `weave=`
+attribute `weave_hidden()` already reads, so a block can only ever
+ask for one of the three: hiding both halves is already
+`weave=hidden`.
+
+A named `Code` block immediately followed by its own recorded
+`<!-- dankg:result ... -->` marker and output fence (decision 46)
+renders as one `#block(...)`-wrapped unit instead of three unrelated
+blocks. The marker itself is never emitted as text;
+`eval::result::recognize_pair` reads it as data, not markup.
+
+<!-- dankg:depends target=../../architecture.md#decision-46-a-recorded-eval-result-renders-paired-with-its-source quote="The marker itself is never rendered as text again." -->
+
+A stale result (decision 47) changes nothing here. Staleness is
+reported to stderr by `weave::warn_stale_pairs`, never folded into
+the rendered document -- the woven page stays a pure function of the
+one file's own content, not of whatever state a `deps=`/`xdeps=`
+chain happens to be in elsewhere when weave runs.
+
+A produced table (decision 50) is different: `tables`, keyed by the
+same source block index, is real content the block actually wrote,
+not an editorial judgment about trustworthiness. It renders inside
+the pair whenever present, through the identical `code_or_data_table`
+below a `csv`/`json` fence's own inline content already goes through.
+A produced image (decision 51) is the same idea for `images`; the
+bytes themselves stay unused here, since `#image(...)` only ever
+needs the path `render_pdf` already copied the real file to.
+
+A reader-authored `caption=` (decision 52) overrides whichever
+caption is the pair's own payload: the artifact's, when a table or
+image is present, otherwise the eval result's own `Output`/`Output (failed)` label. It replaces one caption, never both, so a pair with
+both a captured stdout line and a produced chart never repeats the
+same caption twice.
+
+An artifact with a caption (decision 54) is wrapped in a real
+`#figure(caption: [...])` rather than a bare `#text(...)` line beside
+raw content. Both kinds are declared: `kind: table` for a table,
+`kind: image` for an image. Typst infers `kind: image` from a lone
+`#image(...)` body anyway. Declaring it changes nothing Typst
+typesets. A real compile confirms that. The table counter and the
+image counter stay separate either way. It is declared because the
+inference is a guess about a body. That guess holds only while there
+are exactly two artifact shapes. Anything outside Typst that has to
+know a figure's kind reads a declaration this file made, instead of
+reproducing Typst's own inference and drifting from it. This is what
+gives a reader genuine, automatic "Table N"/"Figure N" numbering:
+`#figure`'s own counter, not anything counted here. Its own caption position -- Typst's own default puts a
+figure's caption below its content for every kind -- is left to
+whatever `[weave.pdf] template` sets via `#show figure.where(kind: table): set figure.caption(position: top)`, the conventional
+table-above, figure-below split. An artifact with no caption at all
+(`caption()` and `produces()` both absent) renders its raw content
+unwrapped, exactly as before -- there is nothing for `#figure` to
+caption.
+
+Where that figure sits relative to the pair's own block --
+`figures_outside`'s own concern (decision 56), decoupled from the
+caption-position question above -- is resolved once per block:
+`source_info.figure_outside()`'s own `figure=inside`/`figure=outside`
+when present, otherwise the document-wide default `dankg weave`'s
+own `--figures-inside`/`--figures-outside` already resolved.
+
+```rust name=blocks_and_block path=render/typst.rs
+/// A named `Code` block immediately followed by its recorded eval
+/// result (decision 46) is recognized here, before `block` ever sees
+/// it, and consumed as one unit -- three `Block`s in `items`, one
+/// `#block(...)` in the output. Anything else falls through to `block`
+/// exactly as before. Filtered before joining, not rendered-then-
+/// discarded: a hidden block (decision 48), paired or not, contributes
+/// no blank-line separator either, the same as if it were never in
+/// `items` at all.
+fn blocks(
+    items: &[Block],
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
+    slugs: &HashMap<u32, String>,
+    refs: &HashMap<String, String>,
+    figures_outside: bool,
+    bibliography: Option<&BibliographySummary>,
+    diags: &mut Diags,
+) -> String {
+    let mut rendered = Vec::new();
+    let mut i = 0;
+    while i < items.len() {
+        if let Block::Code { info, text, line, .. } = &items[i] {
+            if let Some(pair) = result::recognize_pair(items, i) {
+                if !info.weave_hidden() {
+                    rendered.push(eval_pair(
+                        info,
+                        text,
+                        *line,
+                        &pair,
+                        tables.get(&i),
+                        images.get(&i),
+                        labels.get(&i).map(String::as_str),
+                        figures_outside,
+                        diags,
+                    ));
+                }
+                i += 3;
+                continue;
+            }
+        }
+        if let Some(s) = block(&items[i], tables, images, labels, slugs, refs, figures_outside, bibliography, diags) {
+            rendered.push(s);
+        }
+        i += 1;
+    }
+    rendered.join("\n")
+}
+
+fn block(
+    b: &Block,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
+    slugs: &HashMap<u32, String>,
+    refs: &HashMap<String, String>,
+    figures_outside: bool,
+    bibliography: Option<&BibliographySummary>,
+    diags: &mut Diags,
+) -> Option<String> {
+    Some(match b {
+        Block::Heading { level, inlines, line, .. } => {
+            let eq = "=".repeat((*level).clamp(1, 6) as usize);
+            let anchor = slugs.get(line).map(|s| format!(" <sec:{s}>")).unwrap_or_default();
+            format!("{eq} {}{anchor}\n", inline_text(inlines, refs, bibliography))
+        }
+        Block::Paragraph { inlines, .. } => format!("{}\n", inline_text(inlines, refs, bibliography)),
+        // A lone block has no separate output half, so `source-hidden`
+        // has nothing left to preserve and hides it too, the same as
+        // `hidden` (decision 53).
+        Block::Code { info, .. } if info.weave_hidden() || info.weave_source_hidden() => return None,
+        Block::Code { info, text, line, .. } => code_or_data_table(info, text, *line, diags),
+        Block::List(l) => list(l, tables, images, labels, slugs, refs, figures_outside, bibliography, diags),
+        Block::ThematicBreak { .. } => "#line(length: 100%)\n".to_string(),
+        Block::Passthrough { text, .. } => format!("{}\n", escape_typst(text)),
+        Block::Table { aligns, header, rows, .. } => table_block(aligns, header, rows, refs, bibliography),
+    })
+}
+
+/// The `#block(stroke: ...)` decision 46 wraps a source block and its
+/// recorded output in. `failed` alone picks the stroke color and the
+/// caption text -- one flag, not two independent things that could
+/// disagree. `table`/`image` (decisions 50/51), when present, are the
+/// source block's own `produces=file:` artifact, already resolved.
+/// A block declares at most one `produces=file:` today, so at most
+/// one of the two is ever `Some`. `weave=source-hidden`/
+/// `weave=output-hidden` (decision 53) each drop one of the block's
+/// own two halves; a custom `caption=` (decision 52) only ever
+/// changes the *other* half's own text, since a half that is not
+/// rendered has no caption to override. A captioned artifact's own
+/// `#figure(...)` either splices into `body` before this block is
+/// formatted, or gets appended *after* it closes, depending on
+/// `figure_outside` (decision 56) -- see `eval_pair_result`'s own doc
+/// comment for how that gets resolved.
+fn eval_pair(
+    source_info: &InfoString,
+    source_text: &str,
+    source_line: u32,
+    pair: &Pair,
+    table: Option<&(String, String)>,
+    image: Option<&(Vec<u8>, String)>,
+    label: Option<&str>,
+    figures_outside: bool,
+    diags: &mut Diags,
+) -> String {
+    let color = if pair.failed { "red" } else { "gray" };
+    let mut body = String::new();
+    if !source_info.weave_source_hidden() {
+        body.push_str(&code_or_data_table(source_info, source_text, source_line, diags));
+    }
+    let mut figure = String::new();
+    if !source_info.weave_output_hidden() {
+        eval_pair_result(&mut body, &mut figure, source_info, pair, table, image, label, source_line, diags);
+    }
+    let figure_outside = source_info.figure_outside().unwrap_or(figures_outside);
+    if !figure_outside {
+        body.push_str(&figure);
+        figure.clear();
+    }
+    // Hiding both halves can leave nothing to wrap. An empty stroked
+    // block is a visible artifact of its own -- a rule beside blank
+    // space -- so it is dropped rather than emitted, leaving whatever
+    // figure the pair produced standing on its own.
+    let mut out = if body.trim().is_empty() {
+        String::new()
+    } else {
+        format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]\n")
+    };
+    out.push_str(&figure);
+    out
+}
+
+/// The pair's own result half: the captured output and its
+/// provenance line go into `body`, inside decision 46's own stroked
+/// block, always. A captioned artifact (decision 54) is built into
+/// `figure` regardless -- [`eval_pair`] is the one place that decides
+/// whether `figure` ends up spliced into `body` before the block
+/// closes, or appended after it as a sibling (decision 56), by
+/// resolving `source_info.figure_outside()`'s own `figure=inside`/
+/// `figure=outside` against `dankg weave`'s own document-wide
+/// `--figures-inside`/`--figures-outside` default. Building `figure`
+/// here regardless of where it lands keeps this function ignorant of
+/// that choice entirely -- one function, one job, not a second copy
+/// of the figure-building logic per placement. An uncaptioned
+/// artifact is not a real figure at all (decision 54's own
+/// unwrapped-fallback case) and stays in `body` unconditionally --
+/// there is no figure for a placement choice to apply to.
+fn eval_pair_result(
+    body: &mut String,
+    figure: &mut String,
+    source_info: &InfoString,
+    pair: &Pair,
+    table: Option<&(String, String)>,
+    image: Option<&(Vec<u8>, String)>,
+    label: Option<&str>,
+    source_line: u32,
+    diags: &mut Diags,
+) {
+    let color = if pair.failed { "red" } else { "gray" };
+    let has_artifact = table.is_some() || image.is_some();
+    let output_caption = match source_info.caption() {
+        Some(c) if !has_artifact => {
+            if pair.failed { format!("{c} (failed)") } else { c.to_string() }
+        }
+        _ => (if pair.failed { "Output (failed)" } else { "Output" }).to_string(),
+    };
+    if !hides_output(source_info, pair) {
+        let _ = write!(body, "\n#text(size: 9pt, fill: {color})[{output_caption}]\n\n");
+        body.push_str(&code_or_data_table(pair.output_info, pair.output_text, pair.output_line, diags));
+    }
+    let anchor = label.map(|l| format!(" <fig:{l}>")).unwrap_or_default();
+    if let Some((lang, content)) = table {
+        let info = InfoString { lang: Some(lang.clone()), ..Default::default() };
+        let content_markup = code_or_data_table(&info, content, source_line, diags);
+        match source_info.caption().or_else(|| source_info.produces()) {
+            Some(caption) => {
+                let _ = write!(
+                    figure,
+                    "\n#figure(kind: table, caption: [{}])[\n{content_markup}]{anchor}\n\n",
+                    escape_typst(caption)
+                );
+            }
+            None => body.push_str(&content_markup),
+        }
+    }
+    if let Some((_, resolved)) = image {
+        let image_markup = format!("#image(\"assets/{}\")\n", escape_typst_string(resolved));
+        match source_info.caption().or_else(|| source_info.produces()) {
+            Some(caption) => {
+                let _ = write!(
+                    figure,
+                    "\n#figure(kind: image, caption: [{}])[\n{image_markup}]{anchor}\n\n",
+                    escape_typst(caption)
+                );
+            }
+            None => body.push_str(&image_markup),
+        }
+    }
+    if !hides_output(source_info, pair) {
+        if let Some(p) = provenance_text(pair) {
+            let _ = write!(body, "\n#text(size: 9pt, fill: gray)[{}]\n", escape_typst(&p));
+        }
+    }
+}
+
+/// Whether a block's own recorded output half -- the caption, the
+/// captured text, and the provenance line -- is dropped from the page
+/// (decision 53). A block that hides its source is asking to be seen
+/// as its artifact alone, so the captured text goes with it. The
+/// artifact itself is untouched: [`eval_pair_result`] still runs and
+/// still builds `figure`, which is what separates `source-hidden` from
+/// `output-hidden` -- the latter returns before the figure is built
+/// and so drops it as well.
+///
+/// A failed run is never hidden, whichever flag is set. Hiding a half
+/// is a statement about a working block's own typeset shape, not a
+/// licence to swallow an error: a reader given a page with no trace
+/// of the failure has no way to know the artifact above it is stale.
+fn hides_output(info: &InfoString, pair: &Pair) -> bool {
+    !pair.failed && info.weave_source_hidden()
+}
+
+/// `produces`/`reads` (decision 33), when either is non-empty, is the
+/// only way a reader of typeset output can see what a `db=` block's
+/// run actually touched.
+fn provenance_text(pair: &Pair) -> Option<String> {
+    if pair.produces.is_empty() && pair.reads.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !pair.produces.is_empty() {
+        parts.push(format!("writes: {}", pair.produces.join(", ")));
+    }
+    if !pair.reads.is_empty() {
+        parts.push(format!("reads: {}", pair.reads.join(", ")));
+    }
+    Some(parts.join(" -- "))
+}
+
+fn list(
+    l: &List,
+    tables: &HashMap<usize, (String, String)>,
+    images: &HashMap<usize, (Vec<u8>, String)>,
+    labels: &HashMap<usize, String>,
+    slugs: &HashMap<u32, String>,
+    refs: &HashMap<String, String>,
+    figures_outside: bool,
+    bibliography: Option<&BibliographySummary>,
+    diags: &mut Diags,
+) -> String {
+    let marker = if l.ordered { "+" } else { "-" };
+    let mut out = String::new();
+    for item in &l.items {
+        let body = blocks(&item.blocks, tables, images, labels, slugs, refs, figures_outside, bibliography, diags);
+        for (i, line) in body.lines().enumerate() {
+            if i == 0 {
+                out.push_str(marker);
+                out.push(' ');
+            } else {
+                out.push_str("  ");
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+```
+
+## Code: a raw block, or a data table
+
+A block's own language tag decides, never its content (plan-weave.md,
+decision 45: "content is never inspected before the tag says to"). A
+`csv`/`tsv` block always becomes a table -- `data::table::from_delimited`
+cannot fail. A `json` block becomes one when `from_json` recognizes its
+shape; otherwise it falls back to an ordinary raw block, with a
+diagnostic, the same graceful degradation an unconfigured
+`[weave.pdf] command` already gets elsewhere in weave.
+
+```rust name=code_and_data_table path=render/typst.rs
+fn code_or_data_table(info: &InfoString, text: &str, line: u32, diags: &mut Diags) -> String {
+    match info.lang.as_deref() {
+        Some("csv") => data_table_block(&table::from_delimited(text, ',')),
+        Some("tsv") => data_table_block(&table::from_delimited(text, '\t')),
+        Some("json") => match table::from_json(text) {
+            Some(data) => data_table_block(&data),
+            None => {
+                diags.warn(
+                    line,
+                    "`json` block is not an array of objects or an array of arrays; rendered as code",
+                );
+                code_block(info, text)
+            }
+        },
+        _ => code_block(info, text),
+    }
+}
+
+fn code_block(info: &InfoString, text: &str) -> String {
+    let lang = info.lang.as_deref().unwrap_or("");
+    let len = longest_run(text, '`').max(2) + 1;
+    let bar: String = "`".repeat(len);
+    let mut out = format!("{bar}{lang}\n{text}");
+    if !text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&bar);
+    out.push('\n');
+    out
+}
+
+fn data_table_block(data: &TableData) -> String {
+    let columns = data.header.len();
+    let header: Vec<String> = data.header.iter().map(|c| escape_typst(c)).collect();
+    let rows: Vec<Vec<String>> = data
+        .rows
+        .iter()
+        .map(|r| {
+            let mut cells: Vec<String> = r.iter().map(|c| escape_typst(c)).collect();
+            cells.resize(columns, String::new());
+            cells
+        })
+        .collect();
+    emit_table(columns, Some(&header), &rows, None)
+}
+```
+
+## Tables
+
+`table_block` is the GFM path (decision 42): a ragged data row --
+never padded by the parser or by `fmt`, decision 42's own round-trip
+requirement -- is rectangled here, the one place padding has no
+round-trip obligation to satisfy. `emit_table` is the shared tail both
+this and `data_table_block` above call into. A GFM table and a
+`csv`-tagged block emit through one code path.
+
+```rust name=table path=render/typst.rs
+fn table_block(
+    aligns: &[Align],
+    header: &[Vec<Inline>],
+    rows: &[Vec<Vec<Inline>>],
+    refs: &HashMap<String, String>,
+    bibliography: Option<&BibliographySummary>,
+) -> String {
+    let columns = header.len();
+    let header_cells: Vec<String> = header.iter().map(|c| inline_text(c, refs, bibliography)).collect();
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| {
+            let mut cells: Vec<String> = r.iter().map(|c| inline_text(c, refs, bibliography)).collect();
+            cells.resize(columns, String::new());
+            cells
+        })
+        .collect();
+    emit_table(columns, Some(&header_cells), &rows, Some(aligns))
+}
+
+/// `header`/`rows` cells are already-rendered Typst markup, one `[cell]`
+/// content block apiece. `aligns` is `None` for a CSV/JSON-sourced table --
+/// it carries no alignment of its own, so every column takes Typst's own
+/// `auto`, never an invented one.
+fn emit_table(columns: usize, header: Option<&[String]>, rows: &[Vec<String>], aligns: Option<&[Align]>) -> String {
+    if columns == 0 {
+        return String::new();
+    }
+    let mut out = format!("#table(\n  columns: {columns},\n");
+    if let Some(aligns) = aligns {
+        let list: Vec<&str> =
+            (0..columns).map(|i| typst_align(aligns.get(i).copied().unwrap_or(Align::None))).collect();
+        out.push_str(&format!("  align: ({}),\n", list.join(", ")));
+    }
+    if let Some(header) = header {
+        out.push_str("  table.header(");
+        out.push_str(&bracketed(header));
+        out.push_str("),\n");
+    }
+    for row in rows {
+        out.push_str("  ");
+        out.push_str(&bracketed(row));
+        out.push_str(",\n");
+    }
+    out.push_str(")\n");
+    out
+}
+
+fn bracketed(cells: &[String]) -> String {
+    cells.iter().map(|c| format!("[{c}]")).collect::<Vec<_>>().join(", ")
+}
+
+fn typst_align(a: Align) -> &'static str {
+    match a {
+        Align::Left => "left",
+        Align::Right => "right",
+        Align::Center => "center",
+        Align::None => "auto",
+    }
+}
+```
+
+## Inline text
+
+One escaper for markup content (`#`, `*`, `_`, `` ` ``, `<`, `@`, `$`,
+`\`) and a second, narrower one for a Typst string literal (`"`, `\`
+only). A link's own destination sits inside `#link("...")`'s quotes,
+not in markup position. It needs the string escaper, not the markup
+one.
+
+A same-file fragment resolves here (decision 64), against the map
+`weave::references` already built. A bare reference becomes `@label`,
+whose text Typst counts for itself. A labelled one becomes
+`#link(<label>)[text]`. Both forms reach the `Link` arm too, since a
+fragment destination is the same reference written another way. A
+wikilink naming another file still renders as its own plain text,
+which is decision 41's own single-file scope unchanged.
+
+Nothing here has a failure path. `weave::run` refuses to render a
+document holding a reference that does not resolve. This file is only
+ever handed ones that do.
+
+<!-- dankg:depends target=../../architecture.md#decision-64-a-same-file-wikilink-resolves-against-whatever-the-document-holds quote="`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads." -->
+
+```rust name=inline_text path=render/typst.rs
+fn inline_text(
+    inlines: &[Inline],
+    refs: &HashMap<String, String>,
+    bibliography: Option<&BibliographySummary>,
+) -> String {
+    let mut out = String::new();
+    for i in inlines {
+        match i {
+            Inline::Text(t) => out.push_str(&escape_typst(t)),
+            Inline::Code(t) => out.push_str(&code_span(t)),
+            Inline::Emph { inner, .. } => {
+                out.push('_');
+                out.push_str(&inline_text(inner, refs, bibliography));
+                out.push('_');
+            }
+            Inline::Strong { inner, .. } => {
+                out.push('*');
+                out.push_str(&inline_text(inner, refs, bibliography));
+                out.push('*');
+            }
+            // A fragment destination is a same-file reference (decision
+            // 64) and resolves to a real label reference, not to the URL
+            // link the literal string would otherwise become. `refs` has
+            // already resolved it: `weave::run` refuses to render a
+            // document holding one that does not.
+            Inline::Link { dest, text, .. } => match dest.strip_prefix('#').and_then(|f| refs.get(f)) {
+                Some(anchor) => {
+                    let _ = write!(out, "#link(<{anchor}>)[{}]", inline_text(text, refs, bibliography));
+                }
+                None => {
+                    out.push_str("#link(\"");
+                    out.push_str(&escape_typst_string(dest));
+                    out.push_str("\")[");
+                    out.push_str(&inline_text(text, refs, bibliography));
+                    out.push(']');
+                }
+            },
+            // A same-file fragment resolves (decision 64). A bare one
+            // becomes `@label`, whose text is Typst's own counted
+            // "Figure 3"/"Section 2". A labelled one becomes a link
+            // carrying the author's own words. A wikilink naming another
+            // file still renders as its own plain text: weave is
+            // single-file (decision 41), and there is no corpus to
+            // resolve that against.
+            Inline::WikiLink { target, label } => {
+                match target.strip_prefix('#').and_then(|f| refs.get(f)) {
+                    Some(anchor) => match label {
+                        Some(text) => {
+                            let _ = write!(out, "#link(<{anchor}>)[{}]", escape_typst(text));
+                        }
+                        None => {
+                            let _ = write!(out, "@{anchor}");
+                        }
+                    },
+                    None => out.push_str(&escape_typst(label.as_deref().unwrap_or(target))),
+                }
+            }
+            // No bibliography configured at all: the literal source text,
+            // escaped exactly like ordinary prose, so a bare `@key` never
+            // reaches the Typst compiler as real citation syntax with
+            // nothing to resolve it against (decision 59).
+            Inline::Citation { keys, narrative } if bibliography.is_none() => {
+                out.push_str(&escape_typst(&citation_source(keys, *narrative)));
+            }
+            // A bibliography exists: real Typst citation syntax goes out.
+            // Every key reaching here resolves, because decision 66 has
+            // `weave::bibliography` fail the weave on one the bibliography
+            // does not carry, at that key's own line. So `valid_keys` is
+            // not consulted again here, and this arm cannot hand Typst a
+            // key it will refuse.
+            Inline::Citation { keys, narrative } => {
+                if *narrative {
+                    let _ = write!(out, "#cite(<{}>, form: \"prose\")", keys[0]);
+                } else {
+                    out.push_str(&keys.iter().map(|k| format!("@{k}")).collect::<Vec<_>>().join(" "));
+                }
+            }
+            Inline::SoftBreak => out.push(' '),
+            Inline::HardBreak => out.push_str("#linebreak()\n"),
+        }
+    }
+    out
+}
+
+/// A citation's own original source text -- `[@a; @b]` or `@key` -- shared
+/// by every fallback path that has nothing to resolve a key against yet.
+fn citation_source(keys: &[String], narrative: bool) -> String {
+    if narrative {
+        format!("@{}", keys[0])
+    } else {
+        format!("[{}]", keys.iter().map(|k| format!("@{k}")).collect::<Vec<_>>().join("; "))
+    }
+}
+
+/// A code span needs a backtick run longer than any inside it, the same
+/// `md/fmt.rs`'s own inline code escaper needs and for the same reason.
+fn code_span(content: &str) -> String {
+    let len = longest_run(content, '`') + 1;
+    let bar: String = "`".repeat(len);
+    format!("{bar}{content}{bar}")
+}
+
+fn escape_typst(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '#' | '*' | '_' | '`' | '<' | '@' | '$' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn escape_typst_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn longest_run(s: &str, ch: char) -> usize {
+    let mut best = 0;
+    let mut run = 0;
+    for c in s.chars() {
+        if c == ch {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+```
+
+## Tests
+
+```rust name=tests path=render/typst.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::md::Document;
+
+    fn render_doc(source: &str) -> (String, Diags) {
+        render_doc_with_tables(source, &HashMap::new())
+    }
+
+    fn render_doc_with_tables(source: &str, tables: &HashMap<usize, (String, String)>) -> (String, Diags) {
+        render_doc_with_artifacts(source, tables, &HashMap::new(), false)
+    }
+
+    fn render_doc_with_artifacts(
+        source: &str,
+        tables: &HashMap<usize, (String, String)>,
+        images: &HashMap<usize, (Vec<u8>, String)>,
+        figures_outside: bool,
+    ) -> (String, Diags) {
+        render_doc_with_labels(source, tables, images, &HashMap::new(), figures_outside)
+    }
+
+    /// The same, plus the label map `weave::figure_labels` builds
+    /// (decision 63). A test asserting on `<fig:...>` needs one. Every
+    /// other test here has no figure to label, so it passes none.
+    fn render_doc_with_labels(
+        source: &str,
+        tables: &HashMap<usize, (String, String)>,
+        images: &HashMap<usize, (Vec<u8>, String)>,
+        labels: &HashMap<usize, String>,
+        figures_outside: bool,
+    ) -> (String, Diags) {
+        render_doc_with_refs(source, tables, images, labels, &HashMap::new(), figures_outside)
+    }
+
+    /// The same, plus the reference map `weave::references` resolves
+    /// (decision 64). A test asserting on `@fig:...` or `#link(<...>)`
+    /// needs one; every other test here writes no reference at all.
+    fn render_doc_with_refs(
+        source: &str,
+        tables: &HashMap<usize, (String, String)>,
+        images: &HashMap<usize, (Vec<u8>, String)>,
+        labels: &HashMap<usize, String>,
+        refs: &HashMap<String, String>,
+        figures_outside: bool,
+    ) -> (String, Diags) {
+        let mut parse_diags = Diags::new("t.md");
+        let doc = Document::parse(source, &mut parse_diags);
+        let mut diags = Diags::new("t.md");
+        let slugs = test_slugs(&doc);
+        let out =
+            render(&doc, "Title", true, tables, images, labels, &slugs, refs, figures_outside, None, &mut diags);
+        (out, diags)
+    }
+
+    /// The same map `weave::heading_slugs` builds, rebuilt here so a unit
+    /// test sees the `<sec:...>` labels a real weave emits rather than a
+    /// document with none.
+    fn test_slugs(doc: &Document) -> HashMap<u32, String> {
+        let mut slugger = crate::graph::slug::Slugger::new();
+        doc.headings().iter().map(|(_, inlines, line)| (*line, slugger.assign(&Inline::plain(inlines)))).collect()
+    }
+
+    #[test]
+    fn title_page_then_outline() {
+        let (out, _) = render_doc("# H\n");
+        assert!(out.starts_with("#align(center)[\n#v(1fr)\n\n#text(size: 28pt, weight: \"bold\")[Title]"));
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let outline_pos = out.find("#outline()").unwrap();
+        assert!(cover_end < outline_pos, "outline should come after the cover page: {out}");
+    }
+
+    #[test]
+    fn no_toc_omits_outline() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        assert!(!out.contains("#outline()"));
+    }
+
+    #[test]
+    fn cover_false_drops_the_whole_cover_page() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ntitle: T\nauthor: Jane Doe\ncover: false\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        assert!(!out.contains("#pagebreak()"), "{out}");
+        assert!(!out.contains("Jane Doe"), "{out}");
+        assert!(out.starts_with("#outline()"), "{out}");
+    }
+
+    #[test]
+    fn cover_true_is_the_same_page_a_document_with_no_cover_key_gets() {
+        let mut d = Diags::new("t.md");
+        let with = Document::parse("---\ntitle: T\ncover: true\n---\n# H\n", &mut d);
+        let without = Document::parse("---\ntitle: T\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let a = render(&with, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let b = render(&without, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        assert_eq!(a, b, "`cover` is a directive, never a line on the page it names");
+    }
+
+    #[test]
+    fn an_unrecognized_cover_value_keeps_the_page() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ntitle: T\ncover: yes\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        assert!(out.contains("#pagebreak()"), "never guessed at, so the default stands: {out}");
+        assert!(!out.contains("Cover"), "{out}");
+    }
+
+    #[test]
+    fn frontmatter_prints_on_the_cover_page_not_title_author_or_internal_keys() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse(
+            "---\ntitle: Ignored Here\nauthor: Jane Doe\ntags: [rust, typst]\nbibliography: refs.yml\ndankg.tangle.public: true\n---\n# H\n",
+            &mut d,
+        );
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("Tags: rust, typst"), "{cover}");
+        assert!(!cover.contains("Ignored Here"), "{cover}");
+        assert!(!cover.contains("Author"), "{cover}");
+        assert!(!cover.contains("Bibliography"), "{cover}");
+        assert!(!cover.contains("refs.yml"), "{cover}");
+        assert!(!cover.contains("dankg.tangle.public"), "{cover}");
+        assert!(!cover.contains("Public"), "{cover}");
+    }
+
+    #[test]
+    fn author_renders_as_an_unlabeled_byline_under_the_title() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\nauthor: Jane Doe\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("Jane Doe"), "{cover}");
+        assert!(!cover.contains("Author"), "{cover}");
+    }
+
+    #[test]
+    fn multiple_authors_join_with_commas_like_any_other_list_valued_key() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\nauthor: [Jane Doe, John Smith]\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("Jane Doe, John Smith"), "{cover}");
+    }
+
+    #[test]
+    fn date_renders_as_a_real_typst_datetime_not_raw_text() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ndate: 2026-09-18\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(
+            cover.contains(
+                "#datetime(year: 2026, month: 9, day: 18).display(\"[month repr:long] [day padding:none], [year]\")"
+            ),
+            "{cover}"
+        );
+        assert!(!cover.contains("2026-09-18"), "{cover}");
+        assert!(!cover.contains("Date:"), "{cover}");
+    }
+
+    #[test]
+    fn a_year_and_month_date_omits_the_day() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ndate: 2026-09\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(
+            cover.contains("#datetime(year: 2026, month: 9, day: 1).display(\"[month repr:long] [year]\")"),
+            "{cover}"
+        );
+    }
+
+    #[test]
+    fn a_bare_year_renders_as_plain_text() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ndate: 2026\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("[2026]"), "{cover}");
+        assert!(!cover.contains("#datetime"), "{cover}");
+    }
+
+    #[test]
+    fn unparseable_date_text_falls_back_to_literal_text() {
+        let mut d = Diags::new("t.md");
+        let doc = Document::parse("---\ndate: sometime next year\n---\n# H\n", &mut d);
+        let mut diags = Diags::new("t.md");
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let cover_end = out.find("#pagebreak()").unwrap();
+        let cover = &out[..cover_end];
+        assert!(cover.contains("sometime next year"), "{cover}");
+        assert!(!cover.contains("#datetime"), "{cover}");
+    }
+
+    #[test]
+    fn headings_by_level() {
+        let (out, _) = render_doc("# One\n\n### Three\n");
+        assert!(out.contains("= One <sec:one>\n"));
+        assert!(out.contains("=== Three <sec:three>\n"));
+    }
+
+    fn figure_refs() -> HashMap<String, String> {
+        [("chart".to_string(), "fig:chart".to_string()), ("intro".to_string(), "sec:intro".to_string())]
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn a_bare_figure_reference_becomes_a_typst_reference() {
+        let (out, _) = render_doc_with_refs(
+            "See [[#chart]].\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &figure_refs(),
+            false,
+        );
+        assert!(out.contains("See @fig:chart."), "{out}");
+    }
+
+    #[test]
+    fn a_labelled_figure_reference_becomes_a_link_carrying_that_label() {
+        let (out, _) = render_doc_with_refs(
+            "See [[#chart|the revenue chart]].\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &figure_refs(),
+            false,
+        );
+        assert!(out.contains("#link(<fig:chart>)[the revenue chart]"), "{out}");
+    }
+
+    /// The markdown link form resolves through the same lookup. It wrote
+    /// `#link("#chart")` before this, a URL link to a literal string, which
+    /// means nothing in a PDF.
+    #[test]
+    fn a_markdown_link_to_a_fragment_becomes_a_label_reference_too() {
+        let (out, _) = render_doc_with_refs(
+            "See [the chart](#chart).\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &figure_refs(),
+            false,
+        );
+        assert!(out.contains("#link(<fig:chart>)[the chart]"), "{out}");
+        assert!(!out.contains("#link(\"#chart\")"), "{out}");
+    }
+
+    /// A bare heading reference emits `@sec:...` unchanged (decision 67).
+    /// dankg turns no numbering on to make it compile and suppresses
+    /// nothing to avoid needing it; that is the template's own job.
+    #[test]
+    fn a_bare_heading_reference_becomes_a_section_reference() {
+        let (out, _) = render_doc_with_refs(
+            "See [[#intro]].\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &figure_refs(),
+            false,
+        );
+        assert!(out.contains("See @sec:intro."), "{out}");
+    }
+
+    #[test]
+    fn a_labelled_heading_reference_needs_no_heading_numbering() {
+        let (out, _) = render_doc_with_refs(
+            "See [[#intro|the design]].\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &figure_refs(),
+            false,
+        );
+        assert!(out.contains("#link(<sec:intro>)[the design]"), "{out}");
+    }
+
+    /// Decision 41 is narrowed, not repealed.
+    #[test]
+    fn a_wikilink_naming_another_file_still_renders_as_plain_text() {
+        let (out, _) = render_doc_with_refs(
+            "See [[Other]] and [[Other#chart]].\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &figure_refs(),
+            false,
+        );
+        assert!(out.contains("See Other and Other\\#chart."), "{out}");
+        assert!(!out.contains("#link("), "{out}");
+    }
+
+    /// The renderer has no failure path of its own. `weave::run` refuses to
+    /// render a document holding an unresolved reference (decision 64), so
+    /// nothing here ever has to decide what one should look like.
+    #[test]
+    fn an_unresolved_fragment_falls_through_to_plain_text() {
+        let (out, _) =
+            render_doc_with_refs("See [[#nope]].\n", &HashMap::new(), &HashMap::new(), &HashMap::new(), &figure_refs(), false);
+        assert!(out.contains("See \\#nope."), "{out}");
+    }
+
+    #[test]
+    fn emphasis_and_strong_and_code_span() {
+        let (out, _) = render_doc("_a_ and **b** and `c`\n");
+        assert!(out.contains("_a_"));
+        assert!(out.contains("*b*"));
+        assert!(out.contains("`c`"));
+    }
+
+    #[test]
+    fn special_characters_are_escaped() {
+        let (out, _) = render_doc("cost is \\$5 and a # sign\n");
+        assert!(out.contains("\\$5"));
+        assert!(out.contains("\\# sign"));
+    }
+
+    #[test]
+    fn link_renders_as_a_link_call() {
+        let (out, _) = render_doc("[text](https://example.com/a\"b)\n");
+        assert!(out.contains("#link(\"https://example.com/a\\\"b\")[text]"));
+    }
+
+    #[test]
+    fn unordered_and_ordered_lists() {
+        let (out, _) = render_doc("- a\n- b\n");
+        assert!(out.contains("- a\n- b\n"));
+        let (out, _) = render_doc("1. a\n2. b\n");
+        assert!(out.contains("+ a\n+ b\n"));
+    }
+
+    #[test]
+    fn thematic_break_becomes_a_line() {
+        let (out, _) = render_doc("---\n");
+        assert!(out.contains("#line(length: 100%)\n"));
+    }
+
+    #[test]
+    fn passthrough_is_escaped_not_raw() {
+        let (out, _) = render_doc("> a # b\n");
+        assert!(out.contains("\\# b"));
+    }
+
+    #[test]
+    fn gfm_table_with_alignment_and_a_ragged_row() {
+        let (out, diags) = render_doc("| A | B |\n|:--|--:|\n| a |\n");
+        assert!(diags.is_empty());
+        assert!(out.contains("columns: 2"));
+        assert!(out.contains("align: (left, right)"));
+        assert!(out.contains("table.header([A], [B])"));
+        assert!(out.contains("[a], [],"));
+    }
+
+    #[test]
+    fn csv_block_becomes_a_table_with_no_alignment() {
+        let (out, _) = render_doc("```csv\na,b\n1,2\n```\n");
+        assert!(out.contains("columns: 2"));
+        assert!(!out.contains("align:"));
+        assert!(out.contains("table.header([a], [b])"));
+        assert!(out.contains("[1], [2],"));
+    }
+
+    #[test]
+    fn json_array_of_objects_becomes_a_table() {
+        let (out, diags) = render_doc("```json\n[{\"a\":1},{\"a\":2}]\n```\n");
+        assert!(diags.is_empty());
+        assert!(out.contains("table.header([a])"));
+        assert!(out.contains("[1],"));
+        assert!(out.contains("[2],"));
+    }
+
+    #[test]
+    fn malformed_json_block_falls_back_to_code_with_a_warning() {
+        let (out, diags) = render_doc("```json\n{\"a\":1}\n```\n");
+        assert!(!diags.is_empty());
+        assert!(out.contains("```json"));
+        assert!(out.contains("{\"a\":1}"));
+    }
+
+    #[test]
+    fn ordinary_code_block_is_a_raw_block() {
+        let (out, _) = render_doc("```rust\nfn f() {}\n```\n");
+        assert!(out.contains("```rust\nfn f() {}\n```\n"));
+    }
+
+    #[test]
+    fn weave_hidden_code_block_produces_nothing() {
+        let (out, _) = render_doc("text\n\n```sh weave=hidden\necho hi\n```\n\nmore\n");
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(out.contains("text\n"), "{out}");
+        assert!(out.contains("more\n"), "{out}");
+    }
+
+    #[test]
+    fn weave_other_value_is_shown_normally() {
+        let (out, _) = render_doc("```sh weave=summary\necho hi\n```\n");
+        assert!(out.contains("echo hi"), "{out}");
+    }
+
+    #[test]
+    fn a_recorded_result_renders_as_one_paired_block() {
+        let src = "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("dankg:result"), "{out}");
+        assert!(out.contains("#block(stroke: (left: 2pt + gray)"), "{out}");
+        assert!(out.contains("echo hi"), "{out}");
+        assert!(out.contains("Output"), "{out}");
+        assert!(out.contains("hi\n```"), "{out}");
+    }
+
+    #[test]
+    fn a_failed_result_uses_a_red_stroke_and_caption() {
+        let src = "```sh name=a\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("#block(stroke: (left: 2pt + red)"), "{out}");
+        assert!(out.contains("Output (failed)"), "{out}");
+    }
+
+    #[test]
+    fn produces_and_reads_render_as_a_provenance_line() {
+        let src = "```sql db=w name=a\nselect 1;\n```\n\n<!-- dankg:result name=a hash=0000000000000001 produces=orders reads=customers -->\n\n```\nn\n1\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("writes: orders"), "{out}");
+        assert!(out.contains("reads: customers"), "{out}");
+    }
+
+    #[test]
+    fn a_hidden_source_hides_its_paired_result_too() {
+        let src = "```sh name=a weave=hidden\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(!out.contains("dankg:result"), "{out}");
+        assert!(!out.contains("#block(stroke"), "{out}");
+    }
+
+    #[test]
+    fn a_named_block_with_no_recorded_result_renders_unpaired() {
+        let (out, _) = render_doc("```sh name=a\necho hi\n```\n");
+        assert!(!out.contains("#block(stroke"), "{out}");
+        assert!(out.contains("echo hi"), "{out}");
+    }
+
+    #[test]
+    fn a_produced_table_renders_inside_the_pair() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("wrote data.csv"), "{out}");
+        assert!(out.contains("file:data.csv"), "{out}");
+        assert!(out.contains("#table("), "{out}");
+    }
+
+    #[test]
+    fn a_produced_table_is_wrapped_in_a_real_kind_table_figure() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("#figure(kind: table, caption: [file:data.csv])["), "{out}");
+    }
+
+    #[test]
+    fn a_captioned_artifact_renders_inside_the_blocks_stroke_by_default() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        // No `--figures-outside` and no `figure=` attribute: decision 56's
+        // own default is `inside`, decision 54's original shape -- the
+        // figure exists, but never in the "closed block, then a sibling
+        // figure" shape `figures_outside` produces.
+        assert!(out.contains("#figure(kind: table"), "{out}");
+        assert!(!out.contains("]\n\n#figure(kind: table"), "{out}");
+    }
+
+    #[test]
+    fn figures_outside_moves_a_captioned_artifact_after_the_blocks_stroke() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &tables, &HashMap::new(), true);
+        // `eval_pair` closes the block with a literal `]\n`, then appends
+        // `figure` verbatim -- this exact substring is that hand-off.
+        assert!(out.contains("]\n\n#figure(kind: table"), "{out}");
+    }
+
+    #[test]
+    fn a_block_level_figure_outside_overrides_the_document_default() {
+        let src = "```python name=a produces=file:data.csv figure=outside\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("]\n\n#figure(kind: table"), "{out}");
+    }
+
+    #[test]
+    fn a_block_level_figure_inside_overrides_a_figures_outside_default() {
+        let src = "```python name=a produces=file:data.csv figure=inside\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &tables, &HashMap::new(), true);
+        assert!(!out.contains("]\n\n#figure(kind: table"), "{out}");
+    }
+
+    #[test]
+    fn an_uncaptioned_artifact_stays_inside_the_blocks_stroke() {
+        let src = "```python name=a\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        // No real figure exists to place outside the block, so the raw
+        // `#table(...)` must be the block's own last line before its `]`.
+        assert!(!out.contains("#figure("), "an uncaptioned artifact is not a real figure: {out}");
+        assert!(out.contains("#table(\n  columns: 2,\n  table.header([a], [b]),\n  [1], [2],\n)\n]\n"), "{out}");
+    }
+
+    #[test]
+    fn figure_attribute_is_inert_without_a_captioned_artifact() {
+        let src = "```sh name=a figure=outside\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("#figure("), "{out}");
+        assert!(out.contains("echo hi"), "{out}");
+    }
+
+    #[test]
+    fn a_json_artifact_that_is_not_table_shaped_falls_back_to_code() {
+        let src = "```python name=a produces=file:data.json\nwrite_json()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\ndone\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("json".to_string(), "{\"not\": \"a table\"}".to_string()));
+        let (out, diags) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("not"), "{out}");
+        assert!(!diags.items().is_empty(), "expected a warning about the non-table json");
+    }
+
+    #[test]
+    fn no_produced_table_means_no_extra_section() {
+        let src = "```python name=a produces=file:data.csv\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("#table("), "{out}");
+    }
+
+    #[test]
+    fn a_caption_overrides_the_artifact_label_not_output() {
+        let src = "```python name=a produces=file:data.csv caption=\"Quarterly revenue\"\nwrite_csv()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote data.csv\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "a,b\n1,2\n".to_string()));
+        let (out, _) = render_doc_with_tables(src, &tables);
+        assert!(out.contains("Quarterly revenue"), "{out}");
+        assert!(!out.contains("file:data.csv"), "{out}");
+        assert!(out.contains("Output"), "{out}");
+    }
+
+    #[test]
+    fn a_caption_with_no_artifact_overrides_output_and_keeps_failed() {
+        let src = "```sh name=a caption=Result\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("Result (failed)"), "{out}");
+        assert!(!out.contains("[Output"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_drops_both_halves_of_a_successful_pair() {
+        let src = "```sh name=a weave=source-hidden\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(!out.contains("Output"), "{out}");
+        assert!(!out.contains("hi\n```"), "{out}");
+        // Nothing left to wrap, so no empty stroked block either.
+        assert!(!out.contains("#block(stroke:"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_still_renders_a_captioned_figure() {
+        let src = "```python name=a produces=file:chart.png weave=source-hidden caption=\"A chart\"\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, true);
+        assert!(!out.contains("savefig()"), "{out}");
+        assert!(!out.contains("wrote chart.png"), "{out}");
+        assert!(out.contains("#figure(kind: image, caption: [A chart])"), "{out}");
+        assert!(out.contains("#image(\"assets/chart.png\")"), "{out}");
+    }
+
+
+    #[test]
+    fn a_failed_pair_keeps_its_output_even_when_source_hidden() {
+        let src = "```sh name=a weave=source-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\nboom\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("Output (failed)"), "{out}");
+        assert!(out.contains("boom"), "{out}");
+    }
+
+    #[test]
+    fn output_hidden_keeps_the_source_but_drops_everything_after() {
+        let src = "```sql db=w name=a weave=output-hidden\nselect 1;\n```\n\n<!-- dankg:result name=a hash=0000000000000001 produces=orders -->\n\n```\nn\n1\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("select 1;"), "{out}");
+        assert!(!out.contains("Output"), "{out}");
+        assert!(!out.contains("n\n1\n```"), "{out}");
+        assert!(!out.contains("writes: orders"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_hides_an_unpaired_block_entirely() {
+        let (out, _) = render_doc("```sh name=a weave=source-hidden\necho hi\n```\n");
+        assert!(!out.contains("echo hi"), "{out}");
+        assert!(!out.contains("#block(stroke"), "{out}");
+    }
+
+    #[test]
+    fn output_hidden_is_a_noop_on_an_unpaired_block() {
+        let (out, _) = render_doc("```sh name=a weave=output-hidden\necho hi\n```\n");
+        assert!(out.contains("echo hi"), "{out}");
+    }
+
+    #[test]
+    fn source_hidden_or_output_hidden_keep_the_red_stroke() {
+        let src = "```sh name=a weave=source-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("#block(stroke: (left: 2pt + red)"), "{out}");
+
+        let src = "```sh name=a weave=output-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(out.contains("#block(stroke: (left: 2pt + red)"), "{out}");
+    }
+
+    #[test]
+    fn a_produced_image_renders_as_an_image_reference() {
+        let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, false);
+        assert!(out.contains("#image(\"assets/chart.png\")"), "{out}");
+        assert!(out.contains("file:chart.png"), "{out}");
+    }
+
+    #[test]
+    fn a_labelled_table_figure_carries_its_own_typst_label() {
+        let src = "```sql db=w name=t produces=file:data.csv\nselect 1;\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nn\n1\n```\n";
+        let mut tables = HashMap::new();
+        tables.insert(0, ("csv".to_string(), "x,y\n1,2\n".to_string()));
+        let mut labels = HashMap::new();
+        labels.insert(0, "revenue".to_string());
+        let (out, _) = render_doc_with_labels(src, &tables, &HashMap::new(), &labels, false);
+        assert!(out.contains("] <fig:revenue>"), "{out}");
+    }
+
+    #[test]
+    fn a_labelled_image_figure_carries_its_own_typst_label() {
+        let src = "```python name=c produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let mut labels = HashMap::new();
+        labels.insert(0, "chart".to_string());
+        let (out, _) = render_doc_with_labels(src, &HashMap::new(), &images, &labels, false);
+        assert!(out.contains("#figure(kind: image, caption: [file:chart.png])["), "{out}");
+        assert!(out.contains("] <fig:chart>"), "{out}");
+    }
+
+    /// The label rides the figure, not the pair's own block, so it lands
+    /// in the same place under either placement (decision 56).
+    #[test]
+    fn a_labelled_figure_keeps_its_label_when_placed_outside_the_block() {
+        let src = "```python name=c produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let mut labels = HashMap::new();
+        labels.insert(0, "chart".to_string());
+        let (out, _) = render_doc_with_labels(src, &HashMap::new(), &images, &labels, true);
+        assert!(out.contains("]\n\n#figure(kind: image"), "the figure is outside the block: {out}");
+        assert!(out.contains("] <fig:chart>"), "{out}");
+    }
+
+    #[test]
+    fn an_unlabelled_figure_carries_no_typst_label() {
+        let src = "```python name=c produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, false);
+        assert!(!out.contains("<fig:"), "{out}");
+    }
+
+    #[test]
+    fn a_produced_image_is_wrapped_in_a_real_figure_with_an_explicit_image_kind() {
+        let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let mut images = HashMap::new();
+        images.insert(0, (b"ignored".to_vec(), "chart.png".to_string()));
+        let (out, _) = render_doc_with_artifacts(src, &HashMap::new(), &images, false);
+        assert!(out.contains("#figure(kind: image, caption: [file:chart.png])["), "{out}");
+        assert!(!out.contains("kind: table"), "an image figure is not a table, {out}");
+    }
+
+    #[test]
+    fn no_produced_image_means_no_image_reference() {
+        let src = "```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
+        let (out, _) = render_doc(src);
+        assert!(!out.contains("#image("), "{out}");
+    }
+
+    fn render_doc_with_bibliography(source: &str, bib: Option<&BibliographySummary>) -> String {
+        let mut parse_diags = Diags::new("t.md");
+        let doc = Document::parse(source, &mut parse_diags);
+        let mut diags = Diags::new("t.md");
+        render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, bib, &mut diags)
+    }
+
+    fn bib(keys: &[&str]) -> BibliographySummary {
+        BibliographySummary {
+            valid_keys: keys.iter().map(|k| k.to_string()).collect(),
+            asset_path: "bibliography.yml".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_bracketed_citation_with_a_bibliography_emits_typst_shorthand() {
+        let out = render_doc_with_bibliography("[@a]\n", Some(&bib(&["a"])));
+        assert!(out.contains("@a"), "{out}");
+        assert!(!out.contains("\\@a"), "should not be escaped once a bibliography resolves it: {out}");
+    }
+
+    #[test]
+    fn multiple_keys_render_space_separated_relying_on_typst_s_own_merging() {
+        let out = render_doc_with_bibliography("[@a; @b]\n", Some(&bib(&["a", "b"])));
+        assert!(out.contains("@a @b"), "{out}");
+    }
+
+    #[test]
+    fn a_narrative_citation_emits_cite_with_prose_form() {
+        let out = render_doc_with_bibliography("@a argues\n", Some(&bib(&["a"])));
+        assert!(out.contains("#cite(<a>, form: \"prose\")"), "{out}");
+    }
+
+    #[test]
+    fn an_unresolved_key_still_emits_real_syntax_letting_typst_report_it() {
+        let out = render_doc_with_bibliography("[@missing]\n", Some(&bib(&["a"])));
+        assert!(out.contains("@missing"), "{out}");
+    }
+
+    #[test]
+    fn no_bibliography_configured_falls_back_to_literal_escaped_text() {
+        let out = render_doc_with_bibliography("[@a]\n", None);
+        assert!(out.contains("[\\@a]"), "{out}");
+        let out = render_doc_with_bibliography("@a argues\n", None);
+        assert!(out.contains("\\@a argues"), "{out}");
+    }
+
+    #[test]
+    fn a_bibliography_appends_one_call_at_the_document_s_end() {
+        let out = render_doc_with_bibliography("# H\n\n[@a]\n\nmore text\n", Some(&bib(&["a"])));
+        let call_pos = out.find("#bibliography(\"bibliography.yml\")").unwrap();
+        assert!(call_pos > out.rfind("more text").unwrap(), "{out}");
+        assert!(out.trim_end().ends_with("#bibliography(\"bibliography.yml\")"), "{out}");
+    }
+}
+```

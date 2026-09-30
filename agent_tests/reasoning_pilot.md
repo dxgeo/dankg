@@ -109,7 +109,7 @@ Three arms, one fresh subagent per trial, three trials per arm (nine
 runs total):
 
 | Arm | Environment | Instruction |
-|---|---|---|
+| --- | --- | --- |
 | raw | raw fixture | task only |
 | literate-unprompted | literate fixture | task only |
 | literate-prompted | literate fixture | task, plus: run `dankg check .` before finishing and address anything it reports |
@@ -183,7 +183,7 @@ description above already reflects the fix. Every count below is
 against the corrected fixture.
 
 | Arm | Trial | Functional | Recall | Precision | Blind rubric | Tool calls | Tokens |
-|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- |
 | raw | 1 | pass | 2/4 | 2/2 | 3/5 | 10 | 35,703 |
 | raw | 2 | pass | 1/4 | 1/1 | 2/5 | 12 | 36,324 |
 | raw | 3 | pass | 4/4 | 4/4 | 4/5 | 14 | 37,647 |

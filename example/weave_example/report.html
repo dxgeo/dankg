@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weaving a Document</title>
+<style>
+
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa;
+  --fg: #1c1c1b;
+  --muted: #8c8c86;
+  --rule: #dcdcd6;
+  --code-bg: #f2f2ef;
+  --accent: #2f6f4f;
+  --fail: #a13c3c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a;
+    --fg: #e6e6e2;
+    --muted: #7e8188;
+    --rule: #303338;
+    --code-bg: #1f2124;
+    --accent: #74c39a;
+    --fail: #d97a7a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.6 ui-serif, Georgia, "Times New Roman", serif;
+}
+
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.25;
+}
+
+.byline {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  margin: -0.5rem 0 0;
+}
+
+.byline-date {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  color: var(--muted);
+  margin: 0 0 1.5rem;
+}
+
+a { color: var(--accent); }
+
+code, pre {
+  font: 0.9em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+
+pre {
+  background: var(--code-bg);
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  border-radius: 6px;
+}
+
+pre code { background: none; padding: 0; }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1.25rem 0;
+}
+
+th, td {
+  border: 1px solid var(--rule);
+  padding: 0.4rem 0.65rem;
+  text-align: left;
+}
+
+th { background: var(--code-bg); }
+
+hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 2rem 0;
+}
+
+.toc-toggle { display: none; }
+
+nav#toc {
+  max-width: 46rem;
+  margin: 1rem auto 0;
+  padding: 0.75rem 1.25rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+
+nav#toc .toc-label {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  display: block;
+}
+
+nav#toc .toc-body { margin-top: 0.6rem; }
+nav#toc ul { list-style: none; margin: 0; padding-left: 1.1rem; }
+nav#toc > .toc-body > ul { padding-left: 0; }
+nav#toc a { text-decoration: none; }
+nav#toc a:hover { text-decoration: underline; }
+
+.toc-toggle:checked ~ nav#toc .toc-body { display: none; }
+.toc-toggle:checked ~ nav#toc .toc-label::after {
+  content: " (hidden -- click to show)";
+  font-weight: 400;
+  color: var(--muted);
+}
+
+figure.eval-pair {
+  margin: 1.25rem 0;
+  padding: 0;
+  border-left: 3px solid var(--rule);
+}
+
+figure.eval-pair > pre { margin: 0; border-radius: 0; }
+figure.eval-pair > pre + pre { border-top: 1px solid var(--rule); }
+
+figure.eval-pair figcaption {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  font-size: 0.8em;
+  color: var(--muted);
+  padding: 0.3rem 1rem 0;
+}
+
+figure.eval-pair.failed { border-left-color: var(--fail); }
+figure.eval-pair.failed figcaption { color: var(--fail); }
+
+.eval-provenance {
+  font-size: 0.8em;
+  color: var(--muted);
+  padding: 0 1rem 0.5rem;
+}
+
+/* Appended after WEAVE_CSS, so these rules win on specificity ties
+   without the built-in stylesheet being replaced. */
+
+figure.table-figure figcaption,
+figure.image-figure figcaption {
+  font-variant: small-caps;
+  letter-spacing: 0.02em;
+}
+
+/* The number in a figcaption comes from dankg's own walk, written as
+   literal text, because no browser can read one element's counter from
+   a link elsewhere on the page. */
+figure.image-figure img {
+  border: 1px solid var(--rule);
+  background: #fff;
+}
+
+</style>
+</head>
+<body>
+<input type="checkbox" id="toc-toggle" class="toc-toggle">
+<nav id="toc">
+<label for="toc-toggle" class="toc-label">Contents</label>
+<div class="toc-body">
+<ul>
+<li><a href="#what-the-frontmatter-does">What the frontmatter does</a></li>
+<li><a href="#prose-tables-and-data">Prose, tables and data</a></li>
+<li><a href="#running-code-and-recording-what-it-printed">Running code, and recording what it printed</a></li>
+<li><a href="#figures-a-reader-can-point-at">Figures a reader can point at</a></li>
+<li><a href="#showing-one-half-of-a-pair">Showing one half of a pair</a>
+<ul>
+<li><a href="#keeping-only-the-artifact">Keeping only the artifact</a></li>
+<li><a href="#keeping-only-the-source">Keeping only the source</a></li>
+</ul>
+</li>
+<li><a href="#pointing-at-a-heading">Pointing at a heading</a></li>
+<li><a href="#what-fails-the-weave">What fails the weave</a></li>
+<li><a href="#a-gap-worth-knowing-about">A gap worth knowing about</a></li>
+</ul>
+</div>
+</nav>
+<main>
+<h1>Weaving a Document</h1>
+<p class="byline">DanKG</p>
+<p class="byline-date">September 26, 2026</p>
+<p>Every <code>dankg weave</code> feature is exercised somewhere below. The same
+file renders both ways:</p>
+<pre><code class="language-sh">dankg weave report.md --format html -o report.html
+dankg weave report.md --format pdf
+</code></pre>
+<p>Weave reads one file. It never walks a corpus. A link naming another
+file therefore stays plain text rather than resolving to something
+that is not there.</p>
+<h1 id="what-the-frontmatter-does">What the frontmatter does</h1>
+<p>The <code>title</code>, <code>author</code> and <code>date</code> above become a real cover page in the
+PDF. <code>date</code> is parsed into a Typst date rather than echoed as a
+string. The template is what controls how it reads. <code>cover: true</code> is what
+absorbs the repeated <code># Weaving a Document</code> heading: the title is
+already on the cover. Printing it twice helps nobody. Setting
+<code>cover: false</code> drops the cover page instead and keeps the heading.</p>
+<p><code>bibliography: refs.yml</code> names the file every citation below resolves
+against. A <code>hayagriva</code> fence in the document body is the other way to
+declare one. The two merge when both are present.</p>
+<h1 id="prose-tables-and-data">Prose, tables and data</h1>
+<p>Ordinary markdown renders as you would expect: <em>emphasis</em>, <strong>strong</strong>,
+<code>a code span</code>, and a <a href="https://typst.app">link to the Typst site</a>.
+Literate programming is Knuth's idea <span class="citation">[<a href="#ref-knuth1984">1</a>]</span>. The case for
+showing data rather than describing it is Tufte's <span class="citation">[<a href="#ref-tufte2001">2</a>]</span>.
+<a href="#ref-codd1970">Codd (1970)</a> argues the relational case separately.</p>
+<p>A bare <code>@</code> in prose parses as a citation key. A handle meant
+literally needs escaping: write @dankg to get @dankg.</p>
+<p>A GFM pipe table is real structure, with per-column alignment:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Region</th>
+<th style="text-align:center">Quarter</th>
+<th style="text-align:right">Revenue</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left">North</td>
+<td style="text-align:center">Q1</td>
+<td style="text-align:right">1200</td>
+</tr>
+<tr>
+<td style="text-align:left">South</td>
+<td style="text-align:center">Q1</td>
+<td style="text-align:right">980</td>
+</tr>
+<tr>
+<td style="text-align:left">North</td>
+<td style="text-align:center">Q2</td>
+<td style="text-align:right">1440</td>
+</tr>
+</tbody>
+</table>
+<p>A fenced block tagged <code>csv</code>, <code>tsv</code> or <code>json</code> is a second table source.
+The tag alone decides; content is never sniffed:</p>
+<table>
+<thead>
+<tr>
+<th>region</th>
+<th>quarter</th>
+<th>revenue</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>North</td>
+<td>Q3</td>
+<td>1610</td>
+</tr>
+<tr>
+<td>South</td>
+<td>Q3</td>
+<td>1050</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h1 id="running-code-and-recording-what-it-printed">Running code, and recording what it printed</h1>
+<p>A named block followed by its own recorded result renders as one
+paired unit. <code>dankg eval report.md --all</code> is what writes those
+markers; weave never runs anything itself.</p>
+<figure class="eval-pair">
+<pre><code class="language-sh">echo "hello from a recorded run"
+</code></pre>
+<figcaption>Output</figcaption>
+<pre><code>hello from a recorded run
+</code></pre>
+</figure>
+<p>A block that fails keeps its output and says so, rather than hiding
+the failure:</p>
+<figure class="eval-pair failed">
+<pre><code class="language-sh">echo "this went wrong" &gt;&amp;2
+exit 3
+</code></pre>
+<figcaption>Output (failed)</figcaption>
+<pre><code></code></pre>
+</figure>
+<h1 id="figures-a-reader-can-point-at">Figures a reader can point at</h1>
+<p>A block that declares <code>produces=file:</code> and carries a caption renders
+as a real figure. Its label is the block's own <code>name=</code>, so
+<a href="#fig-quarterly">Table 1</a> needs no extra attribute to point at the table below.
+A labelled reference says something else instead:
+<a href="#fig-quarterly">the quarterly breakdown</a>.</p>
+<figure class="eval-pair">
+<pre><code class="language-sh">mkdir -p data
+printf 'region,quarter,revenue\n' &gt; data/quarterly.csv
+printf 'North,Q1,1200\nSouth,Q1,980\n' &gt;&gt; data/quarterly.csv
+printf 'North,Q2,1440\nSouth,Q2,1010\n' &gt;&gt; data/quarterly.csv
+echo "wrote data/quarterly.csv"
+</code></pre>
+<figcaption>Output</figcaption>
+<pre><code>wrote data/quarterly.csv
+</code></pre>
+<figure class="table-figure" id="fig-quarterly">
+<figcaption>Table 1: Revenue by region and quarter</figcaption>
+<table>
+<thead>
+<tr>
+<th>region</th>
+<th>quarter</th>
+<th>revenue</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>North</td>
+<td>Q1</td>
+<td>1200</td>
+</tr>
+<tr>
+<td>South</td>
+<td>Q1</td>
+<td>980</td>
+</tr>
+<tr>
+<td>North</td>
+<td>Q2</td>
+<td>1440</td>
+</tr>
+<tr>
+<td>South</td>
+<td>Q2</td>
+<td>1010</td>
+</tr>
+</tbody>
+</table>
+</figure>
+</figure>
+<p>Tables and images are numbered on separate counters, because Typst
+counts them separately and the two backends have to agree. The chart
+below is therefore Figure 1 while the table above is Table 1. See
+<a href="#fig-trend">Figure 1</a> for the chart, or <a href="#fig-trend">the revenue trend</a> to say it in
+your own words.</p>
+<p><code>artifact=</code> renames the target, for when a path is a filesystem detail
+the prose should not have to quote. The chart's block is named
+<code>chart</code>. It writes <code>figures/trend.svg</code>, so its slug would be <code>trend</code>
+either way. The attribute is declared here to show it.</p>
+<figure class="eval-pair">
+<pre><code class="language-sh">mkdir -p figures
+cat &gt; figures/trend.svg &lt;&lt;'SVG'
+&lt;svg xmlns="http://www.w3.org/2000/svg" width="320" height="140" viewBox="0 0 320 140"&gt;
+  &lt;polyline fill="none" stroke="#3c6df0" stroke-width="3" points="20,110 100,84 180,56 260,24"/&gt;
+  &lt;polyline fill="none" stroke="#b0b0b0" stroke-width="2" stroke-dasharray="4 3" points="20,118 100,112 180,104 260,98"/&gt;
+  &lt;line x1="20" y1="125" x2="300" y2="125" stroke="#3c3c3c" stroke-width="1"/&gt;
+  &lt;text x="20" y="138" font-family="Helvetica" font-size="9"&gt;Q1&lt;/text&gt;
+  &lt;text x="176" y="138" font-family="Helvetica" font-size="9"&gt;Q3&lt;/text&gt;
+&lt;/svg&gt;
+SVG
+echo "wrote figures/trend.svg"
+</code></pre>
+<figcaption>Output</figcaption>
+<pre><code>wrote figures/trend.svg
+</code></pre>
+</figure>
+<figure class="image-figure" id="fig-trend">
+<img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMjAiIGhlaWdodD0iMTQwIiB2aWV3Qm94PSIwIDAgMzIwIDE0MCI+CiAgPHBvbHlsaW5lIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzNjNmRmMCIgc3Ryb2tlLXdpZHRoPSIzIiBwb2ludHM9IjIwLDExMCAxMDAsODQgMTgwLDU2IDI2MCwyNCIvPgogIDxwb2x5bGluZSBmaWxsPSJub25lIiBzdHJva2U9IiNiMGIwYjAiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWRhc2hhcnJheT0iNCAzIiBwb2ludHM9IjIwLDExOCAxMDAsMTEyIDE4MCwxMDQgMjYwLDk4Ii8+CiAgPGxpbmUgeDE9IjIwIiB5MT0iMTI1IiB4Mj0iMzAwIiB5Mj0iMTI1IiBzdHJva2U9IiMzYzNjM2MiIHN0cm9rZS13aWR0aD0iMSIvPgogIDx0ZXh0IHg9IjIwIiB5PSIxMzgiIGZvbnQtZmFtaWx5PSJIZWx2ZXRpY2EiIGZvbnQtc2l6ZT0iOSI+UTE8L3RleHQ+CiAgPHRleHQgeD0iMTc2IiB5PSIxMzgiIGZvbnQtZmFtaWx5PSJIZWx2ZXRpY2EiIGZvbnQtc2l6ZT0iOSI+UTM8L3RleHQ+Cjwvc3ZnPgo=" alt="figures/trend.svg">
+<figcaption>Figure 1: Revenue trend across three quarters</figcaption>
+</figure>
+<p>That block also carries <code>figure=outside</code>. Its figure stands apart from
+the pair's own box instead of nesting inside it.
+<code>--figures-inside</code> and <code>--figures-outside</code> set the document-wide
+default. A block's own <code>figure=</code> overrides it.</p>
+<p>The markdown link form resolves the same way a wikilink does:
+<a href="#fig-quarterly">the table again</a> and <a href="#fig-trend">the chart again</a> both land
+on their figures.</p>
+<h1 id="showing-one-half-of-a-pair">Showing one half of a pair</h1>
+<h2 id="keeping-only-the-artifact">Keeping only the artifact</h2>
+<p><code>weave=source-hidden</code> keeps the artifact and drops everything else --
+no source, no captured output, no provenance line -- for a walkthrough
+that shows a result without the code behind it.</p>
+<figure class="table-figure" id="fig-headline">
+<figcaption>Table 2: Headline numbers</figcaption>
+<table>
+<thead>
+<tr>
+<th>metric</th>
+<th>value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>revenue</td>
+<td>4630</td>
+</tr>
+<tr>
+<td>growth</td>
+<td>18%</td>
+</tr>
+</tbody>
+</table>
+</figure>
+<h2 id="keeping-only-the-source">Keeping only the source</h2>
+<p><code>weave=output-hidden</code> is the mirror image. It keeps the source and
+drops that whole second half, artifact included, for a snippet worth
+showing without spoiling what it produces.</p>
+<figure class="eval-pair">
+<pre><code class="language-sh">echo "the answer is 42"
+</code></pre>
+</figure>
+<p><code>weave=hidden</code> drops both halves together. The block below renders
+nothing at all, which is why nothing appears between this paragraph
+and the next heading.</p>
+<h1 id="pointing-at-a-heading">Pointing at a heading</h1>
+<p>A heading resolves by its own slug, the anchor its table-of-contents
+link already uses. <a href="#what-the-frontmatter-does">What the frontmatter does</a> points at the
+frontmatter section above.</p>
+<p>The two backends deliberately differ on one point here. A bare heading
+reference reads as a section number in the PDF and as the heading's
+own title in HTML, because HTML numbers no heading. The PDF needs
+<code>#set heading(numbering: "1.")</code> in a <code>[weave.pdf] template</code> before a
+bare one will compile at all, which <code>template.typ</code> here supplies.
+Writing your own label makes the two identical:
+<a href="#what-the-frontmatter-does">the frontmatter section</a>.</p>
+<p>A wikilink naming another file is left alone, because there is no
+corpus to resolve it against: SomeOtherFile stays plain text.</p>
+<h1 id="what-fails-the-weave">What fails the weave</h1>
+<p>Three things stop the render rather than producing a page with a hole
+in it. A reference that resolves to nothing fails, on the line it was
+written. A citation key the bibliography does not carry fails the same
+way. An artifact that cannot be read or copied fails too.</p>
+<p>All three report every bad line in one run, and write no output file
+of any kind.</p>
+<h1 id="a-gap-worth-knowing-about">A gap worth knowing about</h1>
+<p><code>dankg check</code> does not yet know what a figure slug is. The graph
+builds a block's node from its <code>name=</code> alone. A produced artifact gets
+no node of its own. The reference <a href="#fig-trend">to the chart</a>
+therefore resolves in weave and is reported as a dead link by
+<code>check</code>. Running <code>dankg check .</code> in this directory shows it, alongside
+the <code>[[SomeOtherFile]]</code> above, which is unresolved on purpose.</p>
+<p>Both halves of a figure slug are invisible to the graph: a declared
+<code>artifact=</code>, and the path stem a figure takes when none is declared.
+<code>plans/plan-label-resolution.md</code> is the plan that closes this.</p>
+<ol class="reference-list">
+<li id="ref-knuth1984">Knuth (1984). Literate Programming. In <i>The Computer Journal</i>.</li>
+<li id="ref-tufte2001">Tufte (2001). The Visual Display of Quantitative Information. Graphics Press.</li>
+<li id="ref-codd1970">Codd (1970). A Relational Model of Data for Large Shared Data Banks.</li>
+</ol>
+</main>
+</body>
+</html>

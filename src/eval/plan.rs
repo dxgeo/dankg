@@ -441,8 +441,11 @@ pub enum FileDepIssue {
 /// Only `file` is recognised today; anything else -- a bare path with no
 /// prefix, or a future `table:` for milestone 9's own DuckDB relations --
 /// returns `None`, silently unchecked rather than reported as an error
-/// of its own.
-fn parse_artifact(raw: &str) -> Option<&str> {
+/// of its own. `pub(crate)`, not private: `weave::produced_tables`
+/// (plan-weave-artifacts.md, decision 50) reuses this exact parse so a
+/// rendered artifact and `dankg check`'s own verification never disagree
+/// about what `produces=file:PATH` means.
+pub(crate) fn parse_artifact(raw: &str) -> Option<&str> {
     let (kind, path) = raw.split_once(':')?;
     if kind != "file" || path.is_empty() {
         return None;
@@ -454,8 +457,9 @@ fn parse_artifact(raw: &str) -> Option<&str> {
 /// root-relative, normalized form -- the same `join_normalize`/`dir_of` a
 /// written link's own target already resolves through, so two blocks in
 /// different directories naming the same artifact by different relative
-/// spellings still compare equal.
-fn resolve_artifact(from_file: &str, path: &str) -> Option<String> {
+/// spellings still compare equal. `pub(crate)` for the same reason
+/// `parse_artifact` just above is.
+pub(crate) fn resolve_artifact(from_file: &str, path: &str) -> Option<String> {
     crate::graph::resolve::join_normalize(crate::graph::resolve::dir_of(from_file), path)
 }
 

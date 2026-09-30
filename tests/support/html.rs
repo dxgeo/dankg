@@ -1,10 +1,12 @@
 //! CommonMark-style HTML renderer.
 //!
-//! Test-only, and deliberately so: DanKG never renders markdown to HTML at
-//! runtime -- it renders a *graph*. This exists purely as an oracle, so the
-//! parser can be scored against the spec's expected output.
+//! Test-only, and deliberately so: DanKG's own graph renderer never turns
+//! markdown into HTML at runtime -- it renders a *graph*. `dankg weave
+//! --format html` (`render::weave_html`) is the one product exception. This
+//! file exists purely as a conformance oracle. The parser is scored against
+//! the spec's expected output here, not reused as that renderer.
 
-use dankg::md::{Block, Document, Inline, List};
+use dankg::md::{Align, Block, Document, Inline, List};
 
 pub fn render(doc: &Document) -> String {
     let mut out = String::new();
@@ -55,7 +57,47 @@ fn block(b: &Block, tight: bool, out: &mut String) {
             out.push_str(text);
             out.push('\n');
         }
+        // GFM tables are not part of the vendored CommonMark spec.json, so
+        // this arm is never scored against it. Rendered anyway, rather than
+        // stubbed, so the oracle stays a real (if partial) HTML renderer.
+        Block::Table { aligns, header, rows, .. } => table(aligns, header, rows, out),
     }
+}
+
+fn table(aligns: &[Align], header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>], out: &mut String) {
+    out.push_str("<table>\n<thead>\n<tr>\n");
+    for (i, cell) in header.iter().enumerate() {
+        out.push_str("<th");
+        push_align(aligns.get(i), out);
+        out.push('>');
+        inlines_to(cell, out);
+        out.push_str("</th>\n");
+    }
+    out.push_str("</tr>\n</thead>\n<tbody>\n");
+    for row in rows {
+        out.push_str("<tr>\n");
+        for (i, cell) in row.iter().enumerate() {
+            out.push_str("<td");
+            push_align(aligns.get(i), out);
+            out.push('>');
+            inlines_to(cell, out);
+            out.push_str("</td>\n");
+        }
+        out.push_str("</tr>\n");
+    }
+    out.push_str("</tbody>\n</table>\n");
+}
+
+fn push_align(align: Option<&Align>, out: &mut String) {
+    let value = match align {
+        Some(Align::Left) => "left",
+        Some(Align::Center) => "center",
+        Some(Align::Right) => "right",
+        Some(Align::None) | None => return,
+    };
+    out.push_str(" align=\"");
+    out.push_str(value);
+    out.push('"');
 }
 
 fn list(l: &List, out: &mut String) {
@@ -128,6 +170,16 @@ fn inlines_to(items: &[Inline], out: &mut String) {
                     out.push_str(&escape_text(l));
                 }
                 out.push_str("]]");
+            }
+            // Not a CommonMark construct either; round-trip it as written,
+            // the same as `WikiLink` above.
+            Inline::Citation { keys, narrative } => {
+                if *narrative {
+                    out.push_str(&escape_text(&format!("@{}", keys[0])));
+                } else {
+                    let body = keys.iter().map(|k| format!("@{k}")).collect::<Vec<_>>().join("; ");
+                    out.push_str(&escape_text(&format!("[{body}]")));
+                }
             }
             Inline::SoftBreak => out.push('\n'),
             Inline::HardBreak => out.push_str("<br />\n"),

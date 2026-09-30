@@ -13,7 +13,7 @@ use crate::config::{Config, Db, Lang};
 use crate::eval::plan::BlockRef;
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -73,12 +73,14 @@ pub fn db_command_for(config: &Config, chain: &[BlockRef]) -> Option<Db> {
 /// allowlist posture an unconfigured `command` already gets. `list` never
 /// substitutes `{file}` -- there is no source block driving it, so no
 /// temp file is written; a config template that names `{file}` anyway
-/// just gets an empty one.
+/// just gets an empty one. No source block also means no directory to
+/// spawn it in on that block's behalf -- `.` leaves the caller's own
+/// working directory untouched, unlike `run`/`run_db` below.
 pub fn list_relations(db: &Db, timeout: Duration) -> Result<Option<Vec<String>>, String> {
     let Some(list) = db.list.as_deref() else { return Ok(None) };
     let db_path = db.path.as_deref().unwrap_or_default();
     let label = format!("[db.{}] list", db.name);
-    let output = run_at(list, &label, &[("db", db_path)], std::path::Path::new(""), timeout)?;
+    let output = run_at(list, &label, &[("db", db_path)], Path::new(""), Path::new("."), timeout)?;
     if !output.success {
         return Err(format!("{label} failed: {}", output.stderr));
     }
@@ -88,14 +90,15 @@ pub fn list_relations(db: &Db, timeout: Duration) -> Result<Option<Vec<String>>,
 /// Runs `source` through `lang`'s configured command, honouring
 /// `timeout`. Writes `source` to a fresh temporary file (named for
 /// `lang.ext`, if it has one, since some interpreters dispatch on
-/// extension), substitutes it into `{file}`, spawns, and removes the
-/// temp file again. This cleanup is best-effort, since a leftover in
-/// the OS temp directory costs nothing an editor would ever see.
-pub fn run(lang: &Lang, source: &str, timeout: Duration) -> Result<Output, String> {
+/// extension), substitutes it into `{file}`, spawns in `dir`, and
+/// removes the temp file again. This cleanup is best-effort, since a
+/// leftover in the OS temp directory costs nothing an editor would
+/// ever see.
+pub fn run(lang: &Lang, source: &str, dir: &Path, timeout: Duration) -> Result<Output, String> {
     let path = temp_path(lang.ext.as_deref());
     fs::write(&path, source).map_err(|e| format!("could not write a temporary file: {e}"))?;
     let label = format!("[lang.{}] command", lang.name);
-    let result = run_at(&lang.command, &label, &[], &path, timeout);
+    let result = run_at(&lang.command, &label, &[], &path, dir, timeout);
     let _ = fs::remove_file(&path); // best-effort: nothing downstream depends on this succeeding
     result
 }
@@ -104,12 +107,12 @@ pub fn run(lang: &Lang, source: &str, timeout: Duration) -> Result<Output, Strin
 /// `db.path` alongside `run_at`'s own `{file}`. No `[db.*]` section
 /// configures its own `ext` (decision 16's own example never dispatches on
 /// one), so the temp file carries none.
-pub fn run_db(db: &Db, source: &str, timeout: Duration) -> Result<Output, String> {
+pub fn run_db(db: &Db, source: &str, dir: &Path, timeout: Duration) -> Result<Output, String> {
     let path = temp_path(None);
     fs::write(&path, source).map_err(|e| format!("could not write a temporary file: {e}"))?;
     let db_path = db.path.as_deref().unwrap_or_default();
     let label = format!("[db.{}] command", db.name);
-    let result = run_at(&db.command, &label, &[("db", db_path)], &path, timeout);
+    let result = run_at(&db.command, &label, &[("db", db_path)], &path, dir, timeout);
     let _ = fs::remove_file(&path); // best-effort: nothing downstream depends on this succeeding
     result
 }
@@ -129,12 +132,15 @@ fn temp_path(ext: Option<&str>) -> PathBuf {
 /// to: neither differs in how a process is watched, only in which command
 /// template resolves and which substitutions beyond `{file}` it takes.
 /// `label` names the config key an empty-once-substituted command is
-/// reported against.
+/// reported against. `dir` (decision 49) is the process's own working
+/// directory; `path` is unrelated -- the temp file substituted into
+/// `{file}`, which may sit anywhere the OS puts temp files, never `dir`.
 fn run_at(
     command: &str,
     label: &str,
     extra: &[(&str, &str)],
-    path: &std::path::Path,
+    path: &Path,
+    dir: &Path,
     timeout: Duration,
 ) -> Result<Output, String> {
     let file = path.to_string_lossy();
@@ -145,7 +151,7 @@ fn run_at(
     };
 
     let mut command = Command::new(&argv[0]);
-    command.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.current_dir(dir).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // A fresh process group (pgid == this child's own pid) is what lets a
     // timeout kill the whole tree it spawned, not just this one process.
     // See `kill_tree`.
@@ -358,7 +364,7 @@ mod tests {
             path: Some(db_path.to_string_lossy().into_owned()),
             list: Some("duckdb -csv {db} -c \"select table_name from duckdb_tables()\"".into()),
         };
-        run_db(&db, "CREATE TABLE orders AS SELECT 1 AS n;\n", Duration::from_secs(5)).unwrap();
+        run_db(&db, "CREATE TABLE orders AS SELECT 1 AS n;\n", Path::new("."), Duration::from_secs(5)).unwrap();
         let relations = list_relations(&db, Duration::from_secs(5)).unwrap().unwrap();
         let _ = fs::remove_file(&db_path);
         assert!(relations.contains(&"orders".to_string()), "{relations:?}");
@@ -390,7 +396,7 @@ mod tests {
     #[test]
     fn run_captures_stdout_and_exit_status() {
         let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
-        let out = run(&lang, "echo hi\n", Duration::from_secs(5)).unwrap();
+        let out = run(&lang, "echo hi\n", Path::new("."), Duration::from_secs(5)).unwrap();
         assert_eq!(out.stdout, "hi\n");
         assert!(out.success);
         assert!(!out.timed_out);
@@ -399,7 +405,7 @@ mod tests {
     #[test]
     fn run_captures_stderr_separately_and_a_nonzero_exit() {
         let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
-        let out = run(&lang, "echo oops >&2\nexit 1\n", Duration::from_secs(5)).unwrap();
+        let out = run(&lang, "echo oops >&2\nexit 1\n", Path::new("."), Duration::from_secs(5)).unwrap();
         assert_eq!(out.stderr, "oops\n");
         assert_eq!(out.stdout, "");
         assert!(!out.success);
@@ -409,7 +415,7 @@ mod tests {
     #[test]
     fn run_kills_a_process_that_outlives_its_timeout() {
         let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
-        let out = run(&lang, "sleep 5\n", Duration::from_millis(100)).unwrap();
+        let out = run(&lang, "sleep 5\n", Path::new("."), Duration::from_millis(100)).unwrap();
         assert!(out.timed_out);
         assert!(!out.success);
     }
@@ -425,7 +431,7 @@ mod tests {
         // seconds regardless of the 200ms timeout requested.
         let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
         let start = Instant::now();
-        let out = run(&lang, "sleep 5 && echo done\n", Duration::from_millis(200)).unwrap();
+        let out = run(&lang, "sleep 5 && echo done\n", Path::new("."), Duration::from_millis(200)).unwrap();
         assert!(out.timed_out);
         assert!(start.elapsed() < Duration::from_secs(2), "took {:?}, the timeout did not bound wall-clock time", start.elapsed());
     }
@@ -433,7 +439,25 @@ mod tests {
     #[test]
     fn run_reports_a_program_that_does_not_exist() {
         let lang = Lang { name: "ghost".into(), command: "dankg-eval-nonexistent-binary {file}".into(), ext: None };
-        assert!(run(&lang, "x\n", Duration::from_secs(5)).is_err());
+        assert!(run(&lang, "x\n", Path::new("."), Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn run_spawns_with_the_given_directory_as_its_own_cwd() {
+        // A relative open only succeeds if the spawned process actually
+        // starts in `dir`. This is the symptom the fix pins, not just the
+        // mechanism: without `current_dir`, this reads whatever `cargo
+        // test`'s own process cwd happens to be instead, and fails.
+        let dir = std::env::temp_dir().join(format!("dankg-run-test-{}-cwd", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("marker.txt"), "found it\n").unwrap();
+
+        let lang = Lang { name: "sh".into(), command: "sh {file}".into(), ext: Some("sh".into()) };
+        let out = run(&lang, "cat marker.txt\n", &dir, Duration::from_secs(5)).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(out.success, "stderr: {}", out.stderr);
+        assert_eq!(out.stdout, "found it\n");
     }
 
     #[test]
@@ -448,7 +472,7 @@ mod tests {
             path: Some(":memory:".into()),
             list: None,
         };
-        let out = run_db(&db, "CREATE TABLE x AS SELECT 1 AS n;\nSELECT * FROM x;\n", Duration::from_secs(5)).unwrap();
+        let out = run_db(&db, "CREATE TABLE x AS SELECT 1 AS n;\nSELECT * FROM x;\n", Path::new("."), Duration::from_secs(5)).unwrap();
         assert!(out.success, "stderr: {}", out.stderr);
         assert_eq!(out.stdout, "n\n1\n");
     }
@@ -461,6 +485,6 @@ mod tests {
             path: Some("x.duckdb".into()),
             list: None,
         };
-        assert!(run_db(&db, "select 1;\n", Duration::from_secs(5)).is_err());
+        assert!(run_db(&db, "select 1;\n", Path::new("."), Duration::from_secs(5)).is_err());
     }
 }

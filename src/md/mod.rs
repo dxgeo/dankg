@@ -114,6 +114,23 @@ pub enum Block {
     ThematicBreak { line: u32 },
     /// A construct outside the implemented subset, kept verbatim.
     Passthrough { text: String, line: u32 },
+    /// A GFM pipe table. `aligns` has one entry per header column, read off
+    /// the delimiter row. A data row is kept exactly as parsed -- shorter or
+    /// longer than the header -- never padded or truncated here. Padding is
+    /// a rendering-time concern (`render::typst`, `render::weave_html`), not
+    /// a parsing one: doing it here would make `fmt::verify`'s round-trip
+    /// check disagree with the original document.
+    Table { aligns: Vec<Align>, header: Vec<Vec<Inline>>, rows: Vec<Vec<Vec<Inline>>>, line: u32 },
+}
+
+/// A GFM table column's alignment, read off its delimiter cell
+/// (`:---`/`:---:`/`---:`/`---`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    None,
+    Left,
+    Center,
+    Right,
 }
 
 impl Block {
@@ -123,7 +140,8 @@ impl Block {
             | Block::Code { line, .. }
             | Block::Paragraph { line, .. }
             | Block::ThematicBreak { line }
-            | Block::Passthrough { line, .. } => *line,
+            | Block::Passthrough { line, .. }
+            | Block::Table { line, .. } => *line,
             Block::List(l) => l.line,
         }
     }
@@ -152,7 +170,7 @@ pub struct ListItem {
 /// The first word is the language. Everything after it is `key=value` DanKG
 /// metadata. Other markdown renderers ignore everything past the language.
 /// This way, files carrying DanKG attributes stay portable.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Eq, Default)]
 pub struct InfoString {
     pub lang: Option<String>,
     pub attrs: Vec<(String, String)>,
@@ -164,9 +182,34 @@ pub struct InfoString {
     pub unknown: Vec<String>,
 }
 
+/// `attrs` compares as a set, not a sequence. Every real reader of an
+/// `InfoString` -- `get`, `weave_hidden`, `deps`, all of them -- looks an
+/// attribute up by key, never by position, so two orderings of the same
+/// key=value pairs already mean the same thing. A derived, position-
+/// sensitive `PartialEq` disagreed with that. It is what made
+/// `dankg fmt`'s own round-trip safety check (`fmt::verify`) refuse to
+/// write a file whenever canonicalizing attribute order was the only
+/// change.
+/// `info_text` performs exactly that reorder constantly: it always
+/// re-emits known attributes in `KNOWN_ATTRS`'s own declared order,
+/// regardless of how the author wrote them. `lang` and `unknown` stay
+/// position-sensitive. `unknown` in particular keeps whatever order the
+/// author wrote unrecognized words in, and `dankg fmt` must reproduce
+/// that order exactly when it rebuilds the info string from them.
+impl PartialEq for InfoString {
+    fn eq(&self, other: &Self) -> bool {
+        self.lang == other.lang
+            && self.unknown == other.unknown
+            && self.attrs.len() == other.attrs.len()
+            && self.attrs.iter().all(|kv| other.attrs.contains(kv))
+    }
+}
+
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
-pub const KNOWN_ATTRS: &[&str] =
-    &["db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key", "protocol"];
+pub const KNOWN_ATTRS: &[&str] = &[
+    "db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key", "protocol", "weave",
+    "caption", "figure", "artifact",
+];
 
 impl InfoString {
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -251,6 +294,84 @@ impl InfoString {
     pub fn protocol_lines(&self) -> bool {
         self.get("protocol") == Some("lines")
     }
+
+    /// Whether `dankg weave` should drop this block (and its paired
+    /// eval result, if it has one) from the rendered document entirely.
+    /// `weave=hidden` is the only recognized value; anything else is
+    /// silently `false`, the same "ignore, don't reject" stance
+    /// `protocol_lines()` already takes. Weave-only: `dankg tangle` and
+    /// `dankg eval` never look at this attribute, so a hidden block
+    /// still tangles and still evaluates exactly as before.
+    pub fn weave_hidden(&self) -> bool {
+        self.get("weave") == Some("hidden")
+    }
+
+    /// Whether `dankg weave` should drop only this block's own source
+    /// from a recognized pair (decision 46), while still rendering its
+    /// output, artifact, and provenance. `weave=source-hidden` is the
+    /// only recognized value, read the same loose way `weave_hidden()`
+    /// already reads `hidden`. On a block with no recorded result,
+    /// there is no separate output for this to preserve, so a caller
+    /// treats it the same as `weave_hidden()` there -- decided by the
+    /// caller, not by this accessor.
+    pub fn weave_source_hidden(&self) -> bool {
+        self.get("weave") == Some("source-hidden")
+    }
+
+    /// Whether `dankg weave` should drop only a recognized pair's own
+    /// output half -- its captured result, any `produces=file:`
+    /// artifact, and its provenance line -- while still rendering the
+    /// source. `weave=output-hidden` is the only recognized value.
+    /// Meaningless on a block with no recorded result: there is no
+    /// separate output half to drop, so a caller renders such a block
+    /// exactly as if this were `false`.
+    pub fn weave_output_hidden(&self) -> bool {
+        self.get("weave") == Some("output-hidden")
+    }
+
+    /// A reader-authored caption (decision 52) overriding whichever
+    /// caption a recognized pair would otherwise synthesize: an
+    /// artifact's own `produces=file:PATH` echo when one is present,
+    /// otherwise the `Output`/`Output (failed)` label. Free text, so
+    /// unlike every other attribute here it may contain spaces --
+    /// `parse_info` tokenizes through `cmd::split` rather than
+    /// `str::split_whitespace` for exactly this reason.
+    pub fn caption(&self) -> Option<&str> {
+        self.get("caption")
+    }
+
+    /// Whether a captioned artifact (decision 54) renders inside the
+    /// pair's own block (`figure=inside`) or as a sibling after it
+    /// (`figure=outside`), overriding `dankg weave`'s own
+    /// `--figures-inside`/`--figures-outside` default (decision 56)
+    /// for this one block alone. `None` covers absence and any other
+    /// value, the same "one recognized value per side, otherwise
+    /// ignored" stance every `weave=` value already takes -- a
+    /// caller falls back to the document-wide default rather than
+    /// treating an unrecognized value as an error.
+    pub fn figure_outside(&self) -> Option<bool> {
+        match self.get("figure") {
+            Some("outside") => Some(true),
+            Some("inside") => Some(false),
+            _ => None,
+        }
+    }
+
+    /// A reader-authored slug (decisions 63 and 70) naming the artifact
+    /// this block produces, overriding the default that the artifact's
+    /// own path supplies. It exists because a path is a filesystem
+    /// detail, and because `name` is the block's eval identity and its
+    /// tangle identity. Neither should have to change because the prose
+    /// wants a better word. Absent here means the caller falls back to
+    /// the path's own stem. A block written
+    /// `produces=file:revenue.png` therefore needs no attribute at all.
+    ///
+    /// Spelled `label=` through 0.9.0, and renamed for being too
+    /// generic: one attribute became a Typst label, an HTML id and a
+    /// graph node slug at once (decision 70).
+    pub fn artifact(&self) -> Option<&str> {
+        self.get("artifact")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -266,6 +387,10 @@ pub enum Inline {
     /// `[[target]]` or `[[target|label]]`. Not standard markdown. Resolved
     /// against the root rather than as a path.
     WikiLink { target: String, label: Option<String> },
+    /// `[@key]`/`[@a; @b]` (`narrative: false`), or a bare `@key`
+    /// (`narrative: true`) -- decisions 57/57b. Resolved against a
+    /// document's own bibliography by weave, not here.
+    Citation { keys: Vec<String>, narrative: bool },
     SoftBreak,
     HardBreak,
 }
@@ -289,6 +414,7 @@ impl Inline {
                 Inline::WikiLink { target, label } => {
                     out.push_str(label.as_deref().unwrap_or(target))
                 }
+                Inline::Citation { keys, .. } => out.push_str(&keys.join(", ")),
                 Inline::SoftBreak | Inline::HardBreak => out.push(' '),
             }
         }
@@ -384,6 +510,100 @@ mod tests {
 
         let info = InfoString { lang: Some("sh".into()), ..Default::default() };
         assert!(!info.protocol_lines());
+    }
+
+    #[test]
+    fn weave_hidden_is_true_only_for_the_recognized_value() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "hidden".into())],
+            ..Default::default()
+        };
+        assert!(info.weave_hidden());
+
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "other".into())],
+            ..Default::default()
+        };
+        assert!(!info.weave_hidden(), "an unrecognized value is ignored, not rejected");
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert!(!info.weave_hidden());
+    }
+
+    #[test]
+    fn weave_source_hidden_is_true_only_for_the_recognized_value() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "source-hidden".into())],
+            ..Default::default()
+        };
+        assert!(info.weave_source_hidden());
+        assert!(!info.weave_hidden());
+        assert!(!info.weave_output_hidden());
+
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "hidden".into())],
+            ..Default::default()
+        };
+        assert!(!info.weave_source_hidden());
+    }
+
+    #[test]
+    fn weave_output_hidden_is_true_only_for_the_recognized_value() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("weave".into(), "output-hidden".into())],
+            ..Default::default()
+        };
+        assert!(info.weave_output_hidden());
+        assert!(!info.weave_hidden());
+        assert!(!info.weave_source_hidden());
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert!(!info.weave_output_hidden());
+    }
+
+    #[test]
+    fn caption_is_read_raw_and_none_when_absent() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("caption".into(), "Quarterly revenue".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.caption(), Some("Quarterly revenue"));
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert_eq!(info.caption(), None);
+    }
+
+    #[test]
+    fn figure_outside_reads_the_two_recognized_values() {
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("figure".into(), "outside".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.figure_outside(), Some(true));
+
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("figure".into(), "inside".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.figure_outside(), Some(false));
+
+        let info = InfoString {
+            lang: Some("sh".into()),
+            attrs: vec![("figure".into(), "sideways".into())],
+            ..Default::default()
+        };
+        assert_eq!(info.figure_outside(), None, "an unrecognized value is ignored, not rejected");
+
+        let info = InfoString { lang: Some("sh".into()), ..Default::default() };
+        assert_eq!(info.figure_outside(), None);
     }
 
     #[test]

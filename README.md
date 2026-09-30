@@ -95,6 +95,27 @@ dankg graph notes/index.md --format mermaid
 point. That's what makes it a stable, scriptable surface. `--depth` and
 `--all` shape only the rendered formats: `html`, `dot`, and `mermaid`.
 
+A file that declares a frontmatter `title` gets that title as its own
+top-level node, and every heading in the file hangs off it. A leading
+heading repeating the title is absorbed rather than graphed twice, so
+`title: Hash` over `# Hash` is one node, not two. A file declaring no
+`title` is unchanged: its first heading is what `[text](file.md)`
+lands on.
+
+```markdown
+---
+title: Hash
+---
+
+# Hash
+
+## The hash
+```
+
+Two nodes: `src/hash#hash`, with `src/hash#the-hash` beneath it.
+
+<!-- dankg:depends target=architecture.md#decision-62-a-declared-frontmatter-title-is-the-documents-top-level-node quote="A file that declares no `title` keeps exactly the shape it has today" -->
+
 ### `tui` — explore the graph in a terminal
 
 ```sh
@@ -380,6 +401,299 @@ Then it runs any configured `[tangle.<lang>] glue` and `command` against
 the result.
 
 <!-- dankg:depends target=architecture.md#decision-24-tangle-placement quote="Heading containment + document order; `deps` not consulted." -->
+
+### `weave` — typeset one file as a document
+
+```sh
+dankg weave notes/index.md --format html -o out.html   # a self-contained page
+dankg weave notes/index.md --format pdf                # compiled through Typst
+```
+
+`weave` turns one markdown file into a document a person reads,
+never a whole corpus. It walks every block in the file, not just the
+named, top-level ones `eval`/`tangle` narrow to, and never runs
+anything: it only typesets what is already there, including whatever
+`dankg eval` already recorded.
+
+`author`/`date` frontmatter never render as raw text in either
+backend. The PDF backend gives the document its own cover page first:
+`title` large and centered, `author` beneath it as an unlabeled
+byline, `date` beneath that as a real Typst date -- `2026-09-18`
+becomes "September 18, 2026" -- then every other frontmatter entry as
+its own labeled line: `tags: [rust, typst]` reads as
+"Tags: rust, typst". `bibliography` and any `dankg.*` key never
+appear there; neither is meant for a reader. HTML has no cover page,
+but still gives `author`/`date` the same non-literal treatment right
+beneath its own `<h1>` -- an unlabeled byline, a formatted date --
+without dumping the rest of a document's frontmatter the way the PDF
+cover page does.
+
+Frontmatter's own `cover` key decides where a document's title
+appears. The title block is the PDF cover page, or HTML's `<h1>` and
+byline. The repeated heading is the document's own leading heading,
+when that heading repeats the title. `cover: true` keeps the title
+block and drops the repeated heading, so the title is typeset once.
+`cover: false` does the reverse: no cover page, no generated `<h1>`,
+and the repeated heading carries the title alone. Leave `cover` out
+and nothing changes -- both render, exactly as they always have.
+`cover` itself never appears as a line on the page it names.
+
+```markdown
+---
+title: Weave
+cover: true
+---
+
+# Weave
+
+This page shows "Weave" once, on the cover.
+```
+
+A named block immediately followed by its own recorded
+`<!-- dankg:result ... -->` marker renders as one paired unit --
+source, then a labeled "Output" -- instead of three unrelated blocks.
+A failed run gets a visually distinct pairing. `weave=hidden` on a
+block drops it from the page entirely, paired result included, while
+leaving it tangle-able and eval-able exactly as before:
+
+````markdown
+```python name=setup weave=hidden
+data = {"Rust": 2010, "Typst": 2019}
+```
+
+```python name=show deps=setup
+for name, year in sorted(data.items()):
+    print(f"{name}: {year}")
+```
+````
+
+A stale recorded result (its source changed since `dankg eval` last
+ran) never changes the rendered page. Weave only ever warns on
+`stderr`, the same way a missing `[weave.html] css` does. The same
+file always weaves to the same output, regardless of what state
+anything else is in.
+
+A block that also declares `produces=file:PATH` (see `eval` above)
+may have a real table or a real image sitting on disk, not just
+captured stdout. A `csv`/`tsv`/`json` extension renders as a genuine
+table; an image extension (`png`/`jpg`/`jpeg`/`gif`/`svg`/`webp`)
+renders as a genuine embedded image -- inlined in HTML, copied
+alongside the compiled PDF in Typst's case. Both render inside the
+same paired unit as the block's captured stdout, since a chart-making
+block usually logs a line rather than printing the chart itself:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png
+draw_chart(data, "chart.png")
+print("wrote chart.png")
+```
+````
+
+A synthesized caption -- "Output", or a produced artifact's own raw
+`produces=file:PATH` -- can be overridden with `caption=`, free text
+unlike every other attribute here, so it may carry its own spaces
+when quoted:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png caption="Yearly release count"
+draw_chart(data, "chart.png")
+```
+````
+
+A captioned artifact renders as a real figure, not a caption line
+beside raw content. A table's own caption sits above it and an image's
+own sits below. Both backends number each figure -- "Table 1",
+"Figure 1" -- counting tables and images separately. The PDF's numbers
+are Typst's own figure counter. The HTML page's are `dankg`'s, since
+no browser can put one element's counter value into a link elsewhere
+on the page.
+
+<!-- dankg:depends target=architecture.md#decision-65-one-numbering-pre-pass-feeds-html-and-typst-still-counts-for-itself quote="The count is per kind, never sequential." -->
+
+A figure can be referenced from prose. Its slug is the stem of the
+file it produced. A block writing `produces=file:chart.png` gives a
+figure you point at with `[[#chart]]`. A bare reference reads as the
+figure's own number; add a `|` and your own words to say something
+else:
+
+```markdown
+Release counts have climbed every year (see [[#chart]]), which
+[[#chart|the yearly chart]] shows at a glance.
+```
+
+The slug is the artifact's, not the block's. A block named `plot`
+writing `produces=file:chart.png` is still `[[#chart]]`, because a
+reference names the thing on the page.
+
+`artifact=` renames the target, for when a path is a filesystem detail
+the prose should not have to quote:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png artifact=releases caption="Yearly release count"
+draw_chart(data, "chart.png")
+```
+````
+
+A declared `artifact=` holds lowercase letters, digits, `-` and `_` --
+whatever a heading slug holds. Anything else warns and the slug is
+dropped. The figure still renders and still numbers. Nothing can
+point at it. The warning names a usable slug to paste.
+
+A slug derived from a path is slugified instead of warned about. Two
+artifacts sharing one stem get `chart` and `chart-1`.
+
+A heading is referenceable the same way, by its own slug -- the
+anchor its table-of-contents link already uses. `[[#the-edit-loop]]`
+points at `## The edit loop`. The markdown link form works for either
+target too: `[the chart](#chart)` and `[that section](#the-edit-loop)`
+resolve exactly as the wikilinks above do.
+
+The two backends deliberately differ on one point. A bare heading
+reference reads as a section number in the PDF and as the heading's
+own title in HTML, because HTML numbers no heading. Writing your own
+label makes the two identical. The PDF needs one line in a
+`[weave.pdf] template` before a bare heading reference will compile at
+all, since Typst cannot reference a heading it has not numbered:
+
+```typst
+#set heading(numbering: "1.")
+```
+
+A reference that resolves to nothing fails the weave, on the line you
+wrote it. No page or PDF is written. One run reports every bad
+reference rather than the first. A figure hidden by `weave=hidden` is
+reported as hidden rather than as missing. A wikilink naming another
+file is untouched and still renders as plain text. `weave` reads one
+file, so there is no corpus to resolve that against.
+
+<!-- dankg:depends target=architecture.md#decision-63-a-figures-label-comes-from-its-blocks-own-name-or-from-label quote="A label holds letters, digits, `-` and `_`, and nothing else." -->
+<!-- dankg:depends target=architecture.md#decision-64-a-same-file-wikilink-resolves-against-whatever-the-document-holds quote="An unresolved reference fails the weave." -->
+<!-- dankg:depends target=architecture.md#decision-67-heading-numbering-belongs-to-the-template-not-to-dankg quote="The fix is one line in the author's own `[weave.pdf] template`" -->
+<!-- dankg:depends target=architecture.md#decision-68-a-bare-heading-reference-takes-the-headings-own-title-in-html quote="renders in HTML as a link carrying the heading's own title" -->
+
+Whether that figure sits inside the pair's own block, or stands
+apart from it as a sibling, is `dankg weave`'s own call:
+`--figures-inside`/`--figures-outside` sets the document-wide
+default (`inside`, unless one is given), and one block's own
+`figure=inside`/`figure=outside` overrides it for that block's own
+artifact alone:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png figure=outside
+draw_chart(data, "chart.png")
+```
+````
+
+<!-- dankg:depends target=architecture.md#decision-56---figures-inside--figures-outside-with-a-per-block-figure-override quote="lets one block override that document-wide default for its own artifact alone" -->
+
+An uncaptioned artifact is not a real figure in either backend, so
+`figure=` changes nothing about it.
+
+An artifact that cannot be read, or cannot be copied into the PDF
+build directory, stops the weave and says which file and why. It used
+to warn and carry on. A reference to that figure would then have
+survived into the output with nothing left to point at, which is the
+one thing `weave` refuses to ship.
+
+`weave=hidden` drops both halves of a paired block together.
+`weave=source-hidden` keeps the block's own `produces=file:` artifact
+and nothing else -- no source, no captured output, no provenance
+line -- for a walkthrough that shows a chart without the code behind
+it or the `wrote chart.png` under it. `weave=output-hidden` is the
+mirror image: it keeps the source and drops that whole second half,
+artifact included, for a snippet worth showing without spoiling the
+answer it produces. A failed run is never hidden by either one:
+
+````markdown
+```python name=chart deps=setup produces=file:chart.png weave=source-hidden
+draw_chart(data, "chart.png")
+```
+````
+
+`[weave.html] css` and `[weave.pdf] template`/`command` configure a
+stylesheet, a Typst preamble, and the compiler invocation (see
+Configuration below).
+
+A worked example lives in `example/weave_example`. One file exercises
+every feature above, with the recorded eval results and produced
+artifacts committed alongside it, so it renders without running
+anything first:
+
+```sh
+cd example/weave_example
+dankg weave report.md --format html -o report.html
+dankg weave report.md --format pdf
+```
+
+A woven document can also carry real citations and a real references
+list. `[@key]` cites one entry, `[@a; @b]` cites several together; a
+bare `@key`, with no brackets, is a narrative citation, read as part
+of the sentence rather than set off in parentheses:
+
+```markdown
+The original result [@netwok2019] held for small graphs.
+@smith2020 later extended it to the general case.
+```
+
+Entries come from a `hayagriva`-tagged fence -- Typst's own native
+bibliography format -- an external file named by frontmatter
+`bibliography:`, or both together:
+
+````markdown
+---
+bibliography: refs.yml
+---
+
+```hayagriva
+netwok2019:
+  type: article
+  title: A Networked Result
+  author: Doe, Jane
+  date: 2019
+```
+````
+
+The fence renders exactly like any other fenced block -- its raw YAML
+shown by default, hidden only with `weave=hidden` -- since the tag
+only matters to weave's own bibliography pre-pass, not to rendering.
+Everything Hayagriva's own format supports parses: structured authors
+and editors, translators and other credited roles under `affiliated`,
+a `parent` chain for an article inside an issue inside a journal, and
+every remaining field (`doi`, `url`, `page-range`, and the rest).
+
+The PDF backend hands `@key`/`#cite(...)` straight to Typst, which
+resolves and formats the whole bibliography itself. The HTML backend
+has no such engine, so it renders its own fixed reference-list entry
+instead -- every field shown when present, numbered to match each
+in-text link. A citation with no bibliography configured at all, or
+whose key resolves to nothing, falls back to its own literal text
+rather than broken markup.
+
+<!-- dankg:depends target=architecture.md#recorded-eval-output quote="A named `Code` block immediately followed by its own recorded" -->
+<!-- dankg:depends target=architecture.md#staleness quote="The rendered page itself never changes because of this" -->
+<!-- dankg:depends target=architecture.md#produced-artifacts quote="A recognized pair's source block may also declare" -->
+<!-- dankg:depends target=architecture.md#captions quote="so a caption can carry its own spaces" -->
+<!-- dankg:depends target=architecture.md#hiding-one-half-of-a-pair quote="each keep exactly one thing" -->
+<!-- dankg:depends target=architecture.md#hiding-one-half-of-a-pair quote="A failed run is the one thing neither value hides" -->
+<!-- dankg:depends target=architecture.md#decision-54-a-produced-artifact-renders-as-a-real-captioned-figure quote="gives a reader genuine, automatic" -->
+<!-- dankg:depends target=architecture.md#decision-55-a-captioned-figure-renders-outside-the-pairs-own-block-in-typst quote="nothing to unwrap a figure out of a box from the outside" -->
+<!-- dankg:depends target=architecture.md#decision-58-a-hayagriva-tagged-fence-or-a-frontmatter-bibliography-path-as-a-documents-bibliography-source----full-hayagriva-schema-fidelity quote="Everything Hayagriva's own format supports parses, not a curated" -->
+A citation key your bibliography does not carry fails the weave, on
+the line you wrote it, the same way an unresolved figure reference
+does. A bare `@` in prose parses as a citation. Escape one you meant
+literally:
+
+```markdown
+Ping me \@dan on the forum.
+```
+
+That escape raises nothing, renders as `@dan`, and survives
+`dankg fmt` with its backslash intact. A document that configures no
+bibliography at all is unaffected. There is nothing to resolve a key
+against there, so both `[@key]` and `@key` stay literal text.
+
+<!-- dankg:depends target=architecture.md#decision-66-an-unresolved-citation-fails-the-weave-too quote="A document configuring no bibliography is untouched." -->
+<!-- dankg:depends target=architecture.md#decision-59-citations-and-a-references-list-render-in-both-weave-backends quote="HTML has no such engine to defer to." -->
 
 ### `init` — scaffold a new corpus
 

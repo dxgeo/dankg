@@ -57,6 +57,46 @@ impl Frontmatter {
         self.scalar("title")
     }
 
+    /// A root-relative or file-relative path to an external Hayagriva
+    /// bibliography file (decision 58, `plan-weave-citations.md`), resolved
+    /// through `plan::resolve_artifact` the same way a `produces=file:`
+    /// artifact's own path already is.
+    pub fn bibliography(&self) -> Option<&str> {
+        self.scalar("bibliography")
+    }
+
+    /// `date`'s own (year, month, day), when it matches one of
+    /// Hayagriva's own permissive date shapes -- `YYYY`, `YYYY-MM`, or
+    /// `YYYY-MM-DD`. `None` for anything else: a list value, or text
+    /// that does not parse as one of those three shapes. A renderer
+    /// wanting `date`'s own raw text either way still has `scalar("date")`
+    /// directly, the same accessor this one is built on.
+    pub fn date_parts(&self) -> Option<(u32, Option<u32>, Option<u32>)> {
+        parse_ymd(self.scalar("date")?)
+    }
+
+    /// Whether weave renders this document's own title block -- the PDF
+    /// backend's cover page, the HTML backend's `<h1>` and byline
+    /// (decision 61). `Some(true)` also means weave drops the
+    /// document's own leading heading when it repeats the title, since
+    /// the title block already carries it. `None` covers both an absent
+    /// `cover` key and a value this accessor does not recognize; either
+    /// way the caller keeps its own default. `true`/`false` match
+    /// without regard to case, since `True` and `TRUE` are the same
+    /// boolean to a YAML reader. Nothing else is guessed at, the same
+    /// "half-understood is worse than refused" stance this module holds
+    /// everywhere else.
+    pub fn cover(&self) -> Option<bool> {
+        let raw = self.scalar("cover")?;
+        if raw.eq_ignore_ascii_case("true") {
+            Some(true)
+        } else if raw.eq_ignore_ascii_case("false") {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     pub fn tags(&self) -> Vec<&str> {
         self.list("tags")
     }
@@ -82,6 +122,29 @@ impl Frontmatter {
     pub fn tangle_public(&self) -> bool {
         self.scalar("dankg.tangle.public") == Some("true")
     }
+}
+
+/// `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` -- each segment plain digits, month
+/// `1..=12` and day `1..=31` when present. A fourth segment, a
+/// non-numeric one, or an out-of-range month or day means this was never
+/// a date this function recognizes; the caller's own generic fallback
+/// takes it from there, the same "warn and drop, never guess" stance
+/// this module already holds everywhere else.
+fn parse_ymd(s: &str) -> Option<(u32, Option<u32>, Option<u32>)> {
+    let mut parts = s.split('-');
+    let year: u32 = parts.next()?.parse().ok()?;
+    let month: Option<u32> = parts.next().map(str::parse).transpose().ok()?;
+    let day: Option<u32> = parts.next().map(str::parse).transpose().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if month.is_some_and(|m| !(1..=12).contains(&m)) {
+        return None;
+    }
+    if day.is_some_and(|d| !(1..=31).contains(&d)) {
+        return None;
+    }
+    Some((year, month, day))
 }
 
 /// Split leading frontmatter off a document.
@@ -292,6 +355,52 @@ mod tests {
     }
 
     #[test]
+    fn bibliography_reads_the_new_key() {
+        let (fm, ..) = parse("---\nbibliography: refs.yml\n---\n# Body\n");
+        assert_eq!(fm.bibliography(), Some("refs.yml"));
+    }
+
+    #[test]
+    fn bibliography_is_absent_with_no_such_key() {
+        let (fm, ..) = parse("---\ntitle: T\n---\n# Body\n");
+        assert_eq!(fm.bibliography(), None);
+    }
+
+    #[test]
+    fn date_parts_reads_year_month_day() {
+        let (fm, ..) = parse("---\ndate: 2026-09-18\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), Some((2026, Some(9), Some(18))));
+    }
+
+    #[test]
+    fn date_parts_reads_year_and_month_alone() {
+        let (fm, ..) = parse("---\ndate: 2026-09\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), Some((2026, Some(9), None)));
+    }
+
+    #[test]
+    fn date_parts_reads_a_bare_year() {
+        let (fm, ..) = parse("---\ndate: 2026\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), Some((2026, None, None)));
+    }
+
+    #[test]
+    fn date_parts_is_none_for_an_out_of_range_month_or_day() {
+        let (fm, ..) = parse("---\ndate: 2026-13-01\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), None);
+        let (fm, ..) = parse("---\ndate: 2026-09-32\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), None);
+    }
+
+    #[test]
+    fn date_parts_is_none_for_unparseable_text_or_a_list() {
+        let (fm, ..) = parse("---\ndate: sometime next year\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), None);
+        let (fm, ..) = parse("---\ndate: [2026, 2027]\n---\n# Body\n");
+        assert_eq!(fm.date_parts(), None);
+    }
+
+    #[test]
     fn no_frontmatter_leaves_source_untouched() {
         let (fm, rest, line, d) = parse("# Just a heading\n");
         assert!(fm.is_empty());
@@ -378,5 +487,35 @@ mod tests {
     fn tangle_public_rejects_anything_but_exactly_true() {
         let (fm, _, _, _) = parse("---\ndankg.tangle.public: yes\n---\n");
         assert!(!fm.tangle_public(), "a typo should never silently widen visibility");
+    }
+
+    #[test]
+    fn cover_is_none_with_no_key_at_all() {
+        let (fm, _, _, _) = parse("# No frontmatter\n");
+        assert_eq!(fm.cover(), None);
+    }
+
+    #[test]
+    fn cover_reads_both_booleans() {
+        let (on, _, _, _) = parse("---\ncover: true\n---\n");
+        assert_eq!(on.cover(), Some(true));
+        let (off, _, _, _) = parse("---\ncover: false\n---\n");
+        assert_eq!(off.cover(), Some(false));
+    }
+
+    #[test]
+    fn cover_ignores_case_the_way_a_yaml_reader_does() {
+        let (fm, _, _, _) = parse("---\ncover: True\n---\n");
+        assert_eq!(fm.cover(), Some(true), "`True` is the same boolean as `true`");
+        let (fm, _, _, _) = parse("---\ncover: FALSE\n---\n");
+        assert_eq!(fm.cover(), Some(false));
+    }
+
+    #[test]
+    fn cover_reads_anything_else_as_no_answer() {
+        let (fm, _, _, _) = parse("---\ncover: yes\n---\n");
+        assert_eq!(fm.cover(), None, "an unrecognized value is never guessed at");
+        let (fm, _, _, _) = parse("---\ncover: [true]\n---\n");
+        assert_eq!(fm.cover(), None, "a list is not a boolean");
     }
 }
