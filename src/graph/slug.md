@@ -48,6 +48,32 @@ pub fn slugify(title: &str) -> String {
 
     out
 }
+
+/// Whether a declared slug is one every reader of it can carry: one
+/// `slugify` leaves alone. That is what lets an artifact slug, a block
+/// name and a heading slug share a single fragment namespace
+/// (decisions 64 and 70). Typst itself allows `.` and `:` too, and
+/// both are left out because either one changes what a CSS selector
+/// means.
+///
+/// Stated as a fixed point rather than as a charset, because the
+/// charset alone was not the whole rule. `slugify` also lowercases,
+/// and decision 70 routes a declared slug through `Slugger` to
+/// reserve it. `artifact=Chart` passed a charset check, came back
+/// from `Slugger` as `chart`, and left `[[#Chart]]` looking up a
+/// fragment nothing carried -- a fragment is compared verbatim. A
+/// silently repaired slug is exactly what decision 63 refuses, so the
+/// repair is refused here instead: the check rejects anything
+/// `slugify` would rewrite, and the author gets a diagnostic naming
+/// the one they wrote.
+///
+/// Lived in `weave.rs` as `usable_label` through 0.9.0. It moved here
+/// when decision 69 gave the graph a second caller for it. Two copies
+/// of one rule is two chances for `dankg weave` and `dankg graph` to
+/// disagree about which slug a document declares.
+pub fn usable_slug(slug: &str) -> bool {
+    !slug.is_empty() && slugify(slug) == slug
+}
 ```
 
 A raw slug is only unique within the heading that produced it. A whole
@@ -66,6 +92,24 @@ pub struct Slugger {
 impl Slugger {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether `slug` is already spoken for in this document. Decision
+    /// 70 refuses to suffix a *declared* artifact slug, so its caller
+    /// has to ask before assigning rather than react afterwards --
+    /// `assign` alone cannot say no. Takes the slug verbatim, because
+    /// the only caller already rejected anything `slugify` would
+    /// rewrite (`usable_slug`, below).
+    pub fn taken(&self, slug: &str) -> bool {
+        self.seen.contains_key(slug)
+    }
+
+    /// Reserves `slug` verbatim, suffixing nothing. `assign` is the
+    /// wrong tool for a slug that is already final: it slugifies its
+    /// argument first, and a caller that has to compare the result
+    /// against what it passed in is asking this question instead.
+    pub fn reserve(&mut self, slug: &str) {
+        self.seen.insert(slug.to_string(), 0);
     }
 
     pub fn assign(&mut self, title: &str) -> String {

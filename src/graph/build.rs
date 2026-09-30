@@ -7,7 +7,9 @@
 //! [`super::resolve`] turns them into edges once the whole corpus is known.
 
 use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
-use super::slug::{slugify, Slugger};
+use super::slug::{slugify, usable_slug, Slugger};
+use crate::diag::Diags;
+use crate::eval::plan;
 use crate::eval::result::recorded_provenance;
 use crate::md::{Block, Document, Inline};
 
@@ -54,7 +56,7 @@ impl ParsedFile {
     }
 }
 
-pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
+pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> ParsedFile {
     let key = strip_extension(path);
     let tags: Vec<String> = doc.frontmatter.tags().into_iter().map(str::to_string).collect();
     let aliases = doc.frontmatter.aliases().into_iter().map(str::to_string).collect();
@@ -190,6 +192,39 @@ pub fn build(path: &str, doc: &Document, line_count: u32) -> ParsedFile {
                     resolved: true,
                     kind: NodeKind::Block,
                 });
+
+                // Decision 69: the file a block writes is a node in
+                // its own right, joined to that block by the same
+                // `Produces` edge a relation already uses. The slug
+                // comes out of this file's one `Slugger`, right here,
+                // so an artifact can never claim a fragment a heading
+                // or a block name already holds (decision 70). Order
+                // matters and is document order: the block's own name
+                // is reserved just above, so `chart` beside
+                // `produces=file:chart.png` leaves the artifact
+                // `chart-1` rather than the other way round.
+                if let Some(written) = info.produces().and_then(plan::parse_artifact) {
+                    if let Some(slug) =
+                        artifact_slug(info.artifact(), written, *line, &mut slugger, diags)
+                    {
+                        let artifact_id = NodeId::new(&key, slug);
+                        nodes.push(artifact_node(
+                            &artifact_id,
+                            written,
+                            path,
+                            *line,
+                            &block_id,
+                            &tags,
+                        ));
+                        containment.push(Edge {
+                            from: block_id.clone(),
+                            to: artifact_id,
+                            kind: EdgeKind::Produces,
+                            line: 0,
+                            reciprocated: false,
+                        });
+                    }
+                }
 
                 // Provenance without a driver: a db= block's own
                 // inferred Produces/Reads (decision 36's write-back),
@@ -369,6 +404,111 @@ fn push_relation_node(nodes: &mut Vec<Node>, id: &NodeId, title: &str) {
     nodes.push(relation_node(id, title));
 }
 
+/// An artifact's own default slug: its path's stem, slugified
+/// (decision 70). `produces=file:data/quarterly.csv` gives
+/// `quarterly`. `None` when the value names no `file:` artifact at
+/// all, which is a block that produces no file and needs no slug.
+///
+/// Lived in `weave.rs` through 0.9.0. It moved here when decision 69
+/// gave the graph a second caller, for the same reason `usable_slug`
+/// did: one derivation, so `dankg weave` and `dankg graph` cannot
+/// disagree about what an artifact is called.
+pub fn artifact_stem(written: &str) -> String {
+    slugify(file_stem(&strip_extension(written)))
+}
+
+/// Which slug an artifact answers to, and whether it gets one at all.
+///
+/// A derived slug is slugified and suffixed, so neither refusal below
+/// can fire on it. A *declared* one is checked as written and never
+/// repaired, which is decision 63's rule carried forward by decision
+/// 70: a silently repaired slug is a reference that silently points
+/// somewhere else. A refused declaration falls back to the derived
+/// default rather than leaving the artifact unaddressable -- the file
+/// is still there, and a node for it is still worth more than none.
+///
+/// An empty stem is dropped rather than handed to `Slugger`, whose own
+/// empty-base fallback is `section`. No artifact should answer to that.
+fn artifact_slug(
+    declared: Option<&str>,
+    written: &str,
+    line: u32,
+    slugger: &mut Slugger,
+    diags: &mut Diags,
+) -> Option<String> {
+    let Some(declared) = declared else { return derived_artifact_slug(written, slugger) };
+
+    if !usable_slug(declared) {
+        // `slugify` is the suggestion, unless it has none to give: a
+        // value of pure punctuation slugifies to nothing, and "try ``"
+        // is worse than no advice at all.
+        let fixed = slugify(declared);
+        let advice = if fixed.is_empty() { String::new() } else { format!("; try `{fixed}`") };
+        diags.warn(
+            line,
+            format!("artifact slug `{declared}` may hold only lowercase letters, digits, `-` and `_`{advice}"),
+        );
+        return derived_artifact_slug(written, slugger);
+    }
+    if slugger.taken(declared) {
+        diags.warn(
+            line,
+            format!("artifact slug `{declared}` is already taken in this file; this artifact falls back to its path"),
+        );
+        return derived_artifact_slug(written, slugger);
+    }
+    slugger.reserve(declared);
+    Some(declared.to_string())
+}
+
+/// The path-derived half of `artifact_slug`, split out because it is
+/// reached from three places: no declaration at all, and each of the
+/// two refusals above.
+fn derived_artifact_slug(written: &str, slugger: &mut Slugger) -> Option<String> {
+    let stem = artifact_stem(written);
+    (!stem.is_empty()).then(|| slugger.assign(&stem))
+}
+
+/// Builds the `Artifact` node for `id`, titled `written` -- the path
+/// exactly as the block declared it (decision 74). The title and the
+/// slug answer different questions. A title is what a reader sees in
+/// the TUI tree and in a drawn graph's own label, so it keeps the
+/// directory: two artifacts whose paths share one stem would otherwise
+/// read as one row. A slug is what a reference resolves against, and
+/// `[[#quarterly]]` is the point of the whole plan.
+///
+/// `line` is the producing block's own, borrowed and not owned
+/// (decision 75). It is what `enter` hands the reader's editor, and
+/// what a dot or HTML label prints after the file name. There is no
+/// other line to look at. `end_line` matches it, because a span this
+/// node does not own has nothing to measure.
+/// `tags` are this file's own, carried the way every other node in the
+/// file carries them. A relation takes none, because a relation belongs
+/// to a database rather than to any one file. An artifact belongs to
+/// the file whose block writes it, so the file's tags are its too.
+fn artifact_node(
+    id: &NodeId,
+    written: &str,
+    path: &str,
+    line: u32,
+    block: &NodeId,
+    tags: &[String],
+) -> Node {
+    Node {
+        id: id.clone(),
+        title: written.to_string(),
+        file: path.to_string(),
+        line,
+        end_line: line,
+        level: BLOCK_LEVEL,
+        parent: Some(block.clone()),
+        tags: tags.to_vec(),
+        external: Vec::new(),
+        resolved: true,
+        kind: NodeKind::Artifact,
+    }
+}
+
 /// A heading owns every line up to the next heading of the same or higher
 /// level.
 /// Heading nodes only. A block's `end_line` already came straight from the
@@ -534,9 +674,17 @@ mod tests {
     }
 
     fn build_src(path: &str, src: &str) -> ParsedFile {
+        build_src_diags(path, src).0
+    }
+
+    /// The same build, with the diagnostics it produced. Only decision
+    /// 70's own refusals warn from here, so only those tests need this.
+    fn build_src_diags(path: &str, src: &str) -> (ParsedFile, Diags) {
         let doc = parse(src);
         let lines = src.lines().count() as u32;
-        build(path, &doc, lines)
+        let mut diags = Diags::new(path);
+        let built = build(path, &doc, lines, &mut diags);
+        (built, diags)
     }
 
     #[test]
@@ -862,6 +1010,114 @@ mod tests {
         let b = f.nodes.iter().find(|n| n.id.slug == "b").unwrap();
         assert_eq!(a.parent.as_ref().unwrap().slug, "one");
         assert_eq!(b.parent.as_ref().unwrap().slug, "two");
+    }
+
+    #[test]
+    fn a_produces_file_artifact_becomes_a_node_slugged_from_its_stem() {
+        let f = build_src("a.md", "```sh name=chart produces=file:data/quarterly.csv\n:\n```\n");
+        let artifact = f.nodes.iter().find(|n| n.kind == NodeKind::Artifact).expect("artifact node exists");
+        assert_eq!(artifact.id, NodeId::new("a", "quarterly"));
+        // Decision 74: the title keeps the directory, the slug does not.
+        assert_eq!(artifact.title, "data/quarterly.csv");
+        let block = f.nodes.iter().find(|n| n.id.slug == "chart").unwrap();
+        assert!(
+            f.containment.iter().any(|e| e.from == block.id && e.to == artifact.id && e.kind == EdgeKind::Produces),
+            "{:?}",
+            f.containment
+        );
+    }
+
+    /// Decision 69 adds a namespace rather than altering one. A `db=`
+    /// block's own relation has to come out exactly as it did before.
+    #[test]
+    fn a_db_relation_is_untouched_by_the_artifact_namespace() {
+        let f = build_src(
+            "a.md",
+            "```sql db=warehouse name=setup\n:\n```\n\n<!-- dankg:result name=setup hash=0000000000000001 produces=orders -->\n\n```\nok\n```\n",
+        );
+        let relation = f.nodes.iter().find(|n| n.kind == NodeKind::Relation).expect("relation node exists");
+        assert_eq!(relation.id, NodeId::new("db:warehouse", "orders"));
+        assert_eq!(relation.line, 0, "a relation owns no line; only an artifact borrows one");
+        assert!(f.nodes.iter().all(|n| n.kind != NodeKind::Artifact), "no file was produced here");
+    }
+
+    #[test]
+    fn a_declared_artifact_reslugs_the_node_and_leaves_the_block_alone() {
+        let f = build_src("a.md", "```sh name=chart produces=file:data/quarterly.csv artifact=trend\n:\n```\n");
+        let artifact = f.nodes.iter().find(|n| n.kind == NodeKind::Artifact).unwrap();
+        assert_eq!(artifact.id, NodeId::new("a", "trend"));
+        assert_eq!(artifact.title, "data/quarterly.csv", "a declaration renames the slug, never the title");
+        assert!(f.nodes.iter().any(|n| n.id.slug == "chart" && n.kind == NodeKind::Block));
+    }
+
+    /// Decision 70 refuses to suffix a declared slug. It warns and falls
+    /// back to the path instead, and the heading that already held the
+    /// name keeps it unsuffixed.
+    #[test]
+    fn a_declared_artifact_colliding_with_a_heading_warns_and_falls_back() {
+        let (f, diags) =
+            build_src_diags("a.md", "# Trend\n\n```sh name=chart produces=file:data/quarterly.csv artifact=trend\n:\n```\n");
+        let artifact = f.nodes.iter().find(|n| n.kind == NodeKind::Artifact).unwrap();
+        assert_eq!(artifact.id, NodeId::new("a", "quarterly"), "falls back to the path stem");
+        let heading = f.nodes.iter().find(|n| n.kind == NodeKind::Heading).unwrap();
+        assert_eq!(heading.id.slug, "trend", "the heading keeps its own unsuffixed slug");
+        assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
+        assert_eq!(diags.items()[0].line, 3, "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("already taken"), "{:?}", diags.items());
+    }
+
+    /// A derived collision is not the author's mistake to fix, so
+    /// `Slugger` settles it silently -- the same treatment a repeated
+    /// heading already gets.
+    #[test]
+    fn two_artifacts_deriving_one_slug_are_suffixed_and_never_warned_about() {
+        let (f, diags) = build_src_diags(
+            "a.md",
+            "```sh name=one produces=file:a/report.csv\n:\n```\n\n```sh name=two produces=file:b/report.csv\n:\n```\n",
+        );
+        let slugs: Vec<&str> =
+            f.nodes.iter().filter(|n| n.kind == NodeKind::Artifact).map(|n| n.id.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["report", "report-1"]);
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
+    }
+
+    /// Decision 70's own ordering: the block's name is reserved first,
+    /// so the artifact beside it takes the suffix rather than the block.
+    #[test]
+    fn a_block_name_wins_the_slug_over_the_artifact_beside_it() {
+        let f = build_src("a.md", "```sh name=chart produces=file:chart.png\n:\n```\n");
+        let block = f.nodes.iter().find(|n| n.kind == NodeKind::Block).unwrap();
+        let artifact = f.nodes.iter().find(|n| n.kind == NodeKind::Artifact).unwrap();
+        assert_eq!(block.id.slug, "chart");
+        assert_eq!(artifact.id.slug, "chart-1");
+    }
+
+    /// Decision 75. The line is the producing block's, and the span is
+    /// not a span at all -- there is nothing the artifact owns to measure.
+    #[test]
+    fn an_artifact_borrows_its_blocks_line_and_measures_no_span() {
+        let f = build_src("a.md", "# One\n\n```sh name=chart produces=file:chart.png\n:\n```\n");
+        let block = f.nodes.iter().find(|n| n.kind == NodeKind::Block).unwrap();
+        let artifact = f.nodes.iter().find(|n| n.kind == NodeKind::Artifact).unwrap();
+        assert_eq!(artifact.line, block.line);
+        assert_eq!(artifact.end_line, artifact.line);
+        assert_eq!(artifact.parent.as_ref(), Some(&block.id), "decision 73 parents it to its block");
+    }
+
+    /// A `produces=` naming a relation rather than a file is not an
+    /// artifact. Only the `file:` prefix builds one.
+    #[test]
+    fn a_produces_without_a_file_prefix_builds_no_artifact() {
+        let f = build_src("a.md", "```sh name=chart produces=orders\n:\n```\n");
+        assert!(f.nodes.iter().all(|n| n.kind != NodeKind::Artifact));
+    }
+
+    #[test]
+    fn an_unusable_declared_artifact_warns_and_falls_back_to_the_path() {
+        let (f, diags) = build_src_diags("a.md", "```sh name=chart produces=file:chart.png artifact=Chart\n:\n```\n");
+        let artifact = f.nodes.iter().find(|n| n.kind == NodeKind::Artifact).unwrap();
+        assert_eq!(artifact.id.slug, "chart-1", "the block already holds `chart`");
+        assert!(diags.items()[0].message.contains("may hold only lowercase letters"), "{:?}", diags.items());
     }
 
     #[test]

@@ -61,10 +61,25 @@ pub struct NodeLinks {
     pub outgoing: Vec<NodeId>,
     /// `Link` edges `id` is the `to` of: `backlinks[i] -> id`.
     pub backlinks: Vec<NodeId>,
-    /// `Produces` edges `id` is the `from` of: relations `id` writes.
+    /// `Produces` edges `id` is the `from` of whose far end is a
+    /// relation: relations `id` writes.
     pub produces: Vec<NodeId>,
     /// `Reads` edges `id` is the `to` of: relations `id` reads.
     pub reads: Vec<NodeId>,
+    /// `Produces` edges whose far end is an artifact instead
+    /// (decision 69): the files `id` writes.
+    ///
+    /// Kept apart from `produces` because a table and a file are not
+    /// the same thing, and one caller already depends on the
+    /// difference. The tree badge's own `⚭` means "touches a
+    /// relation". Folding an artifact into `produces` made every
+    /// `produces=file:` block claim a relation it does not have.
+    ///
+    /// The cross-reference panel does not read this yet. It already
+    /// prints the same fact from `DepData::file_deps`, whose second
+    /// corpus parse `plans/plan-graph-edge-coverage.md` is what retires.
+    /// Two rows saying `produces: out.csv` would be worse than one.
+    pub artifacts: Vec<NodeId>,
 }
 
 pub fn links_for(graph: &Graph, id: &NodeId) -> NodeLinks {
@@ -73,7 +88,13 @@ pub fn links_for(graph: &Graph, id: &NodeId) -> NodeLinks {
         match edge.kind {
             EdgeKind::Link if edge.from == *id => out.outgoing.push(edge.to.clone()),
             EdgeKind::Link if edge.to == *id => out.backlinks.push(edge.from.clone()),
-            EdgeKind::Produces if edge.from == *id => out.produces.push(edge.to.clone()),
+            EdgeKind::Produces if edge.from == *id => {
+                if graph.node(&edge.to).is_some_and(|n| n.kind == NodeKind::Artifact) {
+                    out.artifacts.push(edge.to.clone());
+                } else {
+                    out.produces.push(edge.to.clone());
+                }
+            }
             EdgeKind::Reads if edge.to == *id => out.reads.push(edge.from.clone()),
             _ => {}
         }

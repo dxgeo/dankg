@@ -54,11 +54,12 @@ distinguishes "no such figure" from "that name belongs to something
 else here".
 
 **The cache stores what resolution reads.** `graph/cache.rs` is a
-line-oriented format at `VERSION = 3`. Anything new that resolution
-depends on has to be encoded, decoded, and version-bumped. A warm
-cache otherwise serves pre-change nodes that still hash as fresh.
+line-oriented format, and it stood at `VERSION = 3` when this plan was
+written. Anything new that resolution depends on has to be encoded,
+decoded, and version-bumped. A warm cache otherwise serves pre-change
+nodes that still hash as fresh. Decision 69 took the bump to 4.
 
-<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 3;" -->
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 4;" -->
 
 ## What this reuses
 

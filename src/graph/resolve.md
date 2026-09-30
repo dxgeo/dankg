@@ -389,8 +389,9 @@ mod tests {
             .map(|(path, src)| {
                 let mut d = Diags::new(*path);
                 let doc = Document::parse(src, &mut d);
+                let built = build::build(path, &doc, src.lines().count() as u32, &mut d);
                 diags.absorb(d);
-                build::build(path, &doc, src.lines().count() as u32)
+                built
             })
             .collect();
         (parsed, diags)
@@ -505,6 +506,40 @@ mod tests {
         ]);
         assert_eq!(links(&g)[0].1, "b#two");
         assert!(d.is_empty());
+    }
+
+    #[test]
+    /// The whole point of decision 69. A block and the file it writes
+    /// are two targets, and a fragment reaches each by its own name.
+    /// `resolve` needs no change for this: the artifact's slug is a real
+    /// slug in its own file, which is what makes it a node rather than
+    /// an alias on the block.
+    #[test]
+    fn a_fragment_reaches_an_artifact_and_its_block_separately() {
+        let (g, d) = graph_of(&[(
+            "a.md",
+            "# One\n\nSee [[#quarterly]] and [[#chart]].\n\n```sh name=chart produces=file:data/quarterly.csv\n:\n```\n",
+        )]);
+        // `links` comes back in `Graph::sort`'s own order, not the
+        // document's, so this asserts on membership rather than sequence.
+        let mut targets: Vec<String> = links(&g).iter().map(|(_, to, _)| to.clone()).collect();
+        targets.sort();
+        assert_eq!(targets, vec!["a#chart", "a#quarterly"]);
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    /// Decision 69 is what makes this reachable. Before it, a fragment
+    /// naming a produced file resolved to nothing and `dankg check`
+    /// reported a dead link over a reference that was correct.
+    #[test]
+    fn a_fragment_naming_a_produced_file_is_no_longer_a_dead_link() {
+        let (g, _) = graph_of(&[(
+            "a.md",
+            "# One\n\n[[#quarterly]]\n\n```sh name=chart produces=file:data/quarterly.csv\n:\n```\n",
+        )]);
+        let target = g.node(&NodeId::new("a", "quarterly")).expect("artifact node exists");
+        assert!(target.resolved, "a placeholder would mean the reference still dangles");
+        assert_eq!(target.title, "data/quarterly.csv");
     }
 
     #[test]

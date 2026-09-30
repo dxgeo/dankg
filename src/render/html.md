@@ -197,6 +197,11 @@ fn node_svg(out: &mut String, laid: &layout::LaidNode, node: Option<&Node>, entr
         // same distinction with fillcolor. tui/draw.rs renders it with a
         // different border glyph.
         classes.push_str(" block");
+    } else if node.is_some_and(|n| n.kind == NodeKind::Artifact) {
+        // An artifact is a path (decision 73), so it shares the block's
+        // own monospace and takes a fill of its own. Every format draws
+        // the distinction its own way, the same as for a block.
+        classes.push_str(" artifact");
     }
     if entry {
         classes.push_str(" entry");

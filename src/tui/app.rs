@@ -1008,6 +1008,9 @@ fn build_children(index: &Graph) -> (HashMap<NodeId, Vec<NodeId>>, Vec<NodeId>) 
     let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     let mut roots = Vec::new();
     for node in &index.nodes {
+        // A relation is corpus-wide and parentless, so it has no place
+        // in a file's own tree. An artifact does: decision 73 draws it,
+        // parented to the block that writes it (decision 69).
         if node.kind == NodeKind::Relation {
             continue;
         }
@@ -1050,6 +1053,12 @@ fn kind_marker(kind: NodeKind) -> &'static str {
     match kind {
         NodeKind::Block => "» ",
         NodeKind::Heading => "",
+        // Decision 73. An artifact's row sits directly under the block
+        // that writes it, so its marker says "this came out of that"
+        // rather than repeating what indentation already shows. Kept
+        // clearly distinct from a block's own `»`, which it would
+        // otherwise sit one column away from and read as.
+        NodeKind::Artifact => "↳ ",
         NodeKind::Relation => "",
     }
 }
@@ -2176,6 +2185,13 @@ impl App {
             return;
         }
         let Some(node) = self.index.node(&self.selected) else { return };
+        // Decision 75. An artifact's span is its producing block's own
+        // line, borrowed rather than owned, so `blocks_in_section` would
+        // hand back exactly that block -- which its own node already
+        // offers one row up. Cycling from here would duplicate it.
+        if node.kind == NodeKind::Artifact {
+            return;
+        }
         let file = self.root.join(&node.file).to_string_lossy().into_owned();
         let blocks = eval::blocks_in_section(&file, node.line, node.end_line);
         if blocks.is_empty() {
@@ -2349,7 +2365,7 @@ impl App {
     /// for the same reason.
     fn write_tag_for(&mut self, id: &NodeId, kind: &str) -> bool {
         let Some(node) = self.index.node(id) else { return false };
-        if node.kind == NodeKind::Relation || !node.resolved {
+        if matches!(node.kind, NodeKind::Relation | NodeKind::Artifact) || !node.resolved {
             return false;
         }
         let path = self.root.join(&node.file);
@@ -2370,7 +2386,7 @@ impl App {
     /// `clear_selected_tag` is the one caller.
     fn clear_tag_for(&mut self, id: &NodeId) -> bool {
         let Some(node) = self.index.node(id) else { return false };
-        if node.kind == NodeKind::Relation || !node.resolved {
+        if matches!(node.kind, NodeKind::Relation | NodeKind::Artifact) || !node.resolved {
             return false;
         }
         let path = self.root.join(&node.file);
@@ -2396,6 +2412,13 @@ impl App {
         let Some(node) = self.index.node(&self.selected) else { return };
         if node.kind == NodeKind::Relation {
             self.status = Some("a relation node can't be tagged".to_string());
+            return;
+        }
+        // Decision 75. An artifact's line is its block's, borrowed and
+        // not owned. A marker written there would land on the producing
+        // block's own fence and read as that block's tag.
+        if node.kind == NodeKind::Artifact {
+            self.status = Some("an artifact node can't be tagged".to_string());
             return;
         }
         if !node.resolved {

@@ -49,8 +49,10 @@ const MAGIC: &str = "!dankg-cache";
 /// not an error. 2: a node row grew a `kind` field (block nodes). 3: a
 /// declared frontmatter `title` became the file's own top-level node
 /// (decision 62), so an unchanged file's node set changed underneath an
-/// entry that still hashes as fresh.
-const VERSION: u32 = 3;
+/// entry that still hashes as fresh. 4: a `produces=file:` artifact
+/// became a node of its own (decision 69), which is the same trap
+/// again -- the file is untouched and its node set is not.
+const VERSION: u32 = 4;
 /// Separates the items of a list field. `escape` guarantees it never survives
 /// inside one, so splitting on it is exact.
 const UNIT: char = '\u{1f}';
@@ -374,11 +376,7 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
             "edge" if f.len() == 7 => containment.push(Edge {
                 from: NodeId::new(unescape(f[0]), unescape(f[1])),
                 to: NodeId::new(unescape(f[2]), unescape(f[3])),
-                kind: match f[4] {
-                    "contains" => EdgeKind::Contains,
-                    "link" => EdgeKind::Link,
-                    _ => return None,
-                },
+                kind: EdgeKind::parse(f[4])?,
                 line: f[5].parse().ok()?,
                 reciprocated: unflag(f[6])?,
             }),
@@ -503,7 +501,7 @@ mod tests {
     fn parsed() -> ParsedFile {
         let mut d = Diags::new("a.md");
         let doc = Document::parse(SOURCE, &mut d);
-        build::build("notes/a.md", &doc, SOURCE.lines().count() as u32)
+        build::build("notes/a.md", &doc, SOURCE.lines().count() as u32, &mut d)
     }
 
     fn reported() -> Vec<Diagnostic> {
@@ -531,6 +529,35 @@ mod tests {
         assert_eq!(decoded.links, file.links);
         assert!(!file.nodes.is_empty() && !file.links.is_empty(), "the fixture exercises both");
         assert_eq!(diags, reported(), "a hit must report what the parse reported");
+    }
+
+    /// Decision 69's own round trip. `SOURCE` above produces no file, so
+    /// this fixture carries both an artifact node and the `Produces` edge
+    /// that reaches it.
+    ///
+    /// It is also the regression test for the decode bug `EdgeKind::parse`
+    /// fixed. Encoding wrote every containment-vec edge by its own
+    /// `as_str`, and decoding matched `contains` and `link` alone, so any
+    /// file holding a `Produces` edge decoded to `None` and missed the
+    /// cache on every run forever. No test caught it because no fixture
+    /// had ever put such an edge through `encode` and back.
+    #[test]
+    fn an_artifact_node_and_its_produces_edge_survive_a_round_trip() {
+        let src = "# One\n\n```sh name=chart produces=file:data/quarterly.csv\n:\n```\n";
+        let mut d = Diags::new("notes/a.md");
+        let doc = Document::parse(src, &mut d);
+        let file = build::build("notes/a.md", &doc, src.lines().count() as u32, &mut d);
+        assert!(file.nodes.iter().any(|n| n.kind == NodeKind::Artifact), "the fixture builds one");
+        assert!(
+            file.containment.iter().any(|e| e.kind == EdgeKind::Produces),
+            "the fixture builds one: {:?}",
+            file.containment
+        );
+
+        let text = encode(&stamp(), &file, &[]);
+        let (decoded, _) = decode(&text, &stamp()).expect("entry is fresh");
+        assert_eq!(decoded.nodes, file.nodes);
+        assert_eq!(decoded.containment, file.containment);
     }
 
     #[test]
