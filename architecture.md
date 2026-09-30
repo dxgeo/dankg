@@ -796,6 +796,8 @@ pointing at it.
 
 ## Decision 63: A figure's label comes from its block's own `name=`, or from `label=`
 
+(Decision 70 narrows this twice. The attribute is `artifact=`, not `label=`. The default is the artifact's own path stem, not the block's `name=`. Everything below about the charset, the collision rule, and each backend's own identifier stands unchanged.)
+
 A captioned `produces=file:` artifact renders as a real figure in both backends (decision 54). Nothing named it until now. Nothing could point at it. Its label is the block's own `name=`. That name is already unique within its file by construction (decision 19), and already that block's own graph node slug. A block written `name=chart produces=file:chart.png caption="Revenue"` is therefore labelled with no new attribute written at all.
 
 A `label` attribute joins `KNOWN_ATTRS` beside `caption` and `figure`, and overrides that default for one block. `weave::figure_labels` is the one walk that resolves the two, keyed by the block index each pair starts at -- the same key `produced_artifacts` already hands both renderers its own artifacts under. A block with no artifact in either map is not a figure and takes no label. A figure hidden by `weave=hidden` or `weave=output-hidden` (decision 53) does take one, because each backend applies its own hiding and the block is still in `doc.blocks` when the walk reaches it.
@@ -850,7 +852,7 @@ Decision 41 narrows. Weave resolves a wikilink whose name half is empty. A same-
 
 Every same-file fragment that finds a target resolves, not figure labels alone. `graph::resolve::find_slug` searches a file's nodes, which hold headings and blocks alike. A rule admitting only figures would carve an exception out of machinery that does not want one. This is strictly larger than the figure case and strictly additive: a `[[#some-heading]]` that renders as plain text in an already-woven document starts rendering as a link. Nothing renders as less than it does today.
 
-`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads. Typst gets the fragment's own label, `fig:NAME` or `sec:SLUG`. HTML gets the fragment's own anchor id and the text a bare reference shows. Figures go in before headings. A figure label therefore wins a clash with a heading slug. A label is declared, by `label=` or by a block's own `name=`. A slug is derived from prose.
+`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads. Typst gets the fragment's own label, `fig:NAME` or `sec:SLUG`. HTML gets the fragment's own anchor id and the text a bare reference shows. Figures go in before headings. A figure label therefore wins a clash with a heading slug. A label is declared, by `label=` or by a block's own `name=`. A slug is derived from prose. (Decision 70 removes that last justification, since a figure slug is derived from a path unless `artifact=` says otherwise. The precedence itself is unchanged, on the narrower ground that a figure is one element where a heading is a whole section.)
 
 `WikiLink`'s own two fields carry exactly what a reference needs. A bare `[[#chart]]` renders as a reference whose text the backend supplies. A labelled `[[#chart|the revenue chart]]` renders as a reference whose text the author wrote.
 
@@ -886,6 +888,32 @@ HTML numbers no heading, which is why a number would be wrong here. A woven page
 **Rationale:** Decision 65's own "both backends must agree" rule does not reach this case. That rule exists because a figure is numbered twice, by Typst's own counter and by dankg's own walk. Two counts must not drift apart. A heading is numbered once, in the PDF alone. One source and none is not two in conflict. Counting headings inside dankg is refused for the reason decision 67 already gives: the template owns the numbering format. `1.`, `A.` and `I.` are all possible. dankg never sees which one is set. A number dankg invented would match nothing on the HTML page and nothing in the PDF either. The asymmetry with a figure is principled rather than an exception -- HTML numbers its figures and does not number its headings -- and an author wanting one string in both backends writes `[[#intro|the introduction]]`.
 
 <!-- dankg:depends target=src/render/weave_html.md#toc quote="escape(&Inline::plain(inlines))" -->
+
+## Decision 70: An artifact's slug comes from its path, or from `artifact=`
+
+Decision 63 gave a figure a label and defaulted it to the block's own `name=`. Both halves are narrowed here.
+
+The attribute is `artifact=`. `label=` was too generic to keep: one attribute became a Typst label, an HTML id, and a graph node slug at once. The rename is mechanical. `dankg fmt` canonicalizes attribute order. `artifact` simply takes `label`'s own slot in `KNOWN_ATTRS`. `InfoString::label()` is `InfoString::artifact()`. 0.9.0 has no external users. There was nothing downstream to migrate.
+
+The default is the artifact's own path stem, slugified. A block writing `produces=file:data/quarterly.csv` gives a figure addressed as `[[#quarterly]]`. A reference names the thing on the page. The thing on the page is the artifact, not the source block above it. A block renamed for a code reason therefore breaks no reference at all, which is what decision 63 wanted `label=` for in the first place.
+
+A derived slug is slugified rather than checked, and suffixed rather than refused. Both follow from it not being something the author typed: warning about a path's own shape would name a mistake nobody made. `produces=file:Q3 revenue.csv` gets `q3-revenue`. Two artifacts sharing one stem -- `out.csv` and `out.png` both stem to `out` -- get `out` and `out-1` from the same `Slugger` a repeated heading already goes through. A stem that slugifies to nothing is dropped instead, since `Slugger`'s own empty-base fallback is `section`, a word no figure should answer to.
+
+A *declared* `artifact=` keeps decision 63's own treatment exactly: checked, never repaired, warned and dropped on a collision. The reason is decision 63's own. A silently repaired slug is a reference that silently points at the wrong figure. So the two rules differ by which side wrote the slug, not by which check runs.
+
+The check itself changed shape while this was built, and the reason is worth recording. Decision 63 stated it as a charset: letters, digits, `-` and `_`. Reserving a declared slug through `Slugger` -- which this decision needs, so a later derived slug cannot collide with it -- puts it through `slugify` as well, and `slugify` lowercases. `artifact=Chart` passed the charset check, came back as `chart`, and left `[[#Chart]]` resolving against nothing: `resolve_references` compares a fragment verbatim. That is a silently repaired slug pointing at the wrong figure, the exact failure decision 63 refuses. `usable_label` is now stated as a fixed point instead -- `slugify(s) == s` -- which subsumes the charset, rejects the uppercase input outright, and names the slug `slugify` would have produced so the author can paste it. The charset was never the whole rule. It only looked like it while nothing downstream rewrote the value.
+
+**Rationale:** decision 63's own default was the wrong half of the pair. A block's `name=` is its eval identity and its tangle identity; `label=` existed to stop a code-driven rename from breaking prose. Defaulting to the artifact's path instead removes the need for the override in the ordinary case. The prose already points at the artifact. The artifact's name does not change when the block's does. The override survives for the case the path itself is the wrong word.
+
+## Decision 72: A reference naming a block says which slug its figure has
+
+`weave::unresolved_message` gains one answer ahead of both its artifact branches: a fragment naming a real block whose artifact resolved under a different slug reports that slug, and reports nothing about reading a file.
+
+Decision 70 is what makes this reachable often enough to matter. `[[#chart]]` against a block named `chart` writing `revenue.png` used to resolve. It now misses. The old message claimed the artifact could not be read. The artifact read fine. It answers to `revenue`.
+
+The message names the slug that would have worked rather than only saying the fragment is wrong, for the same reason decision 64 gives each unresolved reference its own message. The next action differs per case. Here it is one word.
+
+**Deferred.** Decisions 69, 71, 73, 74 and 75 of `plans/plan-label-resolution.md` are not built. A `produces=file:` artifact is still not a graph node. `dankg graph`, `dankg check` and the TUI therefore still resolve a figure slug to nothing. `example/weave_example/report.md`'s own *A gap worth knowing about* section is the live demonstration. The plan is the record of how it closes.
 
 ## Block nodes
 
@@ -3333,7 +3361,7 @@ own status signal survive whichever value is set.
 
 ## Figures, numbered and referenced
 
-A captioned artifact is a real figure in both backends (decision 54). A figure carries a name (decision 63). The name is the block's own `name=`, or a `label=` overriding it. Each backend turns that one name into its own identifier: `<fig:NAME>` in Typst, `id="fig-NAME"` in HTML. A label holds letters, digits, `-` and `_`, the identical charset `slugify` gives a heading. A figure label and a heading slug are therefore interchangeable as a fragment.
+A captioned artifact is a real figure in both backends (decision 54). A figure carries a slug (decisions 63 and 70). The slug is the stem of the file the block produced, or an `artifact=` overriding it. Each backend turns that one slug into its own identifier: `<fig:SLUG>` in Typst, `id="fig-SLUG"` in HTML. A declared slug holds letters, digits, `-` and `_`, the identical charset `slugify` gives a heading. A derived one is put through `slugify` itself, and suffixed on a collision. A figure slug and a heading slug are therefore interchangeable as a fragment.
 
 `weave::figures` is the walk that resolves a label and numbers a figure at once (decision 65). Numbering is per kind, because Typst counts tables and images on two separate counters. HTML writes the number as literal text, since no browser can put one element's counter value into a link elsewhere on the page. Typst still counts for itself, off the `#figure` it already receives. Both backends walk the same sequence, which is what lands them on the same number.
 
@@ -3435,7 +3463,7 @@ own error. `duckdb` already gets exactly this treatment from `[db.*] command` in
 - Labelling a plain markdown table. It is not a figure: `table_block`
   emits a bare table, the only `kind: table` figure is the
   produced-artifact path, and a markdown table has no info string to
-  write `caption=` or `label=` on. Deferred rather than refused.
+  write `caption=` or `artifact=` on. Deferred rather than refused.
 - A list of figures, a references list, or an index. Typst's own
   `#outline(target: figure)` already builds the first for a reader who
   asks for it in a template.
@@ -4787,7 +4815,7 @@ echo "$contains Contains edges against $link Link edges"
 <!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
 
 ```
-596 Contains edges against 56 Link edges
+921 Contains edges against 72 Link edges
 ```
 
 # Open questions

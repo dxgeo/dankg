@@ -208,7 +208,7 @@ impl PartialEq for InfoString {
 /// Attribute keys DanKG understands. Anything else warns and is ignored.
 pub const KNOWN_ATTRS: &[&str] = &[
     "db", "name", "deps", "xdeps", "produces", "reads", "timeout", "path", "key", "protocol", "weave",
-    "caption", "figure", "label",
+    "caption", "figure", "artifact",
 ];
 
 impl InfoString {
@@ -357,15 +357,20 @@ impl InfoString {
         }
     }
 
-    /// A reader-authored label (decision 63) naming this block's own
-    /// figure, overriding the default that `name()` supplies. It exists
-    /// because `name` is also the block's eval identity and its tangle
-    /// identity. Renaming a block for a code reason should not break
-    /// every reference the prose already wrote. Absent here means the
-    /// caller falls back to `name()`. A block written
-    /// `name=chart caption="Revenue"` therefore needs no label at all.
-    pub fn label(&self) -> Option<&str> {
-        self.get("label")
+    /// A reader-authored slug (decisions 63 and 70) naming the artifact
+    /// this block produces, overriding the default that the artifact's
+    /// own path supplies. It exists because a path is a filesystem
+    /// detail, and because `name` is the block's eval identity and its
+    /// tangle identity. Neither should have to change because the prose
+    /// wants a better word. Absent here means the caller falls back to
+    /// the path's own stem. A block written
+    /// `produces=file:revenue.png` therefore needs no attribute at all.
+    ///
+    /// Spelled `label=` through 0.9.0, and renamed for being too
+    /// generic: one attribute became a Typst label, an HTML id and a
+    /// graph node slug at once (decision 70).
+    pub fn artifact(&self) -> Option<&str> {
+        self.get("artifact")
     }
 }
 

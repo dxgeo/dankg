@@ -119,11 +119,12 @@ below is therefore Figure 1 while the table above is Table 1. See
 [[#trend]] for the chart, or [[#trend|the revenue trend]] to say it in
 your own words.
 
-`label=` renames the target without renaming the block, for when a
-block's `name=` has to change for a code reason and the prose should
-not have to follow. The chart's block is named `chart`. Its label is `trend`.
+`artifact=` renames the target, for when a path is a filesystem detail
+the prose should not have to quote. The chart's block is named
+`chart`. It writes `figures/trend.svg`, so its slug would be `trend`
+either way. The attribute is declared here to show it.
 
-```sh name=chart produces=file:figures/trend.svg caption="Revenue trend across three quarters" figure=outside label=trend
+```sh name=chart produces=file:figures/trend.svg caption="Revenue trend across three quarters" figure=outside artifact=trend
 mkdir -p figures
 cat > figures/trend.svg <<'SVG'
 <svg xmlns="http://www.w3.org/2000/svg" width="320" height="140" viewBox="0 0 320 140">
@@ -231,12 +232,13 @@ of any kind.
 
 # A gap worth knowing about
 
-`dankg check` does not yet know what `label=` means. The graph builds
-a block's node from its `name=` alone. The reference
-[[#trend|to the chart]] therefore resolves in weave and is reported as
-a dead link by `check`. Running `dankg check .` in this directory shows it,
-alongside the `[[SomeOtherFile]]` above, which is unresolved on
-purpose.
+`dankg check` does not yet know what a figure slug is. The graph
+builds a block's node from its `name=` alone. A produced artifact gets
+no node of its own. The reference [[#trend|to the chart]]
+therefore resolves in weave and is reported as a dead link by
+`check`. Running `dankg check .` in this directory shows it, alongside
+the `[[SomeOtherFile]]` above, which is unresolved on purpose.
 
-A reference written against a block's own `name=` has no such gap.
-Only `label=` is invisible to the graph.
+Both halves of a figure slug are invisible to the graph: a declared
+`artifact=`, and the path stem a figure takes when none is declared.
+`plans/plan-label-resolution.md` is the plan that closes this.

@@ -351,9 +351,10 @@ counts them separately and the two backends have to agree. The chart
 below is therefore Figure 1 while the table above is Table 1. See
 <a href="#fig-trend">Figure 1</a> for the chart, or <a href="#fig-trend">the revenue trend</a> to say it in
 your own words.</p>
-<p><code>label=</code> renames the target without renaming the block, for when a
-block's <code>name=</code> has to change for a code reason and the prose should
-not have to follow. The chart's block is named <code>chart</code>. Its label is <code>trend</code>.</p>
+<p><code>artifact=</code> renames the target, for when a path is a filesystem detail
+the prose should not have to quote. The chart's block is named
+<code>chart</code>. It writes <code>figures/trend.svg</code>, so its slug would be <code>trend</code>
+either way. The attribute is declared here to show it.</p>
 <figure class="eval-pair">
 <pre><code class="language-sh">mkdir -p figures
 cat &gt; figures/trend.svg &lt;&lt;'SVG'
@@ -440,14 +441,15 @@ way. An artifact that cannot be read or copied fails too.</p>
 <p>All three report every bad line in one run, and write no output file
 of any kind.</p>
 <h1 id="a-gap-worth-knowing-about">A gap worth knowing about</h1>
-<p><code>dankg check</code> does not yet know what <code>label=</code> means. The graph builds
-a block's node from its <code>name=</code> alone. The reference
-<a href="#fig-trend">to the chart</a> therefore resolves in weave and is reported as
-a dead link by <code>check</code>. Running <code>dankg check .</code> in this directory shows it,
-alongside the <code>[[SomeOtherFile]]</code> above, which is unresolved on
-purpose.</p>
-<p>A reference written against a block's own <code>name=</code> has no such gap.
-Only <code>label=</code> is invisible to the graph.</p>
+<p><code>dankg check</code> does not yet know what a figure slug is. The graph
+builds a block's node from its <code>name=</code> alone. A produced artifact gets
+no node of its own. The reference <a href="#fig-trend">to the chart</a>
+therefore resolves in weave and is reported as a dead link by
+<code>check</code>. Running <code>dankg check .</code> in this directory shows it, alongside
+the <code>[[SomeOtherFile]]</code> above, which is unresolved on purpose.</p>
+<p>Both halves of a figure slug are invisible to the graph: a declared
+<code>artifact=</code>, and the path stem a figure takes when none is declared.
+<code>plans/plan-label-resolution.md</code> is the plan that closes this.</p>
 <ol class="reference-list">
 <li id="ref-knuth1984">Knuth (1984). Literate Programming. In <i>The Computer Journal</i>.</li>
 <li id="ref-tufte2001">Tufte (2001). The Visual Display of Quantitative Information. Graphics Press.</li>

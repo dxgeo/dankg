@@ -14,7 +14,7 @@ use crate::eval::session::corpus_graph_if_needed;
 use crate::eval::{plan, result};
 use crate::graph::build::{file_stem, strip_extension};
 use crate::graph::index;
-use crate::graph::slug::Slugger;
+use crate::graph::slug::{slugify, Slugger};
 use crate::md::{Block, Document, Inline};
 use crate::render::typst::BibliographySummary;
 use crate::render::{typst, weave_html};
@@ -199,13 +199,14 @@ fn image_ext(path: &str) -> Option<&'static str> {
 }
 
 /// Every figure's own label and number, by the block index its pair
-/// starts at. The label is `label=` when the reader wrote one,
-/// otherwise the block's own `name=` (decision 63). The number is
-/// this figure's position among its own kind, counted in document
-/// order (decision 65). A block with no artifact in `tables` or
-/// `images` is not a figure (decision 54) and is in neither map. A
-/// figure neither backend renders is in `labels` and not in
-/// `numbers`: it keeps its name and takes no number.
+/// starts at. The label is `artifact=` when the reader wrote one,
+/// otherwise the slugified stem of the artifact's own path
+/// (decisions 63 and 70). The number is this figure's position among
+/// its own kind, counted in document order (decision 65). A block
+/// with no artifact in `tables` or `images` is not a figure
+/// (decision 54) and is in neither map. A figure neither backend
+/// renders is in `labels` and not in `numbers`: it keeps its label
+/// and takes no number.
 fn figures(
     doc: &Document,
     tables: &HashMap<usize, (String, String)>,
@@ -214,7 +215,12 @@ fn figures(
 ) -> (HashMap<usize, String>, HashMap<usize, u32>) {
     let mut labels = HashMap::new();
     let mut numbers = HashMap::new();
-    let mut claimed: HashMap<&str, u32> = HashMap::new();
+    // Two structures, two questions. `slugger` answers "is this taken",
+    // which is what suffixing a derived slug needs. `claimed` answers
+    // "which line took it first", which is what a declared slug's own
+    // collision warning needs and a `Slugger` does not carry.
+    let mut slugger = Slugger::new();
+    let mut claimed: HashMap<String, u32> = HashMap::new();
     let (mut tables_seen, mut images_seen) = (0u32, 0u32);
     for (index, b) in doc.blocks.iter().enumerate() {
         let Block::Code { info, line, .. } = b else { continue };
@@ -227,35 +233,84 @@ fn figures(
             *counter += 1;
             numbers.insert(index, *counter);
         }
-        let Some(label) = info.label().or_else(|| info.name()) else { continue };
-        if !usable_label(label) {
-            diags.warn(
-                *line,
-                format!("figure label `{label}` may hold only letters, digits, `-` and `_`; this one is dropped"),
-            );
-            continue;
-        }
-        if let Some(&first) = claimed.get(label) {
-            diags.warn(
-                *line,
-                format!("figure label `{label}` is already used by the figure on line {first}; this one is dropped"),
-            );
-            continue;
-        }
-        claimed.insert(label, *line);
-        labels.insert(index, label.to_string());
+        // A declared slug is checked as written and never repaired. A
+        // derived one is slugified and suffixed, so neither check can
+        // fire on it at all (decision 70).
+        let label = match info.artifact() {
+            Some(declared) => {
+                if !usable_label(declared) {
+                    // `slugify` is the suggestion, unless it has none
+                    // to give: a value of pure punctuation slugifies to
+                    // nothing, and "try ``" is worse than no advice.
+                    let fixed = slugify(declared);
+                    let advice = if fixed.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; try `{fixed}`")
+                    };
+                    diags.warn(
+                        *line,
+                        format!("figure slug `{declared}` may hold only lowercase letters, digits, `-` and `_`{advice}"),
+                    );
+                    continue;
+                }
+                if let Some(&first) = claimed.get(declared) {
+                    diags.warn(
+                        *line,
+                        format!("figure slug `{declared}` is already used by the figure on line {first}; this one is dropped"),
+                    );
+                    continue;
+                }
+                slugger.assign(declared)
+            }
+            None => match info.produces().and_then(artifact_stem) {
+                // An empty stem is dropped rather than handed to
+                // `Slugger`, whose own empty-base fallback is
+                // `section` -- a word no figure should answer to.
+                Some(stem) if !stem.is_empty() => slugger.assign(&stem),
+                _ => continue,
+            },
+        };
+        claimed.insert(label.clone(), *line);
+        labels.insert(index, label);
     }
     (labels, numbers)
 }
 
-/// Whether a label is an anchor both backends can carry: the identical
-/// rule `graph::slug::slugify` already applies to a heading, which is
-/// what lets a figure label and a heading slug share one fragment
-/// namespace (decision 64). Typst itself allows `.` and `:` too, and
-/// both are left out because either one changes what a CSS selector
-/// means.
+/// An artifact's own default slug: its path's stem, slugified
+/// (decision 70). `produces=file:data/quarterly.csv` gives
+/// `quarterly`. `None` when the value is not a `file:` artifact at
+/// all, which is not a figure and needs no slug.
+///
+/// Slugified rather than checked, the same way a heading's own title
+/// already is. A derived slug is not something the author typed, so
+/// warning about one would name a mistake nobody made. A stem holding
+/// nothing a slug may carry slugifies to the empty string instead,
+/// which `figures` drops rather than emit an anchor no reference could
+/// reach.
+fn artifact_stem(raw: &str) -> Option<String> {
+    let path = plan::parse_artifact(raw)?;
+    Some(slugify(file_stem(&strip_extension(path))))
+}
+
+/// Whether a declared slug is an anchor both backends can carry: one
+/// `graph::slug::slugify` leaves alone. That is what lets a figure
+/// slug and a heading slug share one fragment namespace (decision
+/// 64). Typst itself allows `.` and `:` too, and both are left out
+/// because either one changes what a CSS selector means.
+///
+/// Stated as a fixed point rather than as a charset, because the
+/// charset alone was not the whole rule. `slugify` also lowercases,
+/// and decision 70 routes a declared slug through `Slugger` to
+/// reserve it. `artifact=Chart` passed a charset check, came back
+/// from `Slugger` as `chart`, and left `[[#Chart]]` looking up a
+/// fragment nothing carried -- `resolve_references` compares a
+/// fragment verbatim. A silently repaired slug is exactly what
+/// decision 63 refuses, so the repair is refused here instead: the
+/// check now rejects anything `slugify` would rewrite, and the author
+/// gets a diagnostic naming the one they wrote.
 fn usable_label(label: &str) -> bool {
-    !label.is_empty() && label.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    !label.is_empty() && slugify(label) == label
 }
 
 /// Every heading's own slug, by its line. One `Slugger` for the whole
@@ -374,6 +429,13 @@ fn unresolved_message(
     let Some(raw) = info.produces() else {
         return format!("`{fragment}` names a block, but it declares no `produces=file:` artifact to be a figure of");
     };
+    // Decision 72. The block is real and its artifact resolved; the
+    // name asked for just belongs to the block rather than to the
+    // figure. Answered before either artifact branch below, both of
+    // which would otherwise report a read that actually succeeded.
+    if let Some(slug) = labels.get(&index) {
+        return format!("`{fragment}` names the block; its figure is `{slug}` -- write `[[#{slug}]]`");
+    }
     if result::recorded_hash(doc, index, fragment).is_none() {
         return format!("`{fragment}` produces={raw}, but has no recorded result yet; `dankg eval` writes one");
     }
@@ -754,15 +816,35 @@ mod tests {
     #[test]
     fn a_figure_reference_resolves_end_to_end() {
         let dir = scratch(&[
-            ("a.md", "```python name=t produces=file:data.csv caption=\"Revenue\"\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#t]].\n"),
+            ("a.md", "```python name=t produces=file:data.csv caption=\"Revenue\"\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#data]].\n"),
             ("data.csv", "x,y\n1,2\n"),
         ]);
         let out = dir.join("out.html");
         run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false).unwrap();
         let content = fs::read_to_string(&out).unwrap();
-        assert!(content.contains("<figure class=\"table-figure\" id=\"fig-t\">"), "{content}");
+        // The slug is the artifact's own stem, `data`, never the
+        // block's `name=t` (decision 70).
+        assert!(content.contains("<figure class=\"table-figure\" id=\"fig-data\">"), "{content}");
         assert!(content.contains("<figcaption>Table 1: Revenue</figcaption>"), "{content}");
-        assert!(content.contains("<a href=\"#fig-t\">Table 1</a>"), "{content}");
+        assert!(content.contains("<a href=\"#fig-data\">Table 1</a>"), "{content}");
+    }
+
+    /// Decision 72. Naming the block rather than its figure is the
+    /// mistake decision 70's own default makes easy to write, so the
+    /// message names the slug that would have worked. Before this, the
+    /// artifact branch below claimed the artifact could not be read,
+    /// which was false -- it read fine, under another name.
+    #[test]
+    fn a_reference_naming_the_block_says_which_slug_the_figure_has() {
+        let dir = scratch(&[
+            ("a.md", "```python name=t produces=file:data.csv caption=\"Revenue\"\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#t]].\n"),
+            ("data.csv", "x,y\n1,2\n"),
+        ]);
+        let out = dir.join("out.html");
+        let result = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false);
+        let err = result.err().expect("a reference naming the block must fail the weave");
+        assert!(err.contains("unresolved reference"), "{err}");
+        assert!(!out.exists(), "nothing is written on an unresolved reference");
     }
 
     #[test]
@@ -1084,22 +1166,24 @@ mod tests {
         assert!(diags.items().is_empty(), "{:?}", diags.items());
     }
 
-    /// A pair with an artifact and no `label=` takes its own `name=`
-    /// (decision 63).
+    /// A pair with an artifact and no `artifact=` takes the artifact's
+    /// own path stem, never the block's `name=` (decision 70). The two
+    /// differ here on purpose: a test where they agree would pass under
+    /// either rule.
     #[test]
-    fn figures_defaults_to_the_blocks_own_name() {
-        let d = doc("```python name=chart produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
+    fn figures_defaults_to_the_artifacts_own_path_stem() {
+        let d = doc("```python name=chart produces=file:data/revenue.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote revenue.png\n```\n");
         let mut images = HashMap::new();
-        images.insert(0, (Vec::new(), "chart.png".to_string()));
+        images.insert(0, (Vec::new(), "data/revenue.png".to_string()));
         let mut diags = Diags::new("t.md");
         let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
-        assert_eq!(labels.get(&0), Some(&"chart".to_string()));
+        assert_eq!(labels.get(&0), Some(&"revenue".to_string()), "the stem, not `chart`");
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
     #[test]
-    fn figures_prefers_a_reader_written_label_over_the_name() {
-        let d = doc("```python name=chart label=revenue produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
+    fn figures_prefers_a_declared_artifact_over_the_path() {
+        let d = doc("```python name=chart artifact=revenue produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "chart.png".to_string()));
         let mut diags = Diags::new("t.md");
@@ -1132,12 +1216,12 @@ mod tests {
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
-    /// `label=a+b` reached `typst compile` as `<fig:a+b>` and failed with
-    /// `unclosed label`, pointing into generated `.typ`. Dropping it here
-    /// is what keeps that error off an author's screen.
+    /// `artifact=a+b` reached `typst compile` as `<fig:a+b>` and failed
+    /// with `unclosed label`, pointing into generated `.typ`. Dropping
+    /// it here is what keeps that error off an author's screen.
     #[test]
-    fn a_label_typst_cannot_parse_warns_by_line_and_is_dropped() {
-        let d = doc("```python name=a label=\"a+b\" produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
+    fn a_declared_slug_typst_cannot_parse_warns_by_line_and_is_dropped() {
+        let d = doc("```python name=a artifact=\"a+b\" produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
         let images: HashMap<usize, (Vec<u8>, String)> = [(0, (Vec::new(), "one.png".to_string()))].into_iter().collect();
         let mut diags = Diags::new("t.md");
         let (labels, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
@@ -1145,23 +1229,55 @@ mod tests {
         assert_eq!(numbers.get(&0), Some(&1), "the figure itself still renders, so it still counts");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
         assert_eq!(diags.items()[0].line, 1, "{:?}", diags.items());
-        assert!(diags.items()[0].message.contains("may hold only letters"), "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("may hold only lowercase letters"), "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("try `ab`"), "the warning names a usable slug");
     }
 
-    /// The same rule applies to a label defaulted from `name=`, since the
-    /// anchor that comes out is the same either way.
+    /// The rule does not apply to a derived slug. A path stem is not
+    /// something the author typed as an anchor, so it is slugified
+    /// rather than checked, and nothing warns (decision 70).
     #[test]
-    fn an_unusable_name_is_dropped_as_a_label_too() {
-        let d = doc("```python name=\"a b\" produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=\"a b\" hash=0000000000000001 -->\n\n```\nok\n```\n");
+    fn a_derived_slug_is_slugified_rather_than_warned_about() {
+        let d = doc("```python name=a produces=file:Q3-Revenue(final).png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let images: HashMap<usize, (Vec<u8>, String)> = [(0, (Vec::new(), "Q3-Revenue(final).png".to_string()))].into_iter().collect();
+        let mut diags = Diags::new("t.md");
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
+        assert_eq!(labels.get(&0), Some(&"q3-revenuefinal".to_string()), "lowercased, parens dropped");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    /// Two artifacts sharing one stem is ordinary, and neither block did
+    /// anything wrong. The second is suffixed, never warned about --
+    /// the opposite of a declared collision (decision 70).
+    #[test]
+    fn two_derived_slugs_sharing_a_stem_are_suffixed_silently() {
+        let d = doc("```python name=a produces=file:out.csv\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=b produces=file:out.png\nrun()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nok\n```\n");
+        let tables: HashMap<usize, (String, String)> = [(0, ("csv".to_string(), "x\n1\n".to_string()))].into_iter().collect();
+        let images: HashMap<usize, (Vec<u8>, String)> = [(3, (Vec::new(), "out.png".to_string()))].into_iter().collect();
+        let mut diags = Diags::new("t.md");
+        let (labels, _) = figures(&d, &tables, &images, &mut diags);
+        assert_eq!(labels.get(&0), Some(&"out".to_string()));
+        assert_eq!(labels.get(&3), Some(&"out-1".to_string()), "suffixed, not dropped");
+        assert!(diags.is_empty(), "{:?}", diags.items());
+    }
+
+    /// An uppercase declared slug used to pass the charset check, then
+    /// come back from `Slugger` lowercased, leaving `[[#Chart]]`
+    /// pointing at nothing -- a fragment is compared verbatim. The
+    /// symptom is the miss, so that is what this pins.
+    #[test]
+    fn an_uppercase_declared_slug_is_refused_rather_than_lowercased() {
+        let d = doc("```python name=a artifact=Chart produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
         let images: HashMap<usize, (Vec<u8>, String)> = [(0, (Vec::new(), "one.png".to_string()))].into_iter().collect();
         let mut diags = Diags::new("t.md");
         let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
-        assert!(labels.is_empty());
+        assert!(labels.is_empty(), "never silently lowercased to `chart`");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("try `chart`"), "{:?}", diags.items());
     }
 
-    /// Everything a heading slug can hold, a label can hold. `slugify` is
-    /// the rule both go through.
+    /// Everything a heading slug can hold, a declared slug can hold.
+    /// `slugify` is the rule both go through, stated as a fixed point.
     #[test]
     fn usable_label_accepts_exactly_what_slugify_produces() {
         for ok in ["chart", "corpus-edge-counts", "module_doc", "fig1", "1fig", "café"] {
@@ -1170,14 +1286,14 @@ mod tests {
         }
         // Typst parses `.` and `:`; both are left out because each changes
         // what a CSS selector means.
-        for bad in ["", "a+b", "a b", "a.b", "a:b", "a/b", "a#b", "a(b"] {
+        for bad in ["", "a+b", "a b", "a.b", "a:b", "a/b", "a#b", "a(b", "Chart", "CHART"] {
             assert!(!usable_label(bad), "{bad}");
         }
     }
 
     #[test]
-    fn a_colliding_label_warns_by_line_and_the_second_one_is_dropped() {
-        let d = doc("```python name=a label=chart produces=file:one.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote one.png\n```\n\n```python name=b label=chart produces=file:two.png\nsavefig()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nwrote two.png\n```\n");
+    fn a_colliding_declared_slug_warns_by_line_and_the_second_is_dropped() {
+        let d = doc("```python name=a artifact=chart produces=file:one.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote one.png\n```\n\n```python name=b artifact=chart produces=file:two.png\nsavefig()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nwrote two.png\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "one.png".to_string()));
         images.insert(3, (Vec::new(), "two.png".to_string()));
@@ -1190,18 +1306,19 @@ mod tests {
         assert!(diags.items()[0].message.contains("already used by the figure on line 1"), "{:?}", diags.items());
     }
 
-    /// A `label=` colliding with another block's own defaulted `name=`
-    /// collides just the same. The rule is about the label that comes
-    /// out, not about which attribute it came from.
+    /// A declared `artifact=` colliding with an earlier *derived* slug
+    /// is dropped just the same. The rule is about the slug that comes
+    /// out, not about which side declared it. The derived one keeps its
+    /// own claim, since it got there first.
     #[test]
-    fn a_label_colliding_with_a_defaulted_name_collides_too() {
-        let d = doc("```python name=chart produces=file:one.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote one.png\n```\n\n```python name=b label=chart produces=file:two.png\nsavefig()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nwrote two.png\n```\n");
+    fn a_declared_slug_colliding_with_a_derived_one_is_dropped_too() {
+        let d = doc("```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n\n```python name=b artifact=chart produces=file:two.png\nsavefig()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nwrote two.png\n```\n");
         let mut images = HashMap::new();
-        images.insert(0, (Vec::new(), "one.png".to_string()));
+        images.insert(0, (Vec::new(), "chart.png".to_string()));
         images.insert(3, (Vec::new(), "two.png".to_string()));
         let mut diags = Diags::new("t.md");
         let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
-        assert_eq!(labels.get(&0), Some(&"chart".to_string()));
+        assert_eq!(labels.get(&0), Some(&"chart".to_string()), "derived, and first");
         assert_eq!(labels.get(&3), None);
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
     }
@@ -1211,13 +1328,13 @@ mod tests {
     /// with the PDF on exactly this document.
     #[test]
     fn figures_numbers_each_kind_on_its_own_counter() {
-        let d = doc("```python name=t1 produces=file:a.csv\nrun()\n```\n\n<!-- dankg:result name=t1 hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=i1 produces=file:a.png\nrun()\n```\n\n<!-- dankg:result name=i1 hash=0000000000000002 -->\n\n```\nok\n```\n\n```python name=t2 produces=file:b.csv\nrun()\n```\n\n<!-- dankg:result name=t2 hash=0000000000000003 -->\n\n```\nok\n```\n\n```python name=i2 produces=file:b.png\nrun()\n```\n\n<!-- dankg:result name=i2 hash=0000000000000004 -->\n\n```\nok\n```\n");
+        let d = doc("```python name=t1 produces=file:t_one.csv\nrun()\n```\n\n<!-- dankg:result name=t1 hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=i1 produces=file:i_one.png\nrun()\n```\n\n<!-- dankg:result name=i1 hash=0000000000000002 -->\n\n```\nok\n```\n\n```python name=t2 produces=file:t_two.csv\nrun()\n```\n\n<!-- dankg:result name=t2 hash=0000000000000003 -->\n\n```\nok\n```\n\n```python name=i2 produces=file:i_two.png\nrun()\n```\n\n<!-- dankg:result name=i2 hash=0000000000000004 -->\n\n```\nok\n```\n");
         let mut tables = HashMap::new();
         tables.insert(0, ("csv".to_string(), "x\n1\n".to_string()));
         tables.insert(6, ("csv".to_string(), "x\n2\n".to_string()));
         let mut images = HashMap::new();
-        images.insert(3, (Vec::new(), "a.png".to_string()));
-        images.insert(9, (Vec::new(), "b.png".to_string()));
+        images.insert(3, (Vec::new(), "i_one.png".to_string()));
+        images.insert(9, (Vec::new(), "i_two.png".to_string()));
         let mut diags = Diags::new("t.md");
         let (_, numbers) = figures(&d, &tables, &images, &mut diags);
         assert_eq!(numbers.get(&0), Some(&1), "first table");
@@ -1268,11 +1385,12 @@ mod tests {
         assert_eq!(numbers.get(&0), Some(&1));
     }
 
-    /// Numbering and labelling are separate. A figure whose label was
-    /// dropped as a collision still renders, so it still counts.
+    /// Numbering and slugging are separate. A figure whose declared
+    /// slug was dropped as a collision still renders, so it still
+    /// counts.
     #[test]
-    fn a_figure_whose_label_collided_is_still_numbered() {
-        let d = doc("```python name=a label=chart produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=b label=chart produces=file:two.png\nrun()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nok\n```\n");
+    fn a_figure_whose_declared_slug_collided_is_still_numbered() {
+        let d = doc("```python name=a artifact=chart produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=b artifact=chart produces=file:two.png\nrun()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nok\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "one.png".to_string()));
         images.insert(3, (Vec::new(), "two.png".to_string()));
