@@ -39,7 +39,7 @@ outside the graph.
 **The deferral has a stated trigger. It has fired.** *Open
 questions* asks whether `dankg:depends` should become a graph edge, and
 defers it "until a real corpus wants to *see* a prose dependency, not
-just be warned about one". 259 markers across 45 files is a real corpus.
+just be warned about one". Over 250 markers is a real corpus.
 
 **A second, smaller source is computed twice.** `deps=`/`xdeps=` are
 resolved corpus-wide by `App::compute_dep_data`, which parses the whole
