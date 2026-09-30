@@ -1,4 +1,4 @@
-# A produced artifact is a node, and it carries the name
+# A produced artifact is a node, and it carries the slug
 
 ## Context
 
@@ -103,28 +103,34 @@ under `db:NAME`. An artifact is addressable inside its own file
 through its name alone. A same-file `[[#trend]]` needs no namespace
 written out.
 
-### Decision 70: An artifact's name comes from its path, or from an override
+### Decision 70: An artifact's slug comes from its path, or from `artifact=`
 
 The default is the path's own stem: `produces=file:data/quarterly.csv`
-is named `quarterly`. That mirrors a heading, whose slug is derived
-from the text the author already wrote rather than declared separately.
-Most artifacts need no attribute at all.
+gets the slug `quarterly`. That mirrors a heading, whose slug is
+derived from the text the author already wrote rather than declared
+separately. Most artifacts need no attribute at all.
 
-An attribute overrides it for one block, the way `label=` does today.
+`artifact=` overrides it for one block, and replaces `label=`.
 Decision 63's reason stands unchanged: a block's `name=` is its eval
 identity and its tangle identity. A path is a filesystem detail.
 Neither should have to change because the prose wants a better word.
 
-Both backends derive their own identifier from that one name, exactly
-as they do now: `<fig:NAME>` in Typst, `id="fig-NAME"` in HTML.
+`label=` is too generic to keep. One attribute became a Typst label,
+an HTML id, and a graph slug at once. `artifact=` names what it
+names. The rename is mechanical. `dankg fmt` canonicalizes attribute
+order. 0.9.0 has no external users.
 
-A name colliding with a heading slug, a block name, or another
-artifact warns at its own line and is dropped. That artifact falls
-back to its path-derived default. A derived name that collides is
-suffixed by `Slugger` the way a repeated heading already is, because a
-derived collision is not the author's mistake to fix. Suffixing a
-*declared* name is refused for decision 63's own reason: a silently
-suffixed name is a reference that silently points at the wrong figure.
+Both backends derive their own identifier from that one slug, exactly
+as they do now: `<fig:SLUG>` in Typst, `id="fig-SLUG"` in HTML.
+
+A declared slug colliding with a heading slug, a block name, or
+another artifact warns at its own line and is dropped. That artifact
+falls back to its path-derived default. A derived slug that collides
+is suffixed by `Slugger` the way a repeated heading already is,
+because a derived collision is not the author's mistake to fix.
+Suffixing a *declared* slug is refused for decision 63's own reason:
+a silently suffixed slug is a reference that silently points at the
+wrong figure.
 
 ### Decision 71: A recognized pair is addressable in both backends
 
@@ -151,6 +157,72 @@ condition happens to match.
 Decisions 69 and 71 make the common case unreachable. The message
 stays because it is wrong today, and because a fragment can still miss
 in ways the other decisions do not cover.
+
+### Decision 73: An artifact node draws, marked by a file icon
+
+An artifact node is drawn by `dankg graph` and listed in the TUI tree,
+the way a heading and a block already are. Nothing gates it behind a
+flag.
+
+`--live` is the precedent for gating. It does not apply. A live
+catalog spawns a process per `[db.*]` to ask an external system what
+exists. An artifact is read straight out of an info string the corpus
+already holds, at no cost. A flag would hide a node the corpus states
+outright.
+
+`kind_marker` gains a file icon for the new variant, beside a block's
+own marker. That match is exhaustive by design. The new variant fails
+to compile until its icon is chosen.
+
+### Decision 74: An artifact's title is its path, and its slug is not
+
+A node carries a title and a slug. The two answer different
+questions. A title is what a reader sees in the TUI tree and in a
+drawn graph's own label. A slug is what a reference resolves against.
+
+An artifact's title is its path as written: `data/quarterly.csv`. A
+path is what identifies the file on disk. A stem alone loses the
+directory. Two artifacts whose paths share one stem would otherwise
+read as one row in the tree.
+
+Its slug stays decision 70's own: the stem, or `artifact=`. A slug is
+typed by hand inside a reference. `[[#quarterly]]` is the point of
+this plan. `[[#data/quarterly.csv]]` would not be.
+
+`Relation` is the precedent. `relation_node(id, title)` already takes
+the two separately. A relation's own title is display text that
+nothing resolves against.
+
+### Decision 75: An artifact node borrows its block's line, and owns none of it
+
+An artifact node reports the line of the block that produces it. That
+line is what `enter` hands the reader's editor. It is also what a dot
+or an HTML label prints after the file name. There is no other source
+to look at. A relation node's own `line: 0` would instead print
+`report.md:0`, on a node decision 73 now draws.
+
+Borrowing a line is not owning it. An artifact node joins
+`NodeKind::Relation` in every guard that writes to a line, or reads a
+span:
+
+- `write_tag_for` and its removal counterpart. A `dankg:tag` marker
+  anchored on a borrowed line would land on the producing block's own
+  fence and read as that block's tag.
+- `blocks_in_section`, which the TUI's eval picker calls with a
+  node's own span. A borrowed span hands back the producing block,
+  which the block node already offers.
+
+`end_line` matches `line`. A span the node does not own has nothing
+to measure.
+
+The guard those call sites already carry was written for a real bug.
+Its reasoning survives this change with one word moved. A node whose
+line was `0` reached `tag::write_back`'s own `anchor_line - 1` on a
+`u32`, underflowed, and panicked on the resulting near-`u32::MAX`
+splice index. The post-mortem reads that such a node has no real line
+for a marker to attach to at all. That stays true of an artifact.
+What changes is the test. A line of `0` no longer detects it. The
+kind does.
 
 ## Why not the alternatives
 
@@ -183,19 +255,9 @@ gate failing over a document that is right.
 
 ## Open questions
 
-1. What the override attribute is called. `label=` ships today and is
-   too generic: it becomes a Typst label, an HTML id, and a graph slug
-   at once. `artifact=` names what it names. `as=` reads well beside
-   `produces=` but breaks the noun convention every other attribute
-   follows. The rename is mechanical either way, since `dankg fmt`
-   canonicalizes attribute order and 0.9.0 has no external users.
-2. Whether an artifact node is drawn by default in `dankg graph` and
-   listed in the TUI, or kept behind a flag the way `--live` keeps a
-   spawned catalog. Drawing it by default changes the picture for
-   every corpus with produced artifacts.
-3. What extent an artifact node reports. A relation node has no source
-   lines of its own. An artifact could borrow its producing block's,
-   or report none.
+None. This plan raised three. Each was settled in review.
+Decisions 70, 73, 74 and 75 record the answers. The plan is ready to
+build.
 
 ## What this explicitly does not do
 
@@ -214,11 +276,12 @@ gate failing over a document that is right.
 
 - `src/graph/build.rs` / `build.md` -- a `produces=file:` artifact
   becomes a node under a `file:` namespace, joined by `Produces`; its
-  name is assigned from the same per-file `Slugger` a heading and a
-  block name come from.
+  slug is assigned from the same per-file `Slugger` a heading and a
+  block name come from. Its title is its own path (decision 74). Its
+  line is the producing block's (decision 75).
 - `src/graph/model.md` -- a node kind for an artifact, beside
   `Relation`.
-- `src/graph/resolve.md` -- nothing, if the artifact's name is a real
+- `src/graph/resolve.md` -- nothing, if the artifact's slug is a real
   slug in its own file. That is the point of making it a node rather
   than an alias.
 - `src/graph/cache.md` -- the artifact node encoded and decoded, and
@@ -226,14 +289,18 @@ gate failing over a document that is right.
   which stays true when build's reading of an unchanged file changes.
   Not bumping would serve stale nodes that still hash as fresh -- the
   same trap decision 62 hit.
-- `src/md/mod.md` -- the override attribute, renamed per question 1.
+- `src/md/mod.md` -- `artifact=` joins `KNOWN_ATTRS` in place of
+  `label=`. The accessor is renamed with it.
 - `src/weave.md` -- `figures` takes its default from the artifact's
   path rather than the block's `name=`; `unresolved_message` gains
   decision 72's own answer.
 - `src/render/weave_html.md` / `typst.md` -- an anchor on the pair's
   own box (decision 71).
-- `architecture.md` -- decisions 69 through 72; decision 63 narrowed
-  to say the name belongs to the artifact.
+- `src/tui/app.md` -- `kind_marker` gains the file icon (decision 73),
+  and the artifact kind joins `NodeKind::Relation` in the guards
+  decision 75 names.
+- `architecture.md` -- decisions 69 through 75; decision 63 narrowed
+  to say the slug belongs to the artifact.
 - `README.md` and `example/weave_example/report.md` -- the renamed
   attribute. The "A gap worth knowing about" section goes with the
   gap.
@@ -246,21 +313,26 @@ gate failing over a document that is right.
 2. Unit tests:
 
    - A block with `produces=file:data/quarterly.csv` builds an
-     artifact node named `quarterly`, and a `Produces` edge from the
-     block to it.
+     artifact node slugged `quarterly`, titled `data/quarterly.csv`,
+     and a `Produces` edge from the block to it.
    - A `db=` block's own relation node is unchanged, which is what
      makes decision 69 an added namespace rather than an altered one.
-   - An override renames the artifact node and leaves the block node
-     alone.
-   - A declared name colliding with a heading slug warns by line. The
+   - An `artifact=` override reslugs the artifact node and leaves the
+     block node alone. The title stays the path.
+   - A declared slug colliding with a heading slug warns by line. The
      artifact falls back to its path-derived default. The heading
      keeps its own unsuffixed slug.
-   - Two artifacts whose paths derive one name are suffixed by
+   - Two artifacts whose paths derive one slug are suffixed by
      `Slugger`, never warned about.
    - `[[#quarterly]]` resolves to the artifact node and `[[#chart]]`
      to the block node, in one document.
    - A recognized pair carries an anchor in both backends. An unpaired
      block carries none.
+   - An artifact node reports its producing block's own line, and
+     `kind_marker` draws the file icon for it.
+   - `write_tag_for` refuses an artifact node, the way it already
+     refuses a relation. That is decision 75's own guard. It keeps a
+     borrowed line from taking a marker.
 
 3. A cache round-trip test: a file with an artifact node encodes and
    decodes intact. A `VERSION` 3 entry is rejected rather than
