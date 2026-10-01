@@ -61,9 +61,68 @@ pub fn resolve(files: &[ParsedFile], diags: &mut Diags) -> Graph {
         }
     }
 
+    resolve_file_reads(files, &mut graph);
+
     graph.reciprocate();
     graph.sort();
     graph
+}
+
+/// Decision 76. Joins every `reads=file:PATH` to the artifact node of
+/// whichever block writes that same file, anywhere in the corpus.
+///
+/// Both sides are compared as root-relative normalized paths, through the
+/// same `join_normalize`/`dir_of` a written link already resolves through
+/// and `eval::plan::check_file_deps` already compares with. Two blocks in
+/// different directories naming one file by different relative spellings
+/// therefore still match, and the graph cannot disagree with `check`
+/// about which file an edge is about.
+///
+/// The producer side needs nothing stored. An artifact node already
+/// carries the path as written, as its title (decision 74), and the file
+/// that declared it, so its resolved path is recomputed here from the
+/// node itself.
+///
+/// A read with no producer anywhere gets no edge, and no placeholder. A
+/// block reading a file the corpus does not generate is ordinary -- a
+/// checked-in CSV is the common case -- so a decision 8 placeholder would
+/// report a dangling reference that is not one, and `dankg check` would
+/// fail a corpus that is correct. `check_file_deps` is what reports a
+/// `reads=` whose declared `deps=` names no matching producer, and it
+/// stays the only thing that does.
+fn resolve_file_reads(files: &[ParsedFile], graph: &mut Graph) {
+    // Every artifact in the corpus, by its own resolved path.
+    let mut producers: Vec<(String, NodeId)> = Vec::new();
+    for file in files {
+        for node in &file.nodes {
+            if node.kind != NodeKind::Artifact {
+                continue;
+            }
+            if let Some(resolved) = join_normalize(dir_of(&file.path), &node.title) {
+                producers.push((resolved, node.id.clone()));
+            }
+        }
+    }
+
+    for file in files {
+        for read in &file.reads {
+            let Some(wanted) = join_normalize(dir_of(&file.path), &read.path) else { continue };
+            for (resolved, artifact) in &producers {
+                if resolved != &wanted {
+                    continue;
+                }
+                // Artifact to reader, the direction a relation's own
+                // `Reads` edge already runs (decision 35).
+                graph.edges.push(Edge {
+                    from: artifact.clone(),
+                    to: read.from.clone(),
+                    kind: EdgeKind::Reads,
+                    line: read.line,
+                    reciprocated: false,
+                });
+            }
+        }
+    }
 }
 ```
 
@@ -509,6 +568,78 @@ mod tests {
     }
 
     #[test]
+    /// Decision 76, same file. The artifact sits between the two blocks:
+    /// producer writes it, consumer reads it.
+    #[test]
+    fn a_reads_file_joins_the_consumer_to_the_artifact() {
+        let (g, d) = graph_of(&[(
+            "a.md",
+            "```sh name=fetch produces=file:raw.csv\n:\n```\n\n```sh name=clean reads=file:raw.csv\n:\n```\n",
+        )]);
+        let artifact = NodeId::new("a", "raw");
+        assert!(
+            g.edges.iter().any(|e| e.kind == EdgeKind::Produces
+                && e.from == NodeId::new("a", "fetch")
+                && e.to == artifact),
+            "{:?}",
+            g.edges
+        );
+        assert!(
+            g.edges.iter().any(|e| e.kind == EdgeKind::Reads
+                && e.from == artifact
+                && e.to == NodeId::new("a", "clean")),
+            "{:?}",
+            g.edges
+        );
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    /// The match is on the resolved path, never the written one. Two
+    /// blocks in different directories spell one file differently and
+    /// still join -- the same comparison `eval::plan::check_file_deps`
+    /// already makes.
+    #[test]
+    fn a_reads_file_joins_across_directories_and_spellings() {
+        let (g, _) = graph_of(&[
+            ("a.md", "```sh name=fetch produces=file:data/raw.csv\n:\n```\n"),
+            ("sub/b.md", "```sh name=clean reads=file:../data/raw.csv\n:\n```\n"),
+        ]);
+        assert!(
+            g.edges.iter().any(|e| e.kind == EdgeKind::Reads
+                && e.from == NodeId::new("a", "raw")
+                && e.to == NodeId::new("sub/b", "clean")),
+            "{:?}",
+            g.edges
+        );
+    }
+
+    /// A read with no producer anywhere gets no edge and no placeholder.
+    /// Reading a file the corpus does not generate is ordinary, so
+    /// inventing a node would fail `dankg check` over a correct corpus.
+    #[test]
+    fn a_reads_file_with_no_producer_is_silent() {
+        let (g, d) = graph_of(&[("a.md", "```sh name=clean reads=file:external.csv\n:\n```\n")]);
+        assert!(g.nodes.iter().all(|n| n.kind != NodeKind::Artifact), "{:?}", g.nodes);
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Reads), "{:?}", g.edges);
+        assert!(g.nodes.iter().all(|n| n.resolved), "no placeholder may be invented: {:?}", g.nodes);
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    /// A `reads=` naming a relation rather than a file is the db path,
+    /// and decision 76 leaves it alone.
+    #[test]
+    fn a_reads_without_a_file_prefix_joins_no_artifact() {
+        let (g, _) = graph_of(&[(
+            "a.md",
+            "```sh name=fetch produces=file:raw.csv\n:\n```\n\n```sh name=clean reads=orders\n:\n```\n",
+        )]);
+        assert!(
+            g.edges.iter().all(|e| e.kind != EdgeKind::Reads),
+            "a bare relation name is not a file: {:?}",
+            g.edges
+        );
+    }
+
     /// The whole point of decision 69. A block and the file it writes
     /// are two targets, and a fragment reaches each by its own name.
     /// `resolve` needs no change for this: the artifact's slug is a real

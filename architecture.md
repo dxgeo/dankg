@@ -995,6 +995,26 @@ The refusal is format-specific, and it is the one place the two backends deliber
 
 **Still deferred.** The one shared per-file slug namespace is only half real. `graph::build` assigns from one `Slugger` over headings, block names and artifacts. `weave::figures`, `weave::heading_slugs` and `weave::pair_anchors` each derive their own, so the two tools can still disagree about a suffix when a heading slug, a block name and an artifact stem collide. `weave::heading_slugs` is the oldest instance and predates all of this: it walks headings alone, with no block names in its `Slugger` at all, so a block named `chart` ahead of a heading "Chart" already gives the heading `chart` in weave and `chart-1` in the graph. Closing it means weave reading its slugs from `graph::build` rather than recomputing them. `example/weave_example/report.md`'s own *A gap worth knowing about* section is the live demonstration of what remains.
 
+## Decision 76: A `reads=file:` is an edge, resolved corpus-wide
+
+A block declaring `reads=file:PATH` gets a `Reads` edge from the artifact node of whichever block writes that same file. Direction and kind are a relation's own (decision 35): artifact to reader, reusing `EdgeKind::Reads` rather than inventing a fourth kind.
+
+Decision 69 made an artifact a node and left it a leaf. The graph showed what wrote a file and never what consumed it, so lineage stopped halfway. `plans/plan-label-resolution.md` deferred this on the stated condition that the forward edge exist first. It does now.
+
+**It cannot be built where decision 69 was.** `graph::build` runs per file, and an artifact node is file-scoped. A `reads=` in one file therefore has to find a node in another. That needs the whole corpus, which is `graph::resolve`'s job. A relation's own `Reads` edge *is* built in `build`. The reason is the difference between the two: `db:NAME` is a synthetic global namespace that addresses without a corpus. `file:` deliberately is not one, because `[[#quarterly]]` has to resolve against the declaring file.
+
+So the declaration is recorded as written and matched later. `ParsedFile` carries a `RawRead` list beside its `RawLink` list. The shape is the same because the problem is the same: this module's own doc comment already says a target may live in a file that has not been parsed yet. One pattern, a second instance.
+
+**Both sides compare as resolved paths.** `join_normalize`/`dir_of` turn each half into a root-relative form, which is the same pair a written link resolves through and the same comparison `eval::plan::check_file_deps` already makes. Two blocks in different directories spelling one file differently still match. The graph therefore cannot disagree with `check` about which file an edge is about. The producer side stores nothing extra: an artifact node already carries the path as written as its title (decision 74) and the file that declared it, so its resolved path is recomputed from the node.
+
+**The declaration alone draws the edge.** Decision 33 says `reads=file:` resolves nothing on its own. That is about *staleness*, where the `deps=` edge is what carries the hash. Drawing is a different question. A relation's `Reads` edge is inferred from a block's own SQL. For a file there is nothing to infer, so the declaration is the only signal there is. A `reads=` whose `deps=` names no matching producer is still reported by `check_file_deps`, unchanged.
+
+**A read with no producer gets nothing.** No edge, and no decision 8 placeholder. A block reading a file the corpus does not generate is ordinary, and a checked-in CSV is the common case. A placeholder would report a dangling reference that is not one. It would also make `dankg check` count an unresolved node and fail a corpus that is correct.
+
+**An artifact becomes free to enter against `--depth`.** Decision 38 gave a relation that treatment. The reason now applies here too: once a `reads=` is an edge, an artifact sits *between* two blocks rather than hanging off one. Charging a hop in each direction would hide the producer from the consumer at `--depth 1`, which is exactly the lineage the edge exists to show. Leaving one for a further block still costs the ordinary hop, so decision 38's own warning about collapsing distance in both directions still holds.
+
+Cache `VERSION` 4 to 5. Resolution reads the new list, so an older entry would serve a corpus with no lineage while still hashing as fresh.
+
 ## Block nodes
 
 A named, top-level code block is a node too (decision 20). It is scoped to
@@ -4895,7 +4915,7 @@ echo "$contains Contains edges against $link Link edges"
 <!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
 
 ```
-926 Contains edges against 72 Link edges
+927 Contains edges against 72 Link edges
 ```
 
 # Open questions

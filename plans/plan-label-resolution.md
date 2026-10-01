@@ -9,6 +9,7 @@ all. Decision 69 keeps the artifact's slug in its file's own namespace
 rather than under the synthetic `file:` prefix proposed below, because
 a synthetic namespace would have left `[[#quarterly]]` unresolvable.
 
+The deferred `reads=file:` edge followed straight after, as decision 76.
 One piece is left, and it is wider than this plan framed it. The slug
 namespace is shared inside `graph::build` and not yet between the two
 tools. `weave` still derives its own heading slugs, figure labels and
@@ -75,9 +76,10 @@ else here".
 line-oriented format, and it stood at `VERSION = 3` when this plan was
 written. Anything new that resolution depends on has to be encoded,
 decoded, and version-bumped. A warm cache otherwise serves pre-change
-nodes that still hash as fresh. Decision 69 took the bump to 4.
+nodes that still hash as fresh. Decision 69 took the bump to 4, and
+decision 76 took it to 5.
 
-<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 4;" -->
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 5;" -->
 
 ## What this reuses
 
@@ -286,7 +288,8 @@ cannot, and decision 71 carries the answer.
   reference syntax. `[[#chart]]` and `[text](#chart)` both parse
   today.
 - A node for `reads=file:`. The reverse edge can follow once the
-  forward one exists.
+  forward one exists. It did: decision 76 joins a `reads=file:` to the
+  artifact its producer already built, corpus-wide.
 - Cross-file references. Weave renders one file (decision 41).
   Decision 64 narrows that for a fragment with no file name in it
   alone.

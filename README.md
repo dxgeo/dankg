@@ -320,6 +320,14 @@ is the path's stem, so a corpus shows what its code made rather than
 only the code. *`weave`* below is where that same name is a figure
 slug.
 
+A `reads=file:PATH` joins the reader to that same node, so the graph
+carries the whole chain: the block that wrote a file, the file, and
+every block that reads it. The two sides are matched on the resolved
+path, so blocks in different directories can spell one file differently
+and still join. A file nothing in the corpus produces draws no edge and
+invents no node, since reading a checked-in CSV is ordinary rather than
+a dangling reference.
+
 Neither attribute resolves anything on its own: the `deps=`/`xdeps=`
 edge still says which block this is about. `dankg check` just confirms
 the two sides agree on which file that edge is actually about (see

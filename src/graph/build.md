@@ -44,6 +44,24 @@ pub enum Target {
     Wiki(String),
 }
 
+/// A `reads=file:PATH` as written, before the block that writes that file
+/// is known (decision 76). The same shape as `RawLink`, and recorded here
+/// for the same reason: the producing block can live in a file this pass
+/// has not read yet, so matching waits for [`super::resolve`].
+///
+/// An artifact node is file-scoped (decision 69), which is what forces
+/// this. A relation's own `Reads` edge is built right here, because
+/// `db:NAME` is a synthetic namespace that needs no corpus to address.
+/// `file:` deliberately is not one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawRead {
+    /// The block that declared it.
+    pub from: NodeId,
+    /// The path exactly as written, resolved relative to `from`'s own file.
+    pub path: String,
+    pub line: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedFile {
     /// Path as it appears on disk.
@@ -53,6 +71,8 @@ pub struct ParsedFile {
     pub nodes: Vec<Node>,
     pub containment: Vec<Edge>,
     pub links: Vec<RawLink>,
+    /// Every `reads=file:` this file declares, unmatched (decision 76).
+    pub reads: Vec<RawRead>,
     /// Alternate names this file answers to when resolving wikilinks.
     pub aliases: Vec<String>,
 }
@@ -116,6 +136,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
     let mut nodes: Vec<Node> = Vec::new();
     let mut containment: Vec<Edge> = Vec::new();
     let mut links: Vec<RawLink> = Vec::new();
+    let mut reads: Vec<RawRead> = Vec::new();
     // Heading levels seen so far, as (level, id), innermost last.
     let mut stack: Vec<(u8, NodeId)> = Vec::new();
     let mut current: Option<NodeId> = None;
@@ -135,6 +156,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                      nodes: &mut Vec<Node>,
                      containment: &mut Vec<Edge>,
                      links: &mut Vec<RawLink>,
+                     reads: &mut Vec<RawRead>,
                      stack: &mut Vec<(u8, NodeId)>,
                      current: &mut Option<NodeId>| {
         match block {
@@ -277,6 +299,18 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                     }
                 }
 
+                // Decision 76's own half of the pair above. The file a
+                // block reads is recorded as written and matched later,
+                // because the block that writes it can live in a file
+                // this pass has not reached. `resolve` owns the match.
+                if let Some(read) = info.reads().and_then(plan::parse_artifact) {
+                    reads.push(RawRead {
+                        from: block_id.clone(),
+                        path: read.to_string(),
+                        line: *line,
+                    });
+                }
+
                 // Provenance without a driver: a db= block's own
                 // inferred Produces/Reads (decision 36's write-back),
                 // materialized the moment its result marker names any.
@@ -292,9 +326,13 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                     if let Some(code_index) =
                         doc.blocks.iter().position(|b| matches!(b, Block::Code { line: l, .. } if l == line))
                     {
-                        let (produces, reads) = recorded_provenance(doc, code_index, name);
+                        // Named for the relations they are, not just
+                        // `produces`/`reads`: decision 76 put a
+                        // `reads=file:` list of the same name in scope,
+                        // and the two are different things.
+                        let (made, used) = recorded_provenance(doc, code_index, name);
                         let db_ns = format!("db:{db}");
-                        for rel in &produces {
+                        for rel in &made {
                             let rel_id = NodeId::new(&db_ns, rel.clone());
                             push_relation_node(nodes, &rel_id, rel);
                             containment.push(Edge {
@@ -305,7 +343,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                                 reciprocated: false,
                             });
                         }
-                        for rel in &reads {
+                        for rel in &used {
                             let rel_id = NodeId::new(&db_ns, rel.clone());
                             push_relation_node(nodes, &rel_id, rel);
                             containment.push(Edge {
@@ -350,7 +388,16 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
     };
 
     for (block, top_level) in flatten(&doc.blocks) {
-        visit(block, top_level, &mut nodes, &mut containment, &mut links, &mut stack, &mut current);
+        visit(
+            block,
+            top_level,
+            &mut nodes,
+            &mut containment,
+            &mut links,
+            &mut reads,
+            &mut stack,
+            &mut current,
+        );
     }
 
     if nodes.is_empty() {
@@ -360,7 +407,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
 
     set_extents(&mut nodes, line_count);
 
-    ParsedFile { path: path.to_string(), key, nodes, containment, links, aliases }
+    ParsedFile { path: path.to_string(), key, nodes, containment, links, reads, aliases }
 }
 ```
 

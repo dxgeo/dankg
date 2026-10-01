@@ -35,7 +35,7 @@ same file means.
 //! does not use the cache and does not want to. It reads every file it is
 //! given anyway.
 
-use super::build::{ParsedFile, RawLink, Target};
+use super::build::{ParsedFile, RawLink, RawRead, Target};
 use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
 use crate::config;
 use crate::diag::{Diagnostic, Level};
@@ -51,8 +51,10 @@ const MAGIC: &str = "!dankg-cache";
 /// (decision 62), so an unchanged file's node set changed underneath an
 /// entry that still hashes as fresh. 4: a `produces=file:` artifact
 /// became a node of its own (decision 69), which is the same trap
-/// again -- the file is untouched and its node set is not.
-const VERSION: u32 = 4;
+/// again -- the file is untouched and its node set is not. 5: a row for
+/// each `reads=file:` a block declares (decision 76), which resolution
+/// now reads and an older entry does not carry.
+const VERSION: u32 = 5;
 /// Separates the items of a list field. `escape` guarantees it never survives
 /// inside one, so splitting on it is exact.
 const UNIT: char = '\u{1f}';
@@ -295,6 +297,18 @@ fn encode(stamp: &Stamp, file: &ParsedFile, diags: &[Diagnostic]) -> String {
             ],
         );
     }
+    for read in &file.reads {
+        row(
+            &mut out,
+            "read",
+            &[
+                escape(&read.from.file),
+                escape(&read.from.slug),
+                escape(&read.path),
+                read.line.to_string(),
+            ],
+        );
+    }
     for d in diags {
         row(
             &mut out,
@@ -347,6 +361,7 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
     let mut nodes = Vec::new();
     let mut containment = Vec::new();
     let mut links = Vec::new();
+    let mut reads = Vec::new();
     let mut reported = Vec::new();
 
     for line in lines {
@@ -389,6 +404,11 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
                 },
                 line: f[4].parse().ok()?,
             }),
+            "read" if f.len() == 4 => reads.push(RawRead {
+                from: NodeId::new(unescape(f[0]), unescape(f[1])),
+                path: unescape(f[2]),
+                line: f[3].parse().ok()?,
+            }),
             "diag" if f.len() == 4 => reported.push(Diagnostic {
                 level: Level::parse(f[0])?,
                 file: unescape(f[1]),
@@ -399,7 +419,7 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
         }
     }
 
-    Some((ParsedFile { path: path?, key, nodes, containment, links, aliases }, reported))
+    Some((ParsedFile { path: path?, key, nodes, containment, links, reads, aliases }, reported))
 }
 ```
 
@@ -558,6 +578,22 @@ mod tests {
         let (decoded, _) = decode(&text, &stamp()).expect("entry is fresh");
         assert_eq!(decoded.nodes, file.nodes);
         assert_eq!(decoded.containment, file.containment);
+    }
+
+    /// Decision 76's own round trip. Resolution reads `reads` now, so an
+    /// entry that drops it would serve a corpus with no lineage at all
+    /// while still hashing as fresh.
+    #[test]
+    fn a_reads_file_declaration_survives_a_round_trip() {
+        let src = "```sh name=clean reads=file:data/raw.csv\n:\n```\n";
+        let mut d = Diags::new("notes/a.md");
+        let doc = Document::parse(src, &mut d);
+        let file = build::build("notes/a.md", &doc, src.lines().count() as u32, &mut d);
+        assert_eq!(file.reads.len(), 1, "the fixture declares one: {:?}", file.reads);
+
+        let text = encode(&stamp(), &file, &[]);
+        let (decoded, _) = decode(&text, &stamp()).expect("entry is fresh");
+        assert_eq!(decoded.reads, file.reads);
     }
 
     #[test]
