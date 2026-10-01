@@ -128,8 +128,9 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
     let (tables, images) = produced_artifacts(&doc, &entry_rel, &root, &mut diags);
     let (labels, numbers) = figures(&doc, &tables, &images, &mut diags);
     let slugs = heading_slugs(&doc);
-    let (typst_refs, html_refs) = references(&doc, &tables, &labels, &numbers, &slugs);
-    resolve_references(&doc, &typst_refs, &labels, &numbers, &mut diags);
+    let pairs = pair_anchors(&doc);
+    let (typst_refs, html_refs) = references(&doc, &tables, &labels, &numbers, &slugs, &pairs);
+    resolve_references(&doc, &typst_refs, &labels, &numbers, &pairs, format, &mut diags);
     let bib = bibliography(&doc, &entry_rel, &root, &mut diags);
 
     // Every unresolved reference (decision 64) and every unresolved
@@ -144,11 +145,11 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
         match format {
             Format::Html => render_html(
                 &doc, &title, &config, &root, &tables, &images, &labels, &numbers, &slugs, &html_refs,
-                bib.as_ref(), output, figures_outside, &mut diags,
+                &pairs, bib.as_ref(), output, figures_outside, &mut diags,
             ),
             Format::Pdf => render_pdf(
                 &doc, &title, &config, &root, &name, &tables, &images, &labels, &slugs, &typst_refs,
-                bib.as_ref(), output, toc, figures_outside, &mut diags,
+                &pairs, bib.as_ref(), output, toc, figures_outside, &mut diags,
             ),
         }
     };
@@ -590,6 +591,38 @@ fn heading_slugs(doc: &Document) -> HashMap<u32, String> {
     let mut slugger = Slugger::new();
     doc.headings().iter().map(|(_, inlines, line)| (*line, slugger.assign(&Inline::plain(inlines)))).collect()
 }
+
+/// Every recognized pair's own anchor slug, by the block index the pair
+/// starts at (decision 71). The slug is the block's own `name=`,
+/// slugified -- the same string `graph::build` assigns that block's node,
+/// so a fragment naming a block means one thing to both tools.
+///
+/// An *unpaired* block is absent. Decision 46's box is what a pair
+/// renders, and a block with no recorded result renders no box, so there
+/// is nothing for an anchor to sit on.
+///
+/// A block that renders no box is absent for the same reason, and there
+/// are two ways to be one. `weave=hidden` drops the pair outright
+/// (decision 48). `weave=source-hidden` together with
+/// `weave=output-hidden` drops both halves, which leaves the box empty,
+/// and an empty box is dropped rather than emitted (decision 53). An
+/// anchor on either would resolve to an id the output does not carry,
+/// which is worse than not resolving: the author gets a link that goes
+/// nowhere instead of a diagnostic naming the line.
+fn pair_anchors(doc: &Document) -> HashMap<usize, String> {
+    let mut out = HashMap::new();
+    for index in 0..doc.blocks.len() {
+        let Some(Block::Code { info, .. }) = doc.blocks.get(index) else { continue };
+        let Some(name) = info.name() else { continue };
+        if info.weave_hidden() || (info.weave_source_hidden() && info.weave_output_hidden()) {
+            continue;
+        }
+        if result::recognize_pair(&doc.blocks, index).is_some() {
+            out.insert(index, slugify(name));
+        }
+    }
+    out
+}
 ```
 
 ## Resolving a reference
@@ -639,6 +672,7 @@ fn references(
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
     slugs: &HashMap<u32, String>,
+    pairs: &HashMap<usize, String>,
 ) -> (HashMap<String, String>, HashMap<String, (String, String)>) {
     let mut typst = HashMap::new();
     let mut html = HashMap::new();
@@ -647,6 +681,15 @@ fn references(
         let kind = if tables.contains_key(index) { "Table" } else { "Figure" };
         typst.insert(label.clone(), format!("fig:{label}"));
         html.insert(label.clone(), (format!("fig-{label}"), format!("{kind} {number}")));
+    }
+    // A pair's own anchor goes in after a figure's and before a
+    // heading's, so the existing precedence is untouched: a figure
+    // still wins a clash, a heading still loses one. The display text
+    // for a bare reference is the block's own name, which is the
+    // nearest thing a pair has to a caption (decision 71).
+    for (_, slug) in pairs {
+        typst.entry(slug.clone()).or_insert_with(|| format!("blk:{slug}"));
+        html.entry(slug.clone()).or_insert_with(|| (format!("blk-{slug}"), slug.clone()));
     }
     for (_, inlines, line) in doc.headings() {
         let Some(slug) = slugs.get(&line) else { continue };
@@ -695,6 +738,8 @@ fn resolve_references(
     refs: &HashMap<String, String>,
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
+    pairs: &HashMap<usize, String>,
+    format: Format,
     diags: &mut Diags,
 ) {
     let mut slices = Vec::new();
@@ -703,28 +748,58 @@ fn resolve_references(
     for (line, inlines) in slices {
         collect_fragments(inlines, line, &mut found);
     }
-    for (fragment, line) in found {
-        if refs.contains_key(&fragment) {
+    for (fragment, line, bare) in found {
+        let Some(anchor) = refs.get(&fragment) else {
+            diags.error(line, unresolved_message(doc, &fragment, labels, numbers));
             continue;
+        };
+        // Decision 71. A pair's anchor sits on the `#block(stroke: ...)`
+        // decision 46 emits. Typst cannot `@`-reference a block at all:
+        // `typst compile` answers `cannot reference block`. A bare
+        // reference is exactly the form that becomes `@anchor`, so this
+        // one is refused here, naming the form that does work, rather
+        // than reaching the compiler as generated markup the author
+        // never wrote. HTML has no such limit and is left alone.
+        //
+        // The test is what the fragment *resolved to*, never whether
+        // some pair happens to share its name. A block written
+        // `name=quarterly produces=file:data/quarterly.csv` gives its
+        // own name and its artifact's stem the same slug, and the
+        // figure wins that key in `references`. The fragment then
+        // resolves to `fig:quarterly`, which is a real Typst figure and
+        // references perfectly well. Asking the pair map instead
+        // refused `example/weave_example/report.md`, whose whole job is
+        // to render.
+        if bare && format == Format::Pdf && anchor.starts_with("blk:") {
+            diags.error(
+                line,
+                format!(
+                    "a bare reference to the block `{fragment}` cannot render in PDF; give it text, as `[[#{fragment}|...]]`"
+                ),
+            );
         }
-        diags.error(line, unresolved_message(doc, &fragment, labels, numbers));
     }
 }
 
 /// Every `[[#fragment]]` and `[text](#fragment)` in `inlines`, paired
-/// with the enclosing block's own line. Recurses through emphasis and
+/// with the enclosing block's own line and whether it was written bare. Recurses through emphasis and
 /// through a link's own text, since a reference is legal inside either.
-fn collect_fragments(inlines: &[Inline], line: u32, out: &mut Vec<(String, u32)>) {
+fn collect_fragments(inlines: &[Inline], line: u32, out: &mut Vec<(String, u32, bool)>) {
     for i in inlines {
         match i {
-            Inline::WikiLink { target, .. } => {
+            // The third element is "bare": a wikilink with no text half,
+            // the one form that becomes `@anchor` in Typst rather than a
+            // `#link`. Decision 71 is the only reader of it.
+            Inline::WikiLink { target, label } => {
                 if let Some(fragment) = target.strip_prefix('#') {
-                    out.push((fragment.to_string(), line));
+                    out.push((fragment.to_string(), line, label.is_none()));
                 }
             }
             Inline::Link { dest, text, .. } => {
                 if let Some(fragment) = dest.strip_prefix('#') {
-                    out.push((fragment.to_string(), line));
+                    // A markdown link always carries its own text, so it
+                    // is never bare.
+                    out.push((fragment.to_string(), line, false));
                 }
                 collect_fragments(text, line, out);
             }
@@ -1011,6 +1086,7 @@ fn render_html(
     numbers: &HashMap<usize, u32>,
     slugs: &HashMap<u32, String>,
     refs: &HashMap<String, (String, String)>,
+    pairs: &HashMap<usize, String>,
     bibliography: Option<&Bibliography>,
     output: Option<&str>,
     figures_outside: bool,
@@ -1019,8 +1095,8 @@ fn render_html(
     let extra_css = config.weave("html").and_then(|w| w.css).and_then(|rel| read_asset(root, &rel, "css", diags));
     let html_bib = bibliography.map(|bib| weave_html::Bibliography { entries: &bib.entries, order: &bib.order });
     let rendered = weave_html::render(
-        doc, title, extra_css.as_deref(), tables, images, labels, numbers, slugs, refs, figures_outside,
-        html_bib.as_ref(), diags,
+        doc, title, extra_css.as_deref(), tables, images, labels, numbers, slugs, refs, pairs,
+        figures_outside, html_bib.as_ref(), diags,
     );
 
     let written = match output {
@@ -1087,6 +1163,7 @@ fn render_pdf(
     labels: &HashMap<usize, String>,
     slugs: &HashMap<u32, String>,
     refs: &HashMap<String, String>,
+    pairs: &HashMap<usize, String>,
     bibliography: Option<&Bibliography>,
     output: Option<&str>,
     toc: bool,
@@ -1136,7 +1213,7 @@ fn render_pdf(
     });
 
     let body =
-        typst::render(doc, title, toc, tables, images, labels, slugs, refs, figures_outside, bib_summary.as_ref(), diags);
+        typst::render(doc, title, toc, tables, images, labels, slugs, refs, pairs, figures_outside, bib_summary.as_ref(), diags);
     let weave_cfg = config.weave("pdf");
     let preamble =
         weave_cfg.as_ref().and_then(|w| w.template.clone()).and_then(|rel| read_asset(root, &rel, "template", diags));
@@ -1258,16 +1335,70 @@ mod tests {
     /// artifact branch below claimed the artifact could not be read,
     /// which was false -- it read fine, under another name.
     #[test]
-    fn a_reference_naming_the_block_says_which_slug_the_figure_has() {
+    /// Decision 71 is what changed this. A reference naming a rendered
+    /// pair used to fail the weave, because only the artifact carried a
+    /// name. The pair itself is addressable now, so `[[#t]]` resolves to
+    /// the whole code-and-output unit and the weave succeeds.
+    fn a_reference_naming_a_rendered_pair_resolves_to_the_pair() {
         let dir = scratch(&[
             ("a.md", "```python name=t produces=file:data.csv caption=\"Revenue\"\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#t]].\n"),
             ("data.csv", "x,y\n1,2\n"),
         ]);
         let out = dir.join("out.html");
         let result = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false);
-        let err = result.err().expect("a reference naming the block must fail the weave");
+        assert!(result.is_ok(), "{:?}", result.as_ref().err());
+        let html = std::fs::read_to_string(&out).unwrap();
+        assert!(html.contains("id=\"blk-t\""), "the pair carries its own anchor: {html}");
+        assert!(html.contains("href=\"#blk-t\""), "and the reference points at it: {html}");
+    }
+
+    /// Decision 72's own message survives, on the one case decision 71
+    /// leaves it. A `weave=hidden` pair renders no box, so it carries no
+    /// anchor, while `figures` still keeps its artifact's label. A
+    /// fragment naming the block therefore still misses, and the message
+    /// still names the slug that would have worked.
+    #[test]
+    fn a_reference_naming_a_hidden_pair_still_says_which_slug_the_figure_has() {
+        let dir = scratch(&[
+            ("a.md", "```python name=t produces=file:data.csv caption=\"Revenue\" weave=hidden\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#t]].\n"),
+            ("data.csv", "x,y\n1,2\n"),
+        ]);
+        let out = dir.join("out.html");
+        let result = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(out.to_str().unwrap()), true, false);
+        let err = result.err().expect("a hidden pair carries no anchor, so the reference must still fail");
         assert!(err.contains("unresolved reference"), "{err}");
         assert!(!out.exists(), "nothing is written on an unresolved reference");
+    }
+
+    /// Decision 71's own PDF limit. Typst cannot `@`-reference a block at
+    /// all, and a bare reference is exactly the form that becomes
+    /// `@anchor`. It is refused here, naming the form that works, rather
+    /// than reaching `typst compile` as `cannot reference block`.
+    #[test]
+    fn a_bare_reference_to_a_pair_is_refused_for_pdf_and_allowed_for_html() {
+        let src = "```python name=t produces=file:data.csv caption=\"Revenue\"\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#t]].\n";
+        let dir = scratch(&[("a.md", src), ("data.csv", "x,y\n1,2\n")]);
+        let pdf = dir.join("out.pdf");
+        let err = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, Some(pdf.to_str().unwrap()), true, false)
+            .err()
+            .expect("a bare reference to a pair cannot render in PDF");
+        assert!(err.contains("unresolved reference"), "{err}");
+
+        // The very same document renders as HTML, which has no such limit.
+        let html = dir.join("out.html");
+        let ok = run(dir.join("a.md").to_str().unwrap(), Format::Html, Some(html.to_str().unwrap()), true, false);
+        assert!(ok.is_ok(), "{:?}", ok.as_ref().err());
+    }
+
+    /// The labelled form is what the refusal above names, so it has to
+    /// actually work in PDF.
+    #[test]
+    fn a_labelled_reference_to_a_pair_renders_for_pdf() {
+        let src = "```python name=t produces=file:data.csv caption=\"Revenue\"\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#t|the run]].\n";
+        let dir = scratch(&[("a.md", src), ("data.csv", "x,y\n1,2\n")]);
+        let typ = dir.join("out.typ");
+        let result = run(dir.join("a.md").to_str().unwrap(), Format::Pdf, Some(typ.to_str().unwrap()), true, false);
+        assert!(result.is_ok(), "{:?}", result.as_ref().err());
     }
 
     #[test]
@@ -1834,7 +1965,7 @@ mod tests {
         let tables: HashMap<usize, (String, String)> = [(0, ("csv".to_string(), "x\n1\n".to_string()))].into_iter().collect();
         let labels = [(0usize, "t".to_string())].into_iter().collect();
         let numbers = [(0usize, 1u32)].into_iter().collect();
-        let (typst, html) = references(&d, &tables, &labels, &numbers, &HashMap::new());
+        let (typst, html) = references(&d, &tables, &labels, &numbers, &HashMap::new(), &HashMap::new());
         assert_eq!(typst.get("t"), Some(&"fig:t".to_string()));
         assert_eq!(html.get("t"), Some(&("fig-t".to_string(), "Table 1".to_string())));
     }
@@ -1845,7 +1976,7 @@ mod tests {
         let _ = &images;
         let labels = [(0usize, "c".to_string())].into_iter().collect();
         let numbers = [(0usize, 2u32)].into_iter().collect();
-        let (_, html) = references(&d, &HashMap::new(), &labels, &numbers, &HashMap::new());
+        let (_, html) = references(&d, &HashMap::new(), &labels, &numbers, &HashMap::new(), &HashMap::new());
         assert_eq!(html.get("c"), Some(&("fig-c".to_string(), "Figure 2".to_string())));
     }
 
@@ -1855,7 +1986,7 @@ mod tests {
     fn references_resolves_a_heading_to_its_slug_and_its_title() {
         let d = doc("# The Design\n");
         let slugs = heading_slugs(&d);
-        let (typst, html) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs);
+        let (typst, html) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs, &HashMap::new());
         assert_eq!(typst.get("the-design"), Some(&"sec:the-design".to_string()));
         assert_eq!(html.get("the-design"), Some(&("the-design".to_string(), "The Design".to_string())));
     }
@@ -1868,7 +1999,7 @@ mod tests {
         let slugs = heading_slugs(&d);
         let labels = [(1usize, "chart".to_string())].into_iter().collect();
         let numbers = [(1usize, 1u32)].into_iter().collect();
-        let (typst, _) = references(&d, &HashMap::new(), &labels, &numbers, &slugs);
+        let (typst, _) = references(&d, &HashMap::new(), &labels, &numbers, &slugs, &HashMap::new());
         assert_eq!(typst.get("chart"), Some(&"fig:chart".to_string()));
     }
 
@@ -1876,7 +2007,7 @@ mod tests {
     fn a_hidden_figure_is_not_a_reference_target() {
         let labels = [(0usize, "c".to_string())].into_iter().collect();
         let d = doc("```python name=c weave=hidden produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nok\n```\n");
-        let (typst, html) = references(&d, &HashMap::new(), &labels, &HashMap::new(), &HashMap::new());
+        let (typst, html) = references(&d, &HashMap::new(), &labels, &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert!(typst.is_empty());
         assert!(html.is_empty());
     }
@@ -1885,9 +2016,9 @@ mod tests {
     fn resolve_references_passes_a_document_whose_references_all_resolve() {
         let d = doc("# Intro\n\nSee [[#intro]] and [the start](#intro).\n");
         let slugs = heading_slugs(&d);
-        let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs);
+        let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs, &HashMap::new());
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &mut diags);
+        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
@@ -1896,9 +2027,9 @@ mod tests {
     fn resolve_references_reports_every_unresolved_reference_in_one_walk() {
         let d = doc("# Intro\n\nSee [[#one]].\n\nAnd [[#two]] and [x](#three).\n");
         let slugs = heading_slugs(&d);
-        let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs);
+        let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs, &HashMap::new());
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &mut diags);
+        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert_eq!(diags.count(Level::Error), 3, "{:?}", diags.items());
     }
 
@@ -1906,7 +2037,7 @@ mod tests {
     fn an_unresolved_reference_to_nothing_says_so() {
         let d = doc("Text [[#nope]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("nothing in this document is named `nope`"), "{:?}", diags.items());
     }
 
@@ -1914,7 +2045,7 @@ mod tests {
     fn a_reference_to_a_named_block_that_is_no_figure_says_so() {
         let d = doc("```sh name=a\necho hi\n```\n\nText [[#a]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("declares no `produces=file:` artifact"), "{:?}", diags.items());
     }
 
@@ -1925,7 +2056,7 @@ mod tests {
     fn a_reference_to_a_figure_whose_artifact_could_not_be_read_says_so() {
         let d = doc("```python name=chart produces=file:missing.png caption=\"C\"\nrun()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#chart]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("could not be read"), "{:?}", diags.items());
     }
 
@@ -1935,7 +2066,7 @@ mod tests {
     fn a_reference_to_a_figure_with_no_recorded_result_points_at_eval() {
         let d = doc("```python name=chart produces=file:chart.png caption=\"C\"\nrun()\n```\n\nText [[#chart]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("no recorded result yet"), "{:?}", diags.items());
         assert!(diags.items()[0].message.contains("dankg eval"), "{:?}", diags.items());
     }
@@ -1945,7 +2076,7 @@ mod tests {
         let d = doc("```python name=c weave=hidden produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#c]].\n");
         let labels = [(0usize, "c".to_string())].into_iter().collect();
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), &mut diags);
+        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("hidden by `weave=hidden`"), "{:?}", diags.items());
     }
 
@@ -1954,7 +2085,7 @@ mod tests {
         let d = doc("```python name=c weave=output-hidden produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#c]].\n");
         let labels = [(0usize, "c".to_string())].into_iter().collect();
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), &mut diags);
+        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("hidden by `weave=output-hidden`"), "{:?}", diags.items());
     }
 
@@ -1964,7 +2095,7 @@ mod tests {
     fn a_wikilink_naming_another_file_is_not_checked_at_all() {
         let d = doc("See [[Other]] and [[Other#chart]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
@@ -1973,7 +2104,7 @@ mod tests {
     fn a_reference_nested_in_emphasis_is_still_checked() {
         let d = doc("See *[[#nope]]* here.\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert_eq!(diags.count(Level::Error), 1, "{:?}", diags.items());
     }
 
