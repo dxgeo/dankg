@@ -1,5 +1,23 @@
 # A produced artifact is a node, and it carries the slug
 
+Status: implemented. Decisions 70 and 72 shipped in 0.9.0. Decisions
+69, 71, 73, 74 and 75 followed, and `architecture.md` is the record of
+each as built. Two of them are narrower there than below, and the prose
+there says why. Decision 71 refuses a *bare* reference to a pair when
+the output is a PDF, because Typst cannot reference a plain block at
+all. Decision 69 keeps the artifact's slug in its file's own namespace
+rather than under the synthetic `file:` prefix proposed below, because
+a synthetic namespace would have left `[[#quarterly]]` unresolvable.
+
+One piece is left, and it is wider than this plan framed it. The slug
+namespace is shared inside `graph::build` and not yet between the two
+tools. `weave` still derives its own heading slugs, figure labels and
+pair anchors. `weave::heading_slugs` predates this plan and carries no
+block names at all, so a block named `chart` ahead of a heading
+"Chart" already gives the heading `chart` in weave and `chart-1` in
+the graph. Closing that means weave reading its slugs from
+`graph::build` rather than recomputing them.
+
 ## Context
 
 Decision 63 gave a figure a label, defaulting to its block's own
@@ -257,8 +275,10 @@ gate failing over a document that is right.
 ## Open questions
 
 None. This plan raised three. Each was settled in review.
-Decisions 70, 73, 74 and 75 record the answers. The plan is ready to
-build.
+Decisions 70, 73, 74 and 75 record the answers. The plan was built from
+there. A fourth question surfaced during the build rather than before
+it: whether Typst can reference the element decision 71 labels. It
+cannot, and decision 71 carries the answer.
 
 ## What this explicitly does not do
 

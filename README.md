@@ -129,7 +129,7 @@ Keys:
 - `enter` — open the selected node in your configured `[editor] command` (or jump to a focused panel link)
 - `/` — jump to a node by title, anywhere in the corpus; `n`/`N` repeat it forward/backward
 - `f` — open the filter menu (all, blocks, eval-chain, file-artifact, plus any `kind=` a `dankg:tag` marker has actually set anywhere in the corpus); `enter` applies it, `esc` cancels
-- `t` — tag the selected node: pick from every declared `[kind.*]`, or press `n` to declare a new one (name, then an optional icon); re-tagging overwrites. Refused for a node marked `∅` (see below) or a relation — neither has a real place to attach a marker
+- `t` — tag the selected node: pick from every declared `[kind.*]`, or press `n` to declare a new one (name, then an optional icon); re-tagging overwrites. Refused for a node marked `∅` (see below) a relation, or a produced artifact — none of the three has a real place to attach a marker, since an artifact's own line belongs to the block that writes it
 - `e` then `enter` — cycle and run a node's named code blocks in place
 - `r` — reset
 - `b` — toggle the origin breadcrumb (status line, while the panel has focus)
@@ -312,6 +312,13 @@ curl -o raw.csv https://example.com/data.csv
 print(open("raw.csv").read().strip())
 ```
 ````
+
+A `produces=file:PATH` artifact is a node in its own right.
+`dankg graph` draws it, `dankg check` resolves a reference to it, and
+the TUI lists it directly under the block that writes it. Its own name
+is the path's stem, so a corpus shows what its code made rather than
+only the code. *`weave`* below is where that same name is a figure
+slug.
 
 Neither attribute resolves anything on its own: the `deps=`/`xdeps=`
 edge still says which block this is about. `dankg check` just confirms
@@ -524,6 +531,19 @@ Release counts have climbed every year (see [[#chart]]), which
 The slug is the artifact's, not the block's. A block named `plot`
 writing `produces=file:chart.png` is still `[[#chart]]`, because a
 reference names the thing on the page.
+
+A block's own name is addressable too, and it means something else.
+`[[#plot]]` points at the whole unit the block renders as, its source
+and its recorded output together, rather than at the file it wrote.
+The two are separate targets on purpose. One is the code. The other is
+what the code made.
+
+The backends differ on one point here. A bare `[[#plot]]` renders in
+HTML and is refused for PDF, on the line you wrote it, because Typst
+cannot reference that kind of element at all. The message names the
+form that works: give the reference your own words, as
+`[[#plot|the plot]]`. A block with no recorded output renders no unit
+at all, so nothing points at one.
 
 `artifact=` renames the target, for when a path is a filesystem detail
 the prose should not have to quote:

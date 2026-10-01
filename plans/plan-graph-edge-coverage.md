@@ -7,14 +7,14 @@ a bug. The question asked was whether dankg is the best implementation
 of what it is for. Most of the answer is yes. One part is not. That part
 is measurable.
 
-`dankg graph .` on this repo reports 921 containment edges against 72
+`dankg graph .` on this repo reports 926 containment edges against 72
 link edges. Containment is the document outline, which any markdown
 parser derives for free. The 72 link edges are the whole of what the
 graph knows about authored cross-reference. The marker below pins that
 count against the block that measures it. The next drift therefore
 trips `dankg check` rather than sitting here unnoticed.
 
-<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="921 Contains edges against 72 Link edges" -->
+<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="926 Contains edges against 72 Link edges" -->
 
 The same corpus carries over 250 `dankg:depends` markers. `dankg check`
 prints the exact count on every run. No exact number is typed here for

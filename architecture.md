@@ -604,13 +604,18 @@ struct Root { path: PathBuf, config: Config }
 
 struct NodeId { file: String, slug: String }   // displays as "file#slug"
 
-enum NodeKind { Heading, Block }  // a block is always a leaf; see decision 20
+// A block's one child is the artifact it writes; nothing else nests
+// inside one. A relation is corpus-wide, unlike the other three.
+// See decisions 20, 69 and *Provenance without a driver*.
+enum NodeKind { Heading, Block, Artifact, Relation }
 
 struct Node {
     id: NodeId,
-    title: String,          // heading text, or a block's own `name=`
+    title: String,          // heading text, a block's own `name=`, or an
+                             // artifact's own path as written (decision 74)
     file: String,           // relative to root
-    line: u32,              // the heading's, or the block's fence, own line
+    line: u32,              // the heading's, or the block's fence, own line;
+                             // an artifact borrows its block's (decision 75)
     end_line: u32,          // heading: next same-or-higher heading, minus one;
                              // block: its own closing fence (md/block.rs)
     level: u8,              // 1..=6, or 0 for a synthetic file-level node;
@@ -619,11 +624,13 @@ struct Node {
     tags: Vec<String>,      // from frontmatter, carried onto every node
     external: Vec<String>,  // absolute URLs: recorded, never graphed
     resolved: bool,         // false => placeholder from a dangling link;
-                             // always true for a block
+                             // always true for a block or an artifact
     kind: NodeKind,
 }
 
-enum EdgeKind { Contains, Link }
+// Produces/Reads are inferred, never authored: a db= block's own
+// recorded provenance, and the file a produces=file: block writes.
+enum EdgeKind { Contains, Link, Produces, Reads }
 
 struct Edge {
     from: NodeId,
@@ -4888,7 +4895,7 @@ echo "$contains Contains edges against $link Link edges"
 <!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
 
 ```
-921 Contains edges against 72 Link edges
+926 Contains edges against 72 Link edges
 ```
 
 # Open questions
