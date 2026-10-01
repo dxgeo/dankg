@@ -31,7 +31,7 @@ fn fixture() -> Graph {
             let source = fs::read_to_string(base.join(rel)).expect("fixture is missing");
             let mut d = Diags::new(*rel);
             let doc = Document::parse(&source, &mut d);
-            build::build(rel, &doc, source.lines().count() as u32)
+            build::build(rel, &doc, source.lines().count() as u32, &mut d)
         })
         .collect();
     resolve::resolve(&files, &mut diags)
@@ -44,7 +44,7 @@ fn graph_of(files: &[(&str, &str)]) -> Graph {
         .map(|(path, src)| {
             let mut d = Diags::new(*path);
             let doc = Document::parse(src, &mut d);
-            build::build(path, &doc, src.lines().count() as u32)
+            build::build(path, &doc, src.lines().count() as u32, &mut d)
         })
         .collect();
     resolve::resolve(&parsed, &mut diags)
@@ -208,7 +208,7 @@ fn layout_does_not_depend_on_the_order_files_were_read_in() {
             let source = fs::read_to_string(base.join(rel)).unwrap();
             let mut d = Diags::new(*rel);
             let doc = Document::parse(&source, &mut d);
-            build::build(rel, &doc, source.lines().count() as u32)
+            build::build(rel, &doc, source.lines().count() as u32, &mut d)
         })
         .collect();
     let backwards = resolve::resolve(&files, &mut diags);

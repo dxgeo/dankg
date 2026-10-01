@@ -71,6 +71,7 @@ pub fn render(
     labels: &HashMap<usize, String>,
     slugs: &HashMap<u32, String>,
     refs: &HashMap<String, String>,
+    pairs: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
@@ -82,7 +83,7 @@ pub fn render(
     if toc {
         out.push_str("#outline()\n\n");
     }
-    out.push_str(&blocks(&doc.blocks, tables, images, labels, slugs, refs, figures_outside, bibliography, diags));
+    out.push_str(&blocks(&doc.blocks, tables, images, labels, slugs, refs, pairs, figures_outside, bibliography, diags));
     // Unconditionally at the end, never at the `hayagriva` fence's own
     // position (decision 59) -- the same fixed structural placement the
     // cover page and outline above already get.
@@ -188,6 +189,7 @@ fn blocks(
     labels: &HashMap<usize, String>,
     slugs: &HashMap<u32, String>,
     refs: &HashMap<String, String>,
+    pairs: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&BibliographySummary>,
     diags: &mut Diags,
@@ -206,6 +208,7 @@ fn blocks(
                         tables.get(&i),
                         images.get(&i),
                         labels.get(&i).map(String::as_str),
+                        pairs.get(&i).map(String::as_str),
                         figures_outside,
                         diags,
                     ));
@@ -275,6 +278,7 @@ fn eval_pair(
     table: Option<&(String, String)>,
     image: Option<&(Vec<u8>, String)>,
     label: Option<&str>,
+    anchor: Option<&str>,
     figures_outside: bool,
     diags: &mut Diags,
 ) -> String {
@@ -296,10 +300,16 @@ fn eval_pair(
     // block is a visible artifact of its own -- a rule beside blank
     // space -- so it is dropped rather than emitted, leaving whatever
     // figure the pair produced standing on its own.
+    //
+    // Decision 71 hangs the pair's own label off the closing bracket.
+    // An empty body emits no block, so there is nothing to label
+    // either: an anchor on a box that was dropped would resolve to a
+    // position no reader can see.
     let mut out = if body.trim().is_empty() {
         String::new()
     } else {
-        format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]\n")
+        let tag = anchor.map(|a| format!(" <blk:{a}>")).unwrap_or_default();
+        format!("#block(stroke: (left: 2pt + {color}), inset: (left: 8pt, rest: 4pt))[\n{body}]{tag}\n")
     };
     out.push_str(&figure);
     out
@@ -426,7 +436,10 @@ fn list(
     let marker = if l.ordered { "+" } else { "-" };
     let mut out = String::new();
     for item in &l.items {
-        let body = blocks(&item.blocks, tables, images, labels, slugs, refs, figures_outside, bibliography, diags);
+        // A nested pair is not a top-level block, so it has no node and
+        // no anchor (decision 19's own scope). An empty map says so.
+        let body =
+            blocks(&item.blocks, tables, images, labels, slugs, refs, &HashMap::new(), figures_outside, bibliography, diags);
         for (i, line) in body.lines().enumerate() {
             if i == 0 {
                 out.push_str(marker);
@@ -737,7 +750,7 @@ mod tests {
         let mut diags = Diags::new("t.md");
         let slugs = test_slugs(&doc);
         let out =
-            render(&doc, "Title", true, tables, images, labels, &slugs, refs, figures_outside, None, &mut diags);
+            render(&doc, "Title", true, tables, images, labels, &slugs, refs, &HashMap::new(), figures_outside, None, &mut diags);
         (out, diags)
     }
 
@@ -763,7 +776,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(!out.contains("#outline()"));
     }
 
@@ -772,7 +785,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ntitle: T\nauthor: Jane Doe\ncover: false\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(!out.contains("#pagebreak()"), "{out}");
         assert!(!out.contains("Jane Doe"), "{out}");
         assert!(out.starts_with("#outline()"), "{out}");
@@ -784,8 +797,8 @@ mod tests {
         let with = Document::parse("---\ntitle: T\ncover: true\n---\n# H\n", &mut d);
         let without = Document::parse("---\ntitle: T\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let a = render(&with, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
-        let b = render(&without, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let a = render(&with, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let b = render(&without, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert_eq!(a, b, "`cover` is a directive, never a line on the page it names");
     }
 
@@ -794,7 +807,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ntitle: T\ncover: yes\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(out.contains("#pagebreak()"), "never guessed at, so the default stands: {out}");
         assert!(!out.contains("Cover"), "{out}");
     }
@@ -807,7 +820,7 @@ mod tests {
             &mut d,
         );
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Tags: rust, typst"), "{cover}");
@@ -824,7 +837,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\nauthor: Jane Doe\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Jane Doe"), "{cover}");
@@ -836,7 +849,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\nauthor: [Jane Doe, John Smith]\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("Jane Doe, John Smith"), "{cover}");
@@ -847,7 +860,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ndate: 2026-09-18\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(
@@ -865,7 +878,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ndate: 2026-09\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(
@@ -879,7 +892,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ndate: 2026\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("[2026]"), "{cover}");
@@ -891,7 +904,7 @@ mod tests {
         let mut d = Diags::new("t.md");
         let doc = Document::parse("---\ndate: sometime next year\n---\n# H\n", &mut d);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         let cover_end = out.find("#pagebreak()").unwrap();
         let cover = &out[..cover_end];
         assert!(cover.contains("sometime next year"), "{cover}");
@@ -1410,7 +1423,7 @@ mod tests {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, bib, &mut diags)
+        render(&doc, "Title", false, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, bib, &mut diags)
     }
 
     fn bib(keys: &[&str]) -> BibliographySummary {

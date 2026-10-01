@@ -94,6 +94,7 @@ fn rendered_typst_actually_compiles() {
         &HashMap::new(),
         &slugs,
         &HashMap::new(),
+        &HashMap::new(),
         false,
         None,
         &mut diags,
@@ -178,6 +179,7 @@ fn rendered_citations_and_bibliography_actually_compile() {
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         false,
         Some(&summary),
         &mut diags,
@@ -244,6 +246,7 @@ fn a_document_with_its_cover_page_dropped_actually_compiles() {
         &HashMap::new(),
         &HashMap::new(),
         &slugs,
+        &HashMap::new(),
         &HashMap::new(),
         false,
         None,
@@ -393,6 +396,7 @@ fn a_table_figure_and_an_image_figure_compile_and_number_on_separate_counters() 
             &images,
             &labels,
             &slugs,
+            &HashMap::new(),
             &HashMap::new(),
             false,
             None,
@@ -587,6 +591,7 @@ fn a_labelled_heading_reference_compiles_against_an_unnumbered_heading() {
         &HashMap::new(),
         &slugs,
         &refs,
+        &HashMap::new(),
         false,
         None,
         &mut diags,
@@ -653,6 +658,11 @@ fn a_labelled_heading_reference_compiles_against_an_unnumbered_heading() {
 /// succeed -- which decision 51 now stops the weave over, at the block's
 /// own line, rather than letting Typst refuse a label that never got
 /// written.
+///
+/// The reference is written in its labelled form on purpose. A bare one
+/// naming a pair is refused outright for PDF (decision 71), and that
+/// refusal would fire before the copy ever ran, hiding the diagnostic
+/// this test exists to pin.
 #[test]
 fn a_failed_artifact_copy_stops_the_weave_and_says_why() {
     let dir = std::env::temp_dir().join(format!("dankg-weave-diags-{}", std::process::id()));
@@ -665,7 +675,7 @@ fn a_failed_artifact_copy_stops_the_weave_and_says_why() {
     fs::write(
         dir.join("a.md"),
         "```python name=chart produces=file:chart.png caption=\"A chart\"\nrun()\n```\n\n\
-         <!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#chart]].\n",
+         <!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#chart|the chart]].\n",
     )
     .expect("a.md");
 

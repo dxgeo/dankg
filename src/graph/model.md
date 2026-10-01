@@ -71,21 +71,47 @@ impl EdgeKind {
             EdgeKind::Reads => "reads",
         }
     }
+
+    /// `as_str`'s own inverse. `NodeKind` has carried one since the
+    /// cache learned to store a node's kind; an edge's kind was
+    /// matched inline at its one call site instead, and that inline
+    /// match knew only `contains` and `link`. It predated
+    /// `Produces`/`Reads` and was never extended with them, so a
+    /// cached file holding either one decoded to `None` and missed the
+    /// cache forever after. Encoding wrote a kind decoding then
+    /// refused to read. One shared function is what stops the two
+    /// drifting apart a second time.
+    pub fn parse(text: &str) -> Option<EdgeKind> {
+        match text {
+            "contains" => Some(EdgeKind::Contains),
+            "link" => Some(EdgeKind::Link),
+            "produces" => Some(EdgeKind::Produces),
+            "reads" => Some(EdgeKind::Reads),
+            _ => None,
+        }
+    }
 }
 
 /// What a node stands for. A heading is a section of prose. A block is a
 /// named, top-level, evaluable code block (decision 19's exact scope --
 /// the same one `eval::plan` and `dankg eval --list` use, so "this is a
 /// node you can navigate to" and "this is a node `dankg eval` can
-/// evaluate" never disagree). A block is always a leaf. Nothing nests
-/// inside one. A relation is a database table or view a `db=` block's
-/// own `Produces`/`Reads` edge names (decision: *Provenance without a
-/// driver*): corpus-wide, not file-scoped, unlike the other two -- see
-/// `NodeId`'s own doc comment.
+/// evaluate" never disagree). An artifact is the file a block's own
+/// `produces=file:PATH` writes (decision 69). It is a block's one and
+/// only child. Nothing else nests inside a block.
+///
+/// A relation is a database table or view a `db=` block's own
+/// `Produces`/`Reads` edge names (decision: *Provenance without a
+/// driver*): corpus-wide, not file-scoped, unlike the other three --
+/// see `NodeId`'s own doc comment. An artifact is file-scoped, which is
+/// the whole point of decision 69. Its slug shares one namespace with
+/// every heading and block name in its file, so a reference written
+/// `[[#quarterly]]` resolves against it with no namespace spelled out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Heading,
     Block,
+    Artifact,
     Relation,
 }
 
@@ -94,6 +120,7 @@ impl NodeKind {
         match self {
             NodeKind::Heading => "heading",
             NodeKind::Block => "block",
+            NodeKind::Artifact => "artifact",
             NodeKind::Relation => "relation",
         }
     }
@@ -102,6 +129,7 @@ impl NodeKind {
         match text {
             "heading" => Some(NodeKind::Heading),
             "block" => Some(NodeKind::Block),
+            "artifact" => Some(NodeKind::Artifact),
             "relation" => Some(NodeKind::Relation),
             _ => None,
         }
@@ -271,7 +299,7 @@ mod tests {
 
     #[test]
     fn node_kind_round_trips_through_text() {
-        for kind in [NodeKind::Heading, NodeKind::Block, NodeKind::Relation] {
+        for kind in [NodeKind::Heading, NodeKind::Block, NodeKind::Artifact, NodeKind::Relation] {
             assert_eq!(NodeKind::parse(kind.as_str()), Some(kind));
         }
         assert_eq!(NodeKind::parse("nope"), None);

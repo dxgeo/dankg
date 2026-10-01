@@ -55,6 +55,11 @@ pub const CSS: &str = r##"
      tui/draw.rs renders it with a different border glyph. */
   --block-bg: #eef2ff;
   --block-line: #3c3c5c;
+  /* An artifact node: the file a block writes (decision 73). Tinted
+     away from --block-bg so a produced file never reads as the code
+     that produced it, which sits directly beside it in every format. */
+  --artifact-bg: #f0fdf4;
+  --artifact-line: #3c5c48;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -72,6 +77,8 @@ pub const CSS: &str = r##"
     --accent-soft: #24382e;
     --block-bg: #23263a;
     --block-line: #9a9ac8;
+    --artifact-bg: #1e2f26;
+    --artifact-line: #8cc3a4;
   }
 }
 
@@ -211,6 +218,13 @@ svg.canvas.panning { cursor: grabbing; }
 }
 
 .node.block .label { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+.node.artifact .box {
+  fill: var(--artifact-bg);
+  stroke: var(--artifact-line);
+}
+
+.node.artifact .label { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 
 .node.entry .box {
   stroke: var(--accent);

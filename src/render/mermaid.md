@@ -46,6 +46,7 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
     // ordinary heading's default. `dot.rs` renders the same distinction with
     // fillcolor. `tui/draw.rs` renders it with a different border glyph.
     out.push_str("    classDef block fill:#eef2ff,stroke:#3c3c3c\n");
+    out.push_str("    classDef artifact fill:#f0fdf4,stroke:#3c3c3c\n");
 
     // Emitted in layout order, so the identifiers themselves read top to
     // bottom and left to right.
@@ -61,6 +62,7 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
 
     let mut dangling: Vec<&str> = Vec::new();
     let mut blocks: Vec<&str> = Vec::new();
+    let mut artifacts: Vec<&str> = Vec::new();
     for (id, name) in &names {
         let node = graph.node(id);
         let title = node.map(|n| n.title.as_str()).unwrap_or(&id.slug);
@@ -69,6 +71,8 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
             dangling.push(name);
         } else if node.is_some_and(|n| n.kind == NodeKind::Block) {
             blocks.push(name);
+        } else if node.is_some_and(|n| n.kind == NodeKind::Artifact) {
+            artifacts.push(name);
         }
     }
 
@@ -96,6 +100,9 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
 
     if !dangling.is_empty() {
         let _ = writeln!(out, "    class {} dangling", dangling.join(","));
+    }
+    if !artifacts.is_empty() {
+        let _ = writeln!(out, "    class {} artifact", artifacts.join(","));
     }
     if !blocks.is_empty() {
         let _ = writeln!(out, "    class {} block", blocks.join(","));

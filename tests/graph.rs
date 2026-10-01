@@ -29,8 +29,9 @@ fn build_corpus() -> (Graph, Diags) {
             let source = fs::read_to_string(base.join(rel)).expect("fixture is missing");
             let mut d = Diags::new(*rel);
             let doc = Document::parse(&source, &mut d);
+            let built = build::build(rel, &doc, source.lines().count() as u32, &mut d);
             diags.absorb(d);
-            build::build(rel, &doc, source.lines().count() as u32)
+            built
         })
         .collect();
     let graph = resolve::resolve(&files, &mut diags);
@@ -67,7 +68,7 @@ fn is_deterministic_regardless_of_file_order() {
             let source = fs::read_to_string(base.join(rel)).unwrap();
             let mut d = Diags::new(*rel);
             let doc = Document::parse(&source, &mut d);
-            build::build(rel, &doc, source.lines().count() as u32)
+            build::build(rel, &doc, source.lines().count() as u32, &mut d)
         })
         .collect();
     let b = resolve::resolve(&files, &mut diags);

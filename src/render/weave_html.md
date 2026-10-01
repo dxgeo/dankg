@@ -81,6 +81,7 @@ pub fn render(
     numbers: &HashMap<usize, u32>,
     slugs: &HashMap<u32, String>,
     refs: &HashMap<String, (String, String)>,
+    pairs: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -113,7 +114,7 @@ pub fn render(
             let _ = writeln!(out, "<p class=\"byline-date\">{date}</p>");
         }
     }
-    blocks(&mut out, &doc.blocks, slugs, tables, images, labels, numbers, refs, figures_outside, bibliography, diags);
+    blocks(&mut out, &doc.blocks, slugs, tables, images, labels, numbers, refs, pairs, figures_outside, bibliography, diags);
     // Unconditionally at the end, never at the `hayagriva` fence's own
     // position (decision 59) -- the same fixed structural placement
     // `render::typst`'s own `#bibliography(...)` call gets.
@@ -340,6 +341,7 @@ fn blocks(
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
     refs: &HashMap<String, (String, String)>,
+    pairs: &HashMap<usize, String>,
     figures_outside: bool,
     bibliography: Option<&Bibliography>,
     diags: &mut Diags,
@@ -359,6 +361,7 @@ fn blocks(
                         images.get(&i),
                         labels.get(&i).map(String::as_str),
                         numbers.get(&i).copied(),
+                        pairs.get(&i).map(String::as_str),
                         figures_outside,
                         diags,
                     );
@@ -440,6 +443,7 @@ fn eval_pair(
     image: Option<&(Vec<u8>, String)>,
     label: Option<&str>,
     number: Option<u32>,
+    anchor: Option<&str>,
     figures_outside: bool,
     diags: &mut Diags,
 ) {
@@ -460,7 +464,12 @@ fn eval_pair(
         out.push_str(&figure);
         return;
     }
-    let _ = writeln!(out, "<figure class=\"{class}\">");
+    // Decision 71. The anchor goes on the pair's own outer figure, which
+    // is the whole code-and-output unit. The inner artifact figure keeps
+    // its own `fig-` id (decision 63), so the two targets stay separate:
+    // a block name reaches the unit, an artifact slug reaches the file.
+    let id = anchor.map(|a| format!(" id=\"blk-{a}\"")).unwrap_or_default();
+    let _ = writeln!(out, "<figure class=\"{class}\"{id}>");
     out.push_str(&inner);
     if source_info.figure_outside().unwrap_or(figures_outside) {
         out.push_str("</figure>\n");
@@ -650,7 +659,9 @@ fn list(
     }
     for item in &l.items {
         out.push_str("<li>");
-        blocks(out, &item.blocks, slugs, tables, images, labels, numbers, refs, figures_outside, bibliography, diags);
+        // A nested pair is not a top-level block, so it has no node and
+        // no anchor (decision 19's own scope). An empty map says so.
+        blocks(out, &item.blocks, slugs, tables, images, labels, numbers, refs, &HashMap::new(), figures_outside, bibliography, diags);
         out.push_str("</li>\n");
     }
     let _ = writeln!(out, "</{tag}>");
@@ -1216,8 +1227,10 @@ mod tests {
         let doc = Document::parse(source, &mut parse_diags);
         let mut diags = Diags::new("t.md");
         let slugs = test_slugs(&doc);
+        let pairs = test_pairs(&doc);
         let out = render(
-            &doc, "Title", None, tables, images, labels, numbers, &slugs, refs, figures_outside, None, &mut diags,
+            &doc, "Title", None, tables, images, labels, numbers, &slugs, refs, &pairs, figures_outside, None,
+            &mut diags,
         );
         (out, diags)
     }
@@ -1228,6 +1241,23 @@ mod tests {
     fn test_slugs(doc: &Document) -> HashMap<u32, String> {
         let mut slugger = crate::graph::slug::Slugger::new();
         doc.headings().iter().map(|(_, inlines, line)| (*line, slugger.assign(&Inline::plain(inlines)))).collect()
+    }
+
+    /// The same map `weave::pair_anchors` builds (decision 71), rebuilt
+    /// here so a unit test sees the anchors a real weave emits. Every
+    /// recognized pair carries one, so this is computed rather than
+    /// passed: a test that forgot it would be testing a document weave
+    /// never produces.
+    fn test_pairs(doc: &Document) -> HashMap<usize, String> {
+        let mut out = HashMap::new();
+        for index in 0..doc.blocks.len() {
+            let Some(Block::Code { info, .. }) = doc.blocks.get(index) else { continue };
+            let Some(name) = info.name() else { continue };
+            if result::recognize_pair(&doc.blocks, index).is_some() {
+                out.insert(index, crate::graph::slug::slugify(name));
+            }
+        }
+        out
     }
 
     #[test]
@@ -1408,7 +1438,7 @@ mod tests {
         let src = "```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n";
         let (out, _) = render_doc(src);
         assert!(!out.contains("dankg:result"), "{out}");
-        assert!(out.contains("<figure class=\"eval-pair\">"), "{out}");
+        assert!(out.contains("<figure class=\"eval-pair\""), "{out}");
         assert!(out.contains("<figcaption>Output</figcaption>"), "{out}");
         let fig_start = out.find("<figure").unwrap();
         let fig_end = out.find("</figure>").unwrap();
@@ -1420,7 +1450,7 @@ mod tests {
     fn a_failed_result_gets_the_failed_class_and_caption() {
         let src = "```sh name=a\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
         let (out, _) = render_doc(src);
-        assert!(out.contains("<figure class=\"eval-pair failed\">"), "{out}");
+        assert!(out.contains("<figure class=\"eval-pair failed\""), "{out}");
         assert!(out.contains("<figcaption>Output (failed)</figcaption>"), "{out}");
     }
 
@@ -1519,19 +1549,33 @@ mod tests {
         assert!(out.contains("<figure class=\"image-figure\" id=\"fig-chart\">"), "{out}");
     }
 
-    /// The id goes on the nested figure, never on the pair's own outer
-    /// `<figure class="eval-pair">`. A reference has to land on the
-    /// artifact itself, not on the source block above it.
+    /// The artifact's own `fig-` id goes on the nested figure, never on
+    /// the pair's own outer `<figure class="eval-pair">`. The two are
+    /// separate targets: a block name reaches the whole code-and-output
+    /// unit (decision 71), an artifact slug reaches the file itself
+    /// (decision 63). Both anchors are present, and neither is the other.
     #[test]
-    fn a_labelled_figure_leaves_the_pairs_own_outer_figure_alone() {
+    fn a_pairs_outer_figure_and_its_nested_artifact_carry_separate_anchors() {
         let src = "```python name=c produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n";
         let mut images = HashMap::new();
         images.insert(0, (vec![0xffu8, 0xd8, 0xff, 0xe0], "chart.jpg".to_string()));
         let mut labels = HashMap::new();
         labels.insert(0, "chart".to_string());
         let (out, _) = render_doc_with_figures(src, &HashMap::new(), &images, &labels, &HashMap::new(), false);
-        assert!(out.contains("<figure class=\"eval-pair\">"), "{out}");
+        // The block is named `c`, so the unit answers to `blk-c`.
+        assert!(out.contains("<figure class=\"eval-pair\" id=\"blk-c\">"), "{out}");
+        // The artifact's own id stays on the nested figure, exactly once.
         assert_eq!(out.matches("id=\"fig-chart\"").count(), 1, "{out}");
+        assert_eq!(out.matches("id=\"blk-c\"").count(), 1, "{out}");
+    }
+
+    /// Decision 71's own limit. Decision 46's box is what a pair renders,
+    /// and an unpaired block renders no box, so there is nothing for an
+    /// anchor to sit on.
+    #[test]
+    fn an_unpaired_block_carries_no_pair_anchor() {
+        let (out, _) = render_doc("```sh name=lonely\necho hi\n```\n");
+        assert!(!out.contains("blk-"), "{out}");
     }
 
     #[test]
@@ -1811,11 +1855,11 @@ mod tests {
     fn source_hidden_or_output_hidden_keep_the_failed_class() {
         let src = "```sh name=a weave=source-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
         let (out, _) = render_doc(src);
-        assert!(out.contains("<figure class=\"eval-pair failed\">"), "{out}");
+        assert!(out.contains("<figure class=\"eval-pair failed\""), "{out}");
 
         let src = "```sh name=a weave=output-hidden\nfalse\n```\n\n<!-- dankg:result name=a hash=0000000000000001 failed -->\n\n```\n```\n";
         let (out, _) = render_doc(src);
-        assert!(out.contains("<figure class=\"eval-pair failed\">"), "{out}");
+        assert!(out.contains("<figure class=\"eval-pair failed\""), "{out}");
     }
 
     #[test]
@@ -1898,6 +1942,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             false,
             None,
             &mut diags,
@@ -1919,7 +1964,7 @@ mod tests {
         let order: Vec<String> = order.iter().map(|s| s.to_string()).collect();
         let bib = Bibliography { entries: &entries, order: &order };
         let mut diags = Diags::new("t.md");
-        render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, Some(&bib), &mut diags)
+        render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, Some(&bib), &mut diags)
     }
 
     #[test]
@@ -1966,7 +2011,7 @@ mod tests {
         let mut parse_diags = Diags::new("t.md");
         let doc = Document::parse("[@a]\n\n@b argues\n", &mut parse_diags);
         let mut diags = Diags::new("t.md");
-        let out = render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
+        let out = render(&doc, "Title", None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), false, None, &mut diags);
         assert!(out.contains("[@a]"), "{out}");
         assert!(out.contains("@b argues"), "{out}");
     }
