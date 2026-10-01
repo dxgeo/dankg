@@ -12,9 +12,9 @@ use crate::diag::{Diags, Level};
 use crate::eval::files::Files;
 use crate::eval::session::corpus_graph_if_needed;
 use crate::eval::{plan, result};
-use crate::graph::build::{file_stem, strip_extension};
+use crate::graph::build::{self, file_stem, strip_extension};
+use crate::graph::NodeKind;
 use crate::graph::index;
-use crate::graph::slug::{slugify, Slugger};
 use crate::md::{Block, Document, Inline};
 use crate::render::typst::BibliographySummary;
 use crate::render::{typst, weave_html};
@@ -61,11 +61,15 @@ pub fn run(path: &str, format: Format, output: Option<&str>, toc: bool, figures_
         drop_repeated_title_heading(&mut doc, &title);
     }
     let (tables, images) = produced_artifacts(&doc, &entry_rel, &root, &mut diags);
-    let (labels, numbers) = figures(&doc, &tables, &images, &mut diags);
-    let slugs = heading_slugs(&doc);
-    let pairs = pair_anchors(&doc);
+    // One slug source for the whole document (decision 77), built after
+    // `drop_repeated_title_heading` so it sees the document weave
+    // actually renders.
+    let maps = slug_maps(&entry_rel, &doc, source.lines().count() as u32, &mut diags);
+    let (labels, numbers) = figures(&doc, &tables, &images, &maps.artifacts);
+    let slugs = maps.headings;
+    let pairs = pair_anchors(&doc, &maps.blocks);
     let (typst_refs, html_refs) = references(&doc, &tables, &labels, &numbers, &slugs, &pairs);
-    resolve_references(&doc, &typst_refs, &labels, &numbers, &pairs, format, &mut diags);
+    resolve_references(&doc, &typst_refs, &labels, &numbers, format, &mut diags);
     let bib = bibliography(&doc, &entry_rel, &root, &mut diags);
 
     // Every unresolved reference (decision 64) and every unresolved
@@ -212,19 +216,13 @@ fn figures(
     doc: &Document,
     tables: &HashMap<usize, (String, String)>,
     images: &HashMap<usize, (Vec<u8>, String)>,
-    diags: &mut Diags,
+    slugs: &HashMap<usize, String>,
 ) -> (HashMap<usize, String>, HashMap<usize, u32>) {
     let mut labels = HashMap::new();
     let mut numbers = HashMap::new();
-    // Two structures, two questions. `slugger` answers "is this taken",
-    // which is what suffixing a derived slug needs. `claimed` answers
-    // "which line took it first", which is what a declared slug's own
-    // collision warning needs and a `Slugger` does not carry.
-    let mut slugger = Slugger::new();
-    let mut claimed: HashMap<String, u32> = HashMap::new();
     let (mut tables_seen, mut images_seen) = (0u32, 0u32);
     for (index, b) in doc.blocks.iter().enumerate() {
-        let Block::Code { info, line, .. } = b else { continue };
+        let Block::Code { info, .. } = b else { continue };
         let is_table = tables.contains_key(&index);
         if !is_table && !images.contains_key(&index) {
             continue;
@@ -234,100 +232,86 @@ fn figures(
             *counter += 1;
             numbers.insert(index, *counter);
         }
-        // A declared slug is checked as written and never repaired. A
-        // derived one is slugified and suffixed, so neither check can
-        // fire on it at all (decision 70).
-        let label = match info.artifact() {
-            Some(declared) => {
-                if !usable_label(declared) {
-                    // `slugify` is the suggestion, unless it has none
-                    // to give: a value of pure punctuation slugifies to
-                    // nothing, and "try ``" is worse than no advice.
-                    let fixed = slugify(declared);
-                    let advice = if fixed.is_empty() {
-                        String::new()
-                    } else {
-                        format!("; try `{fixed}`")
-                    };
-                    diags.warn(
-                        *line,
-                        format!("figure slug `{declared}` may hold only lowercase letters, digits, `-` and `_`{advice}"),
-                    );
-                    continue;
-                }
-                if let Some(&first) = claimed.get(declared) {
-                    diags.warn(
-                        *line,
-                        format!("figure slug `{declared}` is already used by the figure on line {first}; this one is dropped"),
-                    );
-                    continue;
-                }
-                slugger.assign(declared)
-            }
-            None => match info.produces().and_then(artifact_stem) {
-                // An empty stem is dropped rather than handed to
-                // `Slugger`, whose own empty-base fallback is
-                // `section` -- a word no figure should answer to.
-                Some(stem) if !stem.is_empty() => slugger.assign(&stem),
-                _ => continue,
-            },
-        };
-        claimed.insert(label.clone(), *line);
-        labels.insert(index, label);
+        // The name is `graph::build`'s, never derived again here
+        // (decision 77). A figure with no slug at all is a figure whose
+        // artifact `build` refused outright, which it has already warned
+        // about at the block's own line.
+        if let Some(slug) = slugs.get(&index) {
+            labels.insert(index, slug.clone());
+        }
     }
     (labels, numbers)
 }
 
-/// An artifact's own default slug: its path's stem, slugified
-/// (decision 70). `produces=file:data/quarterly.csv` gives
-/// `quarterly`. `None` when the value is not a `file:` artifact at
-/// all, which is not a figure and needs no slug.
+
+/// Every slug a woven document needs, taken straight from
+/// `graph::build` rather than derived a second time (decision 77).
 ///
-/// Slugified rather than checked, the same way a heading's own title
-/// already is. A derived slug is not something the author typed, so
-/// warning about one would name a mistake nobody made. A stem holding
-/// nothing a slug may carry slugifies to the empty string instead,
-/// which `figures` drops rather than emit an anchor no reference could
-/// reach.
-fn artifact_stem(raw: &str) -> Option<String> {
-    let path = plan::parse_artifact(raw)?;
-    Some(slugify(file_stem(&strip_extension(path))))
+/// `headings` is by heading line, `artifacts` and `blocks` by the block
+/// index their node came from. One `Slugger` inside `build` assigns all
+/// three, in document order, so a block name, a heading title and an
+/// artifact stem that collide are suffixed the same way for both tools.
+/// Three separate derivations lived here before, and none of them could
+/// see the other two.
+struct SlugMaps {
+    headings: HashMap<u32, String>,
+    artifacts: HashMap<usize, String>,
+    blocks: HashMap<usize, String>,
 }
 
-/// Whether a declared slug is an anchor both backends can carry: one
-/// `graph::slug::slugify` leaves alone. That is what lets a figure
-/// slug and a heading slug share one fragment namespace (decision
-/// 64). Typst itself allows `.` and `:` too, and both are left out
-/// because either one changes what a CSS selector means.
-///
-/// Stated as a fixed point rather than as a charset, because the
-/// charset alone was not the whole rule. `slugify` also lowercases,
-/// and decision 70 routes a declared slug through `Slugger` to
-/// reserve it. `artifact=Chart` passed a charset check, came back
-/// from `Slugger` as `chart`, and left `[[#Chart]]` looking up a
-/// fragment nothing carried -- `resolve_references` compares a
-/// fragment verbatim. A silently repaired slug is exactly what
-/// decision 63 refuses, so the repair is refused here instead: the
-/// check now rejects anything `slugify` would rewrite, and the author
-/// gets a diagnostic naming the one they wrote.
-fn usable_label(label: &str) -> bool {
-    !label.is_empty() && slugify(label) == label
+fn slug_maps(entry_rel: &str, doc: &Document, source_lines: u32, diags: &mut Diags) -> SlugMaps {
+    let built = build::build(entry_rel, doc, source_lines, diags);
+
+    // A node carries the line it came from, never the block index weave
+    // keys its own maps by, so this is the bridge between the two.
+    let mut index_of_line: HashMap<u32, usize> = HashMap::new();
+    for (index, b) in doc.blocks.iter().enumerate() {
+        if let Block::Code { line, .. } = b {
+            index_of_line.insert(*line, index);
+        }
+    }
+
+    let mut maps =
+        SlugMaps { headings: HashMap::new(), artifacts: HashMap::new(), blocks: HashMap::new() };
+    for node in &built.nodes {
+        match node.kind {
+            // `level` 0 is the synthetic file node, which is not a
+            // heading anything in the document wrote.
+            NodeKind::Heading if node.level > 0 => {
+                maps.headings.insert(node.line, node.id.slug.clone());
+            }
+            NodeKind::Artifact => {
+                if let Some(&index) = index_of_line.get(&node.line) {
+                    maps.artifacts.insert(index, node.id.slug.clone());
+                }
+            }
+            NodeKind::Block => {
+                if let Some(&index) = index_of_line.get(&node.line) {
+                    maps.blocks.insert(index, node.id.slug.clone());
+                }
+            }
+            NodeKind::Heading | NodeKind::Relation => {}
+        }
+    }
+
+    // A leading heading the declared title absorbed has no heading node
+    // of its own (decision 62). The file node *is* its node, so the file
+    // node's slug is what that heading's own anchor resolves to. Without
+    // this the heading would render with no `id` at all, and only when
+    // `cover` is not set -- `build` absorbs whenever a `title` is
+    // declared, while weave drops the heading only for a cover page.
+    if let Some(title) = doc.frontmatter.title() {
+        if let Some(line) = build::repeated_title_heading(doc, title) {
+            if let Some(entry) = built.entry_node() {
+                maps.headings.insert(line, entry.id.slug.clone());
+            }
+        }
+    }
+    maps
 }
 
-/// Every heading's own slug, by its line. One `Slugger` for the whole
-/// document, so a repeated heading title is suffixed exactly the way
-/// `graph::build` already suffixes one (decision 62's own reservation
-/// rule). Both backends read this, which is why it is built here
-/// rather than inside either of them.
-fn heading_slugs(doc: &Document) -> HashMap<u32, String> {
-    let mut slugger = Slugger::new();
-    doc.headings().iter().map(|(_, inlines, line)| (*line, slugger.assign(&Inline::plain(inlines)))).collect()
-}
-
-/// Every recognized pair's own anchor slug, by the block index the pair
-/// starts at (decision 71). The slug is the block's own `name=`,
-/// slugified -- the same string `graph::build` assigns that block's node,
-/// so a fragment naming a block means one thing to both tools.
+/// Which recognized pairs carry an anchor, and under what slug
+/// (decision 71). The slug is `build`'s own for that block.
 ///
 /// An *unpaired* block is absent. Decision 46's box is what a pair
 /// renders, and a block with no recorded result renders no box, so there
@@ -341,16 +325,17 @@ fn heading_slugs(doc: &Document) -> HashMap<u32, String> {
 /// anchor on either would resolve to an id the output does not carry,
 /// which is worse than not resolving: the author gets a link that goes
 /// nowhere instead of a diagnostic naming the line.
-fn pair_anchors(doc: &Document) -> HashMap<usize, String> {
+fn pair_anchors(doc: &Document, slugs: &HashMap<usize, String>) -> HashMap<usize, String> {
     let mut out = HashMap::new();
     for index in 0..doc.blocks.len() {
         let Some(Block::Code { info, .. }) = doc.blocks.get(index) else { continue };
-        let Some(name) = info.name() else { continue };
         if info.weave_hidden() || (info.weave_source_hidden() && info.weave_output_hidden()) {
             continue;
         }
         if result::recognize_pair(&doc.blocks, index).is_some() {
-            out.insert(index, slugify(name));
+            if let Some(slug) = slugs.get(&index) {
+                out.insert(index, slug.clone());
+            }
         }
     }
     out
@@ -405,7 +390,6 @@ fn resolve_references(
     refs: &HashMap<String, String>,
     labels: &HashMap<usize, String>,
     numbers: &HashMap<usize, u32>,
-    pairs: &HashMap<usize, String>,
     format: Format,
     diags: &mut Diags,
 ) {
@@ -906,16 +890,11 @@ mod tests {
         assert!(content.contains("<a href=\"#fig-data\">Table 1</a>"), "{content}");
     }
 
-    /// Decision 72. Naming the block rather than its figure is the
-    /// mistake decision 70's own default makes easy to write, so the
-    /// message names the slug that would have worked. Before this, the
-    /// artifact branch below claimed the artifact could not be read,
-    /// which was false -- it read fine, under another name.
-    #[test]
     /// Decision 71 is what changed this. A reference naming a rendered
     /// pair used to fail the weave, because only the artifact carried a
     /// name. The pair itself is addressable now, so `[[#t]]` resolves to
     /// the whole code-and-output unit and the weave succeeds.
+    #[test]
     fn a_reference_naming_a_rendered_pair_resolves_to_the_pair() {
         let dir = scratch(&[
             ("a.md", "```python name=t produces=file:data.csv caption=\"Revenue\"\nrun()\n```\n\n<!-- dankg:result name=t hash=0000000000000001 -->\n\n```\nok\n```\n\nSee [[#t]].\n"),
@@ -1307,7 +1286,7 @@ mod tests {
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "data/revenue.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &maps_of(&d).artifacts);
         assert_eq!(labels.get(&0), Some(&"revenue".to_string()), "the stem, not `chart`");
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
@@ -1318,7 +1297,7 @@ mod tests {
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "chart.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &maps_of(&d).artifacts);
         assert_eq!(labels.get(&0), Some(&"revenue".to_string()));
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
@@ -1329,7 +1308,7 @@ mod tests {
     fn figures_skips_a_block_with_no_artifact() {
         let d = doc("```sh name=a\necho hi\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nhi\n```\n");
         let mut diags = Diags::new("t.md");
-        let (labels, _) = figures(&d, &HashMap::new(), &HashMap::new(), &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &HashMap::new(), &maps_of(&d).artifacts);
         assert!(labels.is_empty());
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
@@ -1338,25 +1317,34 @@ mod tests {
     /// told apart from a reference to nothing at all.
     #[test]
     fn figures_keeps_a_hidden_figures_own_label() {
-        let d = doc("```python name=chart weave=hidden produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
+        // `name=plot`, not `name=chart`: a block whose name matches its own
+        // artifact stem takes the bare slug and leaves the artifact suffixed
+        // (decision 77), which is a different test, below.
+        let d = doc("```python name=plot weave=hidden produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=plot hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "chart.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &maps_of(&d).artifacts);
         assert_eq!(labels.get(&0), Some(&"chart".to_string()));
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
     /// `artifact=a+b` reached `typst compile` as `<fig:a+b>` and failed
-    /// with `unclosed label`, pointing into generated `.typ`. Dropping
-    /// it here is what keeps that error off an author's screen.
+    /// with `unclosed label`, pointing into generated `.typ`. Refusing
+    /// it is what keeps that error off an author's screen.
+    ///
+    /// The refusal moved to `graph::build` with decision 77, and with it
+    /// the outcome: the declared slug is refused, and the artifact falls
+    /// back to its own path stem rather than going unnamed. That is what
+    /// decision 70 always specified. `figures` dropped it entirely
+    /// before, which left the two tools disagreeing about one document.
     #[test]
-    fn a_declared_slug_typst_cannot_parse_warns_by_line_and_is_dropped() {
+    fn a_declared_slug_typst_cannot_parse_is_refused_and_falls_back_to_the_path() {
         let d = doc("```python name=a artifact=\"a+b\" produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
         let images: HashMap<usize, (Vec<u8>, String)> = [(0, (Vec::new(), "one.png".to_string()))].into_iter().collect();
-        let mut diags = Diags::new("t.md");
-        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
-        assert!(labels.is_empty(), "an unusable label is dropped, never emitted");
+        let (maps, diags) = maps_and_diags(&d);
+        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &maps.artifacts);
+        assert_eq!(labels.get(&0), Some(&"one".to_string()), "falls back to the path stem");
         assert_eq!(numbers.get(&0), Some(&1), "the figure itself still renders, so it still counts");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
         assert_eq!(diags.items()[0].line, 1, "{:?}", diags.items());
@@ -1372,7 +1360,7 @@ mod tests {
         let d = doc("```python name=a produces=file:Q3-Revenue(final).png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
         let images: HashMap<usize, (Vec<u8>, String)> = [(0, (Vec::new(), "Q3-Revenue(final).png".to_string()))].into_iter().collect();
         let mut diags = Diags::new("t.md");
-        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &maps_of(&d).artifacts);
         assert_eq!(labels.get(&0), Some(&"q3-revenuefinal".to_string()), "lowercased, parens dropped");
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
@@ -1386,7 +1374,7 @@ mod tests {
         let tables: HashMap<usize, (String, String)> = [(0, ("csv".to_string(), "x\n1\n".to_string()))].into_iter().collect();
         let images: HashMap<usize, (Vec<u8>, String)> = [(3, (Vec::new(), "out.png".to_string()))].into_iter().collect();
         let mut diags = Diags::new("t.md");
-        let (labels, _) = figures(&d, &tables, &images, &mut diags);
+        let (labels, _) = figures(&d, &tables, &images, &maps_of(&d).artifacts);
         assert_eq!(labels.get(&0), Some(&"out".to_string()));
         assert_eq!(labels.get(&3), Some(&"out-1".to_string()), "suffixed, not dropped");
         assert!(diags.is_empty(), "{:?}", diags.items());
@@ -1400,41 +1388,58 @@ mod tests {
     fn an_uppercase_declared_slug_is_refused_rather_than_lowercased() {
         let d = doc("```python name=a artifact=Chart produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
         let images: HashMap<usize, (Vec<u8>, String)> = [(0, (Vec::new(), "one.png".to_string()))].into_iter().collect();
-        let mut diags = Diags::new("t.md");
-        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
-        assert!(labels.is_empty(), "never silently lowercased to `chart`");
+        let (maps, diags) = maps_and_diags(&d);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &maps.artifacts);
+        assert_eq!(labels.get(&0), Some(&"one".to_string()), "never silently lowercased to `chart`");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
         assert!(diags.items()[0].message.contains("try `chart`"), "{:?}", diags.items());
     }
 
-    /// Everything a heading slug can hold, a declared slug can hold.
-    /// `slugify` is the rule both go through, stated as a fixed point.
     #[test]
-    fn usable_label_accepts_exactly_what_slugify_produces() {
-        for ok in ["chart", "corpus-edge-counts", "module_doc", "fig1", "1fig", "café"] {
-            assert!(usable_label(ok), "{ok}");
-            assert_eq!(crate::graph::slug::slugify(ok), ok.to_lowercase(), "slugify leaves it alone: {ok}");
-        }
-        // Typst parses `.` and `:`; both are left out because each changes
-        // what a CSS selector means.
-        for bad in ["", "a+b", "a b", "a.b", "a:b", "a/b", "a#b", "a(b", "Chart", "CHART"] {
-            assert!(!usable_label(bad), "{bad}");
-        }
+    /// Decision 77. One namespace means the block's own name is reserved
+    /// before its artifact's stem, so a block written
+    /// `name=chart produces=file:chart.png` keeps `chart` for itself and
+    /// leaves the artifact `chart-1`. Decision 20 is what forces the
+    /// order: a block `dankg eval` runs as `chart` may not appear in the
+    /// graph under another name, so the artifact is the one that moves.
+    ///
+    /// The practical consequence is worth stating. `[[#chart]]` reaches
+    /// the code-and-output unit here, not the figure. An author who wants
+    /// the bare name on the figure gives the block a different one.
+    #[test]
+    fn a_block_name_wins_the_bare_slug_and_its_artifact_takes_the_suffix() {
+        let d = doc("```python name=chart produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let maps = maps_of(&d);
+        assert_eq!(maps.blocks.get(&0), Some(&"chart".to_string()), "the block keeps its own name");
+        assert_eq!(maps.artifacts.get(&0), Some(&"chart-1".to_string()), "the artifact takes the suffix");
+    }
+
+    /// The same document, woven: weave agrees with `dankg graph` about
+    /// both names, which is the whole point of decision 77.
+    #[test]
+    fn a_heading_colliding_with_a_block_name_is_suffixed_the_way_the_graph_suffixes_it() {
+        let d = doc("```sh name=chart\necho hi\n```\n\n# Chart\n");
+        let maps = maps_of(&d);
+        assert_eq!(maps.blocks.get(&0), Some(&"chart".to_string()), "the block came first");
+        // The heading is on line 5. It used to take `chart` here and
+        // `chart-1` in the graph, which left `[[#chart]]` meaning two
+        // different things depending on which tool read it.
+        assert_eq!(maps.headings.get(&5), Some(&"chart-1".to_string()), "{:?}", maps.headings);
     }
 
     #[test]
-    fn a_colliding_declared_slug_warns_by_line_and_the_second_is_dropped() {
+    fn a_colliding_declared_slug_warns_by_line_and_falls_back_to_its_path() {
         let d = doc("```python name=a artifact=chart produces=file:one.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote one.png\n```\n\n```python name=b artifact=chart produces=file:two.png\nsavefig()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nwrote two.png\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "one.png".to_string()));
         images.insert(3, (Vec::new(), "two.png".to_string()));
-        let mut diags = Diags::new("t.md");
-        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
-        assert_eq!(labels.get(&0), Some(&"chart".to_string()));
-        assert_eq!(labels.get(&3), None, "the second claim is dropped, not suffixed");
+        let (maps, diags) = maps_and_diags(&d);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &maps.artifacts);
+        assert_eq!(labels.get(&0), Some(&"chart".to_string()), "the first claim stands");
+        assert_eq!(labels.get(&3), Some(&"two".to_string()), "the second falls back, never suffixed");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
         assert_eq!(diags.items()[0].line, 11, "{:?}", diags.items());
-        assert!(diags.items()[0].message.contains("already used by the figure on line 1"), "{:?}", diags.items());
+        assert!(diags.items()[0].message.contains("already taken"), "{:?}", diags.items());
     }
 
     /// A declared `artifact=` colliding with an earlier *derived* slug
@@ -1442,15 +1447,15 @@ mod tests {
     /// out, not about which side declared it. The derived one keeps its
     /// own claim, since it got there first.
     #[test]
-    fn a_declared_slug_colliding_with_a_derived_one_is_dropped_too() {
+    fn a_declared_slug_colliding_with_a_derived_one_falls_back_too() {
         let d = doc("```python name=a produces=file:chart.png\nsavefig()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nwrote chart.png\n```\n\n```python name=b artifact=chart produces=file:two.png\nsavefig()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nwrote two.png\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "chart.png".to_string()));
         images.insert(3, (Vec::new(), "two.png".to_string()));
-        let mut diags = Diags::new("t.md");
-        let (labels, _) = figures(&d, &HashMap::new(), &images, &mut diags);
+        let (maps, diags) = maps_and_diags(&d);
+        let (labels, _) = figures(&d, &HashMap::new(), &images, &maps.artifacts);
         assert_eq!(labels.get(&0), Some(&"chart".to_string()), "derived, and first");
-        assert_eq!(labels.get(&3), None);
+        assert_eq!(labels.get(&3), Some(&"two".to_string()), "the declaration falls back to its path");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
     }
 
@@ -1467,7 +1472,7 @@ mod tests {
         images.insert(3, (Vec::new(), "i_one.png".to_string()));
         images.insert(9, (Vec::new(), "i_two.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let (_, numbers) = figures(&d, &tables, &images, &mut diags);
+        let (_, numbers) = figures(&d, &tables, &images, &maps_of(&d).artifacts);
         assert_eq!(numbers.get(&0), Some(&1), "first table");
         assert_eq!(numbers.get(&3), Some(&1), "first image, its own counter");
         assert_eq!(numbers.get(&6), Some(&2), "second table");
@@ -1479,12 +1484,12 @@ mod tests {
     /// and never shifts the one after it.
     #[test]
     fn figures_never_numbers_a_hidden_figure() {
-        let d = doc("```python name=a weave=hidden produces=file:a.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=b produces=file:b.png\nrun()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nok\n```\n");
+        let d = doc("```python name=first weave=hidden produces=file:a.png\nrun()\n```\n\n<!-- dankg:result name=first hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=second produces=file:b.png\nrun()\n```\n\n<!-- dankg:result name=second hash=0000000000000002 -->\n\n```\nok\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "a.png".to_string()));
         images.insert(3, (Vec::new(), "b.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &maps_of(&d).artifacts);
         assert_eq!(numbers.get(&0), None, "hidden, so not counted");
         assert_eq!(numbers.get(&3), Some(&1), "the visible one is still Figure 1");
         assert_eq!(labels.get(&0), Some(&"a".to_string()), "a hidden figure keeps its label");
@@ -1495,11 +1500,11 @@ mod tests {
     /// (decision 53), so there is no figure left to count either.
     #[test]
     fn figures_never_numbers_an_output_hidden_figure() {
-        let d = doc("```python name=a weave=output-hidden produces=file:a.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n");
+        let d = doc("```python name=first weave=output-hidden produces=file:a.png\nrun()\n```\n\n<!-- dankg:result name=first hash=0000000000000001 -->\n\n```\nok\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "a.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
+        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &maps_of(&d).artifacts);
         assert!(numbers.is_empty());
         assert_eq!(labels.get(&0), Some(&"a".to_string()));
     }
@@ -1512,7 +1517,7 @@ mod tests {
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "a.png".to_string()));
         let mut diags = Diags::new("t.md");
-        let (_, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
+        let (_, numbers) = figures(&d, &HashMap::new(), &images, &maps_of(&d).artifacts);
         assert_eq!(numbers.get(&0), Some(&1));
     }
 
@@ -1520,14 +1525,14 @@ mod tests {
     /// slug was dropped as a collision still renders, so it still
     /// counts.
     #[test]
-    fn a_figure_whose_declared_slug_collided_is_still_numbered() {
+    fn a_figure_whose_declared_slug_was_refused_is_still_numbered() {
         let d = doc("```python name=a artifact=chart produces=file:one.png\nrun()\n```\n\n<!-- dankg:result name=a hash=0000000000000001 -->\n\n```\nok\n```\n\n```python name=b artifact=chart produces=file:two.png\nrun()\n```\n\n<!-- dankg:result name=b hash=0000000000000002 -->\n\n```\nok\n```\n");
         let mut images = HashMap::new();
         images.insert(0, (Vec::new(), "one.png".to_string()));
         images.insert(3, (Vec::new(), "two.png".to_string()));
-        let mut diags = Diags::new("t.md");
-        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &mut diags);
-        assert_eq!(labels.get(&3), None, "the second label is dropped");
+        let (maps, diags) = maps_and_diags(&d);
+        let (labels, numbers) = figures(&d, &HashMap::new(), &images, &maps.artifacts);
+        assert_eq!(labels.get(&3), Some(&"two".to_string()), "refused, so it takes its path");
         assert_eq!(numbers.get(&3), Some(&2), "the figure itself still counts");
         assert_eq!(diags.items().len(), 1, "{:?}", diags.items());
     }
@@ -1562,7 +1567,7 @@ mod tests {
     #[test]
     fn references_resolves_a_heading_to_its_slug_and_its_title() {
         let d = doc("# The Design\n");
-        let slugs = heading_slugs(&d);
+        let slugs = maps_of(&d).headings;
         let (typst, html) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs, &HashMap::new());
         assert_eq!(typst.get("the-design"), Some(&"sec:the-design".to_string()));
         assert_eq!(html.get("the-design"), Some(&("the-design".to_string(), "The Design".to_string())));
@@ -1573,7 +1578,7 @@ mod tests {
     #[test]
     fn a_figure_label_wins_a_clash_with_a_heading_slug() {
         let d = doc("# Chart\n\n```python name=chart produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n");
-        let slugs = heading_slugs(&d);
+        let slugs = maps_of(&d).headings;
         let labels = [(1usize, "chart".to_string())].into_iter().collect();
         let numbers = [(1usize, 1u32)].into_iter().collect();
         let (typst, _) = references(&d, &HashMap::new(), &labels, &numbers, &slugs, &HashMap::new());
@@ -1592,10 +1597,10 @@ mod tests {
     #[test]
     fn resolve_references_passes_a_document_whose_references_all_resolve() {
         let d = doc("# Intro\n\nSee [[#intro]] and [the start](#intro).\n");
-        let slugs = heading_slugs(&d);
+        let slugs = maps_of(&d).headings;
         let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs, &HashMap::new());
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
@@ -1603,10 +1608,10 @@ mod tests {
     #[test]
     fn resolve_references_reports_every_unresolved_reference_in_one_walk() {
         let d = doc("# Intro\n\nSee [[#one]].\n\nAnd [[#two]] and [x](#three).\n");
-        let slugs = heading_slugs(&d);
+        let slugs = maps_of(&d).headings;
         let (typst, _) = references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &slugs, &HashMap::new());
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &typst, &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert_eq!(diags.count(Level::Error), 3, "{:?}", diags.items());
     }
 
@@ -1614,7 +1619,7 @@ mod tests {
     fn an_unresolved_reference_to_nothing_says_so() {
         let d = doc("Text [[#nope]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("nothing in this document is named `nope`"), "{:?}", diags.items());
     }
 
@@ -1622,7 +1627,7 @@ mod tests {
     fn a_reference_to_a_named_block_that_is_no_figure_says_so() {
         let d = doc("```sh name=a\necho hi\n```\n\nText [[#a]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("declares no `produces=file:` artifact"), "{:?}", diags.items());
     }
 
@@ -1633,7 +1638,7 @@ mod tests {
     fn a_reference_to_a_figure_whose_artifact_could_not_be_read_says_so() {
         let d = doc("```python name=chart produces=file:missing.png caption=\"C\"\nrun()\n```\n\n<!-- dankg:result name=chart hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#chart]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("could not be read"), "{:?}", diags.items());
     }
 
@@ -1643,7 +1648,7 @@ mod tests {
     fn a_reference_to_a_figure_with_no_recorded_result_points_at_eval() {
         let d = doc("```python name=chart produces=file:chart.png caption=\"C\"\nrun()\n```\n\nText [[#chart]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("no recorded result yet"), "{:?}", diags.items());
         assert!(diags.items()[0].message.contains("dankg eval"), "{:?}", diags.items());
     }
@@ -1653,7 +1658,7 @@ mod tests {
         let d = doc("```python name=c weave=hidden produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#c]].\n");
         let labels = [(0usize, "c".to_string())].into_iter().collect();
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("hidden by `weave=hidden`"), "{:?}", diags.items());
     }
 
@@ -1662,7 +1667,7 @@ mod tests {
         let d = doc("```python name=c weave=output-hidden produces=file:chart.png\nrun()\n```\n\n<!-- dankg:result name=c hash=0000000000000001 -->\n\n```\nok\n```\n\nText [[#c]].\n");
         let labels = [(0usize, "c".to_string())].into_iter().collect();
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &HashMap::new(), &labels, &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.items()[0].message.contains("hidden by `weave=output-hidden`"), "{:?}", diags.items());
     }
 
@@ -1672,7 +1677,7 @@ mod tests {
     fn a_wikilink_naming_another_file_is_not_checked_at_all() {
         let d = doc("See [[Other]] and [[Other#chart]].\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert!(diags.is_empty(), "{:?}", diags.items());
     }
 
@@ -1681,7 +1686,7 @@ mod tests {
     fn a_reference_nested_in_emphasis_is_still_checked() {
         let d = doc("See *[[#nope]]* here.\n");
         let mut diags = Diags::new("t.md");
-        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
+        resolve_references(&d, &HashMap::new(), &HashMap::new(), &HashMap::new(), Format::Html, &mut diags);
         assert_eq!(diags.count(Level::Error), 1, "{:?}", diags.items());
     }
 
@@ -1697,6 +1702,23 @@ mod tests {
 
     fn doc(source: &str) -> Document {
         Document::parse(source, &mut Diags::new("t.md"))
+    }
+
+    /// The slug maps a real weave builds (decision 77), so a unit test
+    /// sees the same names the document would actually render with.
+    /// `source_lines` only bounds a heading's own extent, which no slug
+    /// depends on, so a generous constant is enough here.
+    fn maps_of(d: &Document) -> SlugMaps {
+        slug_maps("t.md", d, 9999, &mut Diags::new("t.md"))
+    }
+
+    /// The same, keeping the diagnostics `graph::build` raised. Decision
+    /// 70's own refusals are the only thing that warns, and they warn
+    /// from there now rather than from `figures`.
+    fn maps_and_diags(d: &Document) -> (SlugMaps, Diags) {
+        let mut diags = Diags::new("t.md");
+        let maps = slug_maps("t.md", d, 9999, &mut diags);
+        (maps, diags)
     }
 
     #[test]

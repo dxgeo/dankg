@@ -94,12 +94,17 @@ exit 3
 # Figures a reader can point at
 
 A block that declares `produces=file:` and carries a caption renders
-as a real figure. Its label is the block's own `name=`, so
+as a real figure. Its slug is the stem of the file it wrote, so
 [[#quarterly]] needs no extra attribute to point at the table below.
 A labelled reference says something else instead:
 [[#quarterly|the quarterly breakdown]].
 
-```sh name=quarterly produces=file:data/quarterly.csv caption="Revenue by region and quarter"
+The block is named `revenue` rather than `quarterly` on purpose. Every
+slug in a file shares one namespace, and a block's own name is reserved
+before its artifact's stem, so naming the block `quarterly` would give
+the *block* that slug and leave the figure as `quarterly-1`.
+
+```sh name=revenue produces=file:data/quarterly.csv caption="Revenue by region and quarter"
 mkdir -p data
 printf 'region,quarter,revenue\n' > data/quarterly.csv
 printf 'North,Q1,1200\nSouth,Q1,980\n' >> data/quarterly.csv
@@ -107,7 +112,7 @@ printf 'North,Q2,1440\nSouth,Q2,1010\n' >> data/quarterly.csv
 echo "wrote data/quarterly.csv"
 ```
 
-<!-- dankg:result name=quarterly hash=8770a213ef93c5d2 -->
+<!-- dankg:result name=revenue hash=8770a213ef93c5d2 -->
 
 ```
 wrote data/quarterly.csv

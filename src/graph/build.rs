@@ -406,7 +406,7 @@ fn file_node(
 /// node's own title is derived with above, so a heading written
 /// `# *Hash*` matches a frontmatter `title: Hash` here exactly as it does
 /// there.
-fn repeated_title_heading(doc: &Document, title: &str) -> Option<u32> {
+pub(crate) fn repeated_title_heading(doc: &Document, title: &str) -> Option<u32> {
     match doc.blocks.first() {
         Some(Block::Heading { inlines, line, .. })
             if Inline::plain(inlines).trim() == title.trim() =>

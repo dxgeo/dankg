@@ -9,15 +9,14 @@ all. Decision 69 keeps the artifact's slug in its file's own namespace
 rather than under the synthetic `file:` prefix proposed below, because
 a synthetic namespace would have left `[[#quarterly]]` unresolvable.
 
-The deferred `reads=file:` edge followed straight after, as decision 76.
-One piece is left, and it is wider than this plan framed it. The slug
-namespace is shared inside `graph::build` and not yet between the two
-tools. `weave` still derives its own heading slugs, figure labels and
-pair anchors. `weave::heading_slugs` predates this plan and carries no
-block names at all, so a block named `chart` ahead of a heading
-"Chart" already gives the heading `chart` in weave and `chart-1` in
-the graph. Closing that means weave reading its slugs from
-`graph::build` rather than recomputing them.
+Two things followed it. Decision 76 added the `reads=file:` edge this
+plan deferred. Decision 77 closed the last piece, which was wider than
+this plan framed it: *What this reuses* below asserts that an artifact
+shares one namespace with every heading and block name in its file, and
+that was true of `graph::build` alone. Weave derived its own heading
+slugs, figure labels and pair anchors from three separate `Slugger`s, so
+the two tools could disagree about one document. Weave now takes all
+three from `graph::build`. Nothing is left open.
 
 ## Context
 

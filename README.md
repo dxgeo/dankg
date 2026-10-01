@@ -526,8 +526,8 @@ on the page.
 <!-- dankg:depends target=architecture.md#decision-65-one-numbering-pre-pass-feeds-html-and-typst-still-counts-for-itself quote="The count is per kind, never sequential." -->
 
 A figure can be referenced from prose. Its slug is the stem of the
-file it produced. A block writing `produces=file:chart.png` gives a
-figure you point at with `[[#chart]]`. A bare reference reads as the
+file it produced. A block named `plot` writing `produces=file:chart.png`
+gives a figure you point at with `[[#chart]]`. A bare reference reads as the
 figure's own number; add a `|` and your own words to say something
 else:
 
@@ -536,9 +536,17 @@ Release counts have climbed every year (see [[#chart]]), which
 [[#chart|the yearly chart]] shows at a glance.
 ```
 
-The slug is the artifact's, not the block's. A block named `plot`
-writing `produces=file:chart.png` is still `[[#chart]]`, because a
-reference names the thing on the page.
+The slug is the artifact's, not the block's, because a reference names
+the thing on the page.
+
+Every slug in one file shares a single namespace. Headings, block names
+and artifacts all draw from it, and a repeat takes a numbered suffix in
+the order it appears. A block's own name is reserved before its
+artifact's stem, so a block written
+`name=chart produces=file:chart.png` keeps `chart` for itself and leaves
+the figure as `chart-1`. Give the block a different name when the figure
+should have the plain one: `name=plot produces=file:chart.png` leaves
+the figure as `chart`.
 
 A block's own name is addressable too, and it means something else.
 `[[#plot]]` points at the whole unit the block renders as, its source

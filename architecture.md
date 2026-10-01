@@ -859,7 +859,7 @@ Decision 41 narrows. Weave resolves a wikilink whose name half is empty. A same-
 
 Every same-file fragment that finds a target resolves, not figure labels alone. `graph::resolve::find_slug` searches a file's nodes, which hold headings and blocks alike. A rule admitting only figures would carve an exception out of machinery that does not want one. This is strictly larger than the figure case and strictly additive: a `[[#some-heading]]` that renders as plain text in an already-woven document starts rendering as a link. Nothing renders as less than it does today.
 
-`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads. Typst gets the fragment's own label, `fig:NAME` or `sec:SLUG`. HTML gets the fragment's own anchor id and the text a bare reference shows. Figures go in before headings. A figure label therefore wins a clash with a heading slug. A label is declared, by `label=` or by a block's own `name=`. A slug is derived from prose. (Decision 70 removes that last justification, since a figure slug is derived from a path unless `artifact=` says otherwise. The precedence itself is unchanged, on the narrower ground that a figure is one element where a heading is a whole section.)
+`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads. Typst gets the fragment's own label, `fig:NAME` or `sec:SLUG`. HTML gets the fragment's own anchor id and the text a bare reference shows. Figures go in before headings, then pairs. (Decision 77 made that ordering inert. One `Slugger` now assigns every slug in the document, so two of them cannot be equal and nothing has a clash to win. The ordering survives as a tiebreak that never fires, rather than as a rule. Decision 70 had already removed its original justification -- that a label is declared where a slug is derived -- since a figure slug is itself derived from a path unless `artifact=` says otherwise.)
 
 `WikiLink`'s own two fields carry exactly what a reference needs. A bare `[[#chart]]` renders as a reference whose text the backend supplies. A labelled `[[#chart|the revenue chart]]` renders as a reference whose text the author wrote.
 
@@ -906,7 +906,9 @@ The default is the artifact's own path stem, slugified. A block writing `produce
 
 A derived slug is slugified rather than checked, and suffixed rather than refused. Both follow from it not being something the author typed: warning about a path's own shape would name a mistake nobody made. `produces=file:Q3 revenue.csv` gets `q3-revenue`. Two artifacts sharing one stem -- `out.csv` and `out.png` both stem to `out` -- get `out` and `out-1` from the same `Slugger` a repeated heading already goes through. A stem that slugifies to nothing is dropped instead, since `Slugger`'s own empty-base fallback is `section`, a word no figure should answer to.
 
-A *declared* `artifact=` keeps decision 63's own treatment exactly: checked, never repaired, warned and dropped on a collision. The reason is decision 63's own. A silently repaired slug is a reference that silently points at the wrong figure. So the two rules differ by which side wrote the slug, not by which check runs.
+A *declared* `artifact=` keeps decision 63's own treatment exactly: checked, never repaired, warned and refused on a collision. The artifact then falls back to its own path-derived default, so it still has a name. The reason is decision 63's own. A silently repaired slug is a reference that silently points at the wrong figure. So the two rules differ by which side wrote the slug, not by which check runs.
+
+This said "dropped" until decision 77, and the word described `weave::figures` rather than the rule. Weave gave a refused figure no name at all, while `graph::build` fell back to the path. Decision 77 left one implementation, and the fallback is what survived: an artifact that exists is better addressed by its path than not addressed at all.
 
 The check itself changed shape while this was built, and the reason is worth recording. Decision 63 stated it as a charset: letters, digits, `-` and `_`. Reserving a declared slug through `Slugger` -- which this decision needs, so a later derived slug cannot collide with it -- puts it through `slugify` as well, and `slugify` lowercases. `artifact=Chart` passed the charset check, came back as `chart`, and left `[[#Chart]]` resolving against nothing: `resolve_references` compares a fragment verbatim. That is a silently repaired slug pointing at the wrong figure, the exact failure decision 63 refuses. `graph::slug::usable_slug` (named `usable_label`, in `weave.rs`, until decision 69 gave the graph a second caller for it) is now stated as a fixed point instead -- `slugify(s) == s` -- which subsumes the charset, rejects the uppercase input outright, and names the slug `slugify` would have produced so the author can paste it. The charset was never the whole rule. It only looked like it while nothing downstream rewrote the value.
 
@@ -993,7 +995,25 @@ The refusal is format-specific, and it is the one place the two backends deliber
 
 **This makes decision 72's own case rare rather than dead.** `weave::produced_artifacts` skips any block with no recognized pair, so an artifact figure only ever exists for a pair. A rendered pair now always answers to its block's own name. What is left is the hidden pair. `figures` keeps a hidden figure's label while this decision gives it no anchor, so a fragment naming that block still misses. Decision 72's message still names the slug that would have worked.
 
-**Still deferred.** The one shared per-file slug namespace is only half real. `graph::build` assigns from one `Slugger` over headings, block names and artifacts. `weave::figures`, `weave::heading_slugs` and `weave::pair_anchors` each derive their own, so the two tools can still disagree about a suffix when a heading slug, a block name and an artifact stem collide. `weave::heading_slugs` is the oldest instance and predates all of this: it walks headings alone, with no block names in its `Slugger` at all, so a block named `chart` ahead of a heading "Chart" already gives the heading `chart` in weave and `chart-1` in the graph. Closing it means weave reading its slugs from `graph::build` rather than recomputing them. `example/weave_example/report.md`'s own *A gap worth knowing about* section is the live demonstration of what remains.
+## Decision 77: One slug namespace, and `graph::build` owns it
+
+`dankg weave` takes every slug from `graph::build`, through one call, and derives none of its own. `weave::slug_maps` is that call. It hands back a heading's slug by line, and an artifact's and a block's by the index their node came from.
+
+Three derivations lived in `weave.rs` before. `heading_slugs` walked headings, `figures` named artifacts, and `pair_anchors` named blocks. Each started a `Slugger` of its own, and none could see the other two. `graph::build` meanwhile assigned all three from one `Slugger`, in document order. So the two tools could disagree about one document, and the disagreement was silent.
+
+The case is small and real. A block named `chart` ahead of a heading "Chart" gave the heading `chart` in weave and `chart-1` in the graph. `[[#chart]]` then reached the heading in a woven page and the block in `dankg graph`. `dankg check` resolved it against the graph's answer. Nothing reported it, because each tool was self-consistent.
+
+**This corpus had no instance, and that is why it is worth recording.** Around twenty files pair a heading "Tests" with a block named `tests`, so collisions are everywhere. Every one of them puts the heading first, which makes both tools agree by luck rather than by construction. The bug needed a block *ahead* of its colliding heading. Nothing here had one. A latent divergence the corpus cannot reach is still a divergence. The next file written is not obliged to keep the lucky ordering.
+
+**A block's own name wins the bare slug.** Decision 20 forces the order. It fused node scope and eval scope deliberately, so a block `dankg eval` runs as `chart` may not appear in the graph under another name. The artifact is therefore the one that moves: `name=chart produces=file:chart.png` keeps `chart` for the block and gives the artifact `chart-1`.
+
+That is a real consequence for an author, and it is a change. `[[#chart]]` against that block reaches the code-and-output unit (decision 71) rather than the figure. An author who wants the bare name on the figure gives the block a different one -- `name=plot produces=file:chart.png` leaves the figure as `chart`, which is the pairing decision 70's own example already used. Naming a block after the file it writes is the idiom that loses here. It loses to an invariant older than any of this.
+
+**Two behaviours merged rather than one winning on preference.** A declared `artifact=` that collides was refused and dropped in weave, and refused with a fallback to the path in `graph::build`. The fallback survives, because decision 70's own text always specified it and an artifact that exists is better addressed by its path than left unaddressable. Weave's own collision and charset warnings are gone with its derivation: `graph::build` checks once and warns once, through the `Diags` decision 69 gave it.
+
+**A leading heading absorbed by a declared title keeps an anchor.** `graph::build` absorbs that heading whenever a `title` is declared (decision 62), while weave drops it only for a cover page. The absorbed heading therefore has no heading node. `slug_maps` maps its line to the file node's own slug instead. The file node *is* its node. Without this the heading would render with no `id` at all, and only when `cover` is unset, which is exactly the kind of asymmetry one source of truth is supposed to remove.
+
+`weave::artifact_stem` and `weave::usable_label` are gone. Decision 69 said it moved them and in fact copied them, leaving weave's own pair in use by `figures`; this is the commit where the move actually happened. The cache is untouched. `ParsedFile` gained nothing, so no `VERSION` bump.
 
 ## Decision 76: A `reads=file:` is an edge, resolved corpus-wide
 
@@ -4915,7 +4935,7 @@ echo "$contains Contains edges against $link Link edges"
 <!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
 
 ```
-927 Contains edges against 72 Link edges
+928 Contains edges against 72 Link edges
 ```
 
 # Open questions

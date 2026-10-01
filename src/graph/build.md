@@ -124,7 +124,7 @@ one that matters. It stores those diagnostics in the cache beside the
 file's own nodes, so a warm cache replays an artifact collision warning
 rather than swallowing it on the second run.
 
-<!-- dankg:depends target=../../architecture.md#decision-70-an-artifacts-slug-comes-from-its-path-or-from-artifact quote="checked, never repaired, warned and dropped on a collision" -->
+<!-- dankg:depends target=../../architecture.md#decision-70-an-artifacts-slug-comes-from-its-path-or-from-artifact quote="checked, never repaired, warned and refused on a collision" -->
 
 ```rust name=build path=graph/build.rs
 pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> ParsedFile {
@@ -472,7 +472,7 @@ fn file_node(
 /// node's own title is derived with above, so a heading written
 /// `# *Hash*` matches a frontmatter `title: Hash` here exactly as it does
 /// there.
-fn repeated_title_heading(doc: &Document, title: &str) -> Option<u32> {
+pub(crate) fn repeated_title_heading(doc: &Document, title: &str) -> Option<u32> {
     match doc.blocks.first() {
         Some(Block::Heading { inlines, line, .. })
             if Inline::plain(inlines).trim() == title.trim() =>

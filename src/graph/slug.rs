@@ -125,6 +125,33 @@ impl Slugger {
 mod tests {
     use super::*;
 
+    /// Moved here from `weave.rs` with the function itself, when decision
+    /// 69 gave the graph a second caller for it.
+    #[test]
+    fn usable_slug_accepts_exactly_what_slugify_produces() {
+        for ok in ["chart", "corpus-edge-counts", "module_doc", "fig1", "1fig", "café"] {
+            assert!(usable_slug(ok), "{ok}");
+            assert_eq!(slugify(ok), ok.to_lowercase(), "slugify leaves it alone: {ok}");
+        }
+        // Typst parses `.` and `:`; both are left out because each changes
+        // what a CSS selector means.
+        for bad in ["", "a+b", "a b", "a.b", "a:b", "a/b", "a#b", "a(b", "Chart", "CHART"] {
+            assert!(!usable_slug(bad), "{bad}");
+        }
+    }
+
+    /// Decision 70 needs "is this taken" as a question, because it refuses
+    /// to suffix a declared slug rather than reacting after the fact.
+    #[test]
+    fn taken_and_reserve_answer_without_assigning() {
+        let mut s = Slugger::new();
+        assert!(!s.taken("chart"));
+        s.reserve("chart");
+        assert!(s.taken("chart"));
+        // `assign` still suffixes around a reserved name.
+        assert_eq!(s.assign("Chart"), "chart-1");
+    }
+
     #[test]
     fn lowercases_and_hyphenates() {
         assert_eq!(slugify("Key Features"), "key-features");
