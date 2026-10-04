@@ -604,13 +604,18 @@ struct Root { path: PathBuf, config: Config }
 
 struct NodeId { file: String, slug: String }   // displays as "file#slug"
 
-enum NodeKind { Heading, Block }  // a block is always a leaf; see decision 20
+// A block's one child is the artifact it writes; nothing else nests
+// inside one. A relation is corpus-wide, unlike the other three.
+// See decisions 20, 69 and *Provenance without a driver*.
+enum NodeKind { Heading, Block, Artifact, Relation }
 
 struct Node {
     id: NodeId,
-    title: String,          // heading text, or a block's own `name=`
+    title: String,          // heading text, a block's own `name=`, or an
+                             // artifact's own path as written (decision 74)
     file: String,           // relative to root
-    line: u32,              // the heading's, or the block's fence, own line
+    line: u32,              // the heading's, or the block's fence, own line;
+                             // an artifact borrows its block's (decision 75)
     end_line: u32,          // heading: next same-or-higher heading, minus one;
                              // block: its own closing fence (md/block.rs)
     level: u8,              // 1..=6, or 0 for a synthetic file-level node;
@@ -619,11 +624,13 @@ struct Node {
     tags: Vec<String>,      // from frontmatter, carried onto every node
     external: Vec<String>,  // absolute URLs: recorded, never graphed
     resolved: bool,         // false => placeholder from a dangling link;
-                             // always true for a block
+                             // always true for a block or an artifact
     kind: NodeKind,
 }
 
-enum EdgeKind { Contains, Link }
+// Produces/Reads are inferred, never authored: a db= block's own
+// recorded provenance, and the file a produces=file: block writes.
+enum EdgeKind { Contains, Link, Produces, Reads }
 
 struct Edge {
     from: NodeId,
@@ -852,7 +859,7 @@ Decision 41 narrows. Weave resolves a wikilink whose name half is empty. A same-
 
 Every same-file fragment that finds a target resolves, not figure labels alone. `graph::resolve::find_slug` searches a file's nodes, which hold headings and blocks alike. A rule admitting only figures would carve an exception out of machinery that does not want one. This is strictly larger than the figure case and strictly additive: a `[[#some-heading]]` that renders as plain text in an already-woven document starts rendering as a link. Nothing renders as less than it does today.
 
-`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads. Typst gets the fragment's own label, `fig:NAME` or `sec:SLUG`. HTML gets the fragment's own anchor id and the text a bare reference shows. Figures go in before headings. A figure label therefore wins a clash with a heading slug. A label is declared, by `label=` or by a block's own `name=`. A slug is derived from prose. (Decision 70 removes that last justification, since a figure slug is derived from a path unless `artifact=` says otherwise. The precedence itself is unchanged, on the narrower ground that a figure is one element where a heading is a whole section.)
+`weave::references` is the one walk that resolves a fragment, for both backends. Each gets only what it reads. Typst gets the fragment's own label, `fig:NAME` or `sec:SLUG`. HTML gets the fragment's own anchor id and the text a bare reference shows. Figures go in before headings, then pairs. (Decision 77 made that ordering inert. One `Slugger` now assigns every slug in the document, so two of them cannot be equal and nothing has a clash to win. The ordering survives as a tiebreak that never fires, rather than as a rule. Decision 70 had already removed its original justification -- that a label is declared where a slug is derived -- since a figure slug is itself derived from a path unless `artifact=` says otherwise.)
 
 `WikiLink`'s own two fields carry exactly what a reference needs. A bare `[[#chart]]` renders as a reference whose text the backend supplies. A labelled `[[#chart|the revenue chart]]` renders as a reference whose text the author wrote.
 
@@ -899,9 +906,11 @@ The default is the artifact's own path stem, slugified. A block writing `produce
 
 A derived slug is slugified rather than checked, and suffixed rather than refused. Both follow from it not being something the author typed: warning about a path's own shape would name a mistake nobody made. `produces=file:Q3 revenue.csv` gets `q3-revenue`. Two artifacts sharing one stem -- `out.csv` and `out.png` both stem to `out` -- get `out` and `out-1` from the same `Slugger` a repeated heading already goes through. A stem that slugifies to nothing is dropped instead, since `Slugger`'s own empty-base fallback is `section`, a word no figure should answer to.
 
-A *declared* `artifact=` keeps decision 63's own treatment exactly: checked, never repaired, warned and dropped on a collision. The reason is decision 63's own. A silently repaired slug is a reference that silently points at the wrong figure. So the two rules differ by which side wrote the slug, not by which check runs.
+A *declared* `artifact=` keeps decision 63's own treatment exactly: checked, never repaired, warned and refused on a collision. The artifact then falls back to its own path-derived default, so it still has a name. The reason is decision 63's own. A silently repaired slug is a reference that silently points at the wrong figure. So the two rules differ by which side wrote the slug, not by which check runs.
 
-The check itself changed shape while this was built, and the reason is worth recording. Decision 63 stated it as a charset: letters, digits, `-` and `_`. Reserving a declared slug through `Slugger` -- which this decision needs, so a later derived slug cannot collide with it -- puts it through `slugify` as well, and `slugify` lowercases. `artifact=Chart` passed the charset check, came back as `chart`, and left `[[#Chart]]` resolving against nothing: `resolve_references` compares a fragment verbatim. That is a silently repaired slug pointing at the wrong figure, the exact failure decision 63 refuses. `usable_label` is now stated as a fixed point instead -- `slugify(s) == s` -- which subsumes the charset, rejects the uppercase input outright, and names the slug `slugify` would have produced so the author can paste it. The charset was never the whole rule. It only looked like it while nothing downstream rewrote the value.
+This said "dropped" until decision 77, and the word described `weave::figures` rather than the rule. Weave gave a refused figure no name at all, while `graph::build` fell back to the path. Decision 77 left one implementation, and the fallback is what survived: an artifact that exists is better addressed by its path than not addressed at all.
+
+The check itself changed shape while this was built, and the reason is worth recording. Decision 63 stated it as a charset: letters, digits, `-` and `_`. Reserving a declared slug through `Slugger` -- which this decision needs, so a later derived slug cannot collide with it -- puts it through `slugify` as well, and `slugify` lowercases. `artifact=Chart` passed the charset check, came back as `chart`, and left `[[#Chart]]` resolving against nothing: `resolve_references` compares a fragment verbatim. That is a silently repaired slug pointing at the wrong figure, the exact failure decision 63 refuses. `graph::slug::usable_slug` (named `usable_label`, in `weave.rs`, until decision 69 gave the graph a second caller for it) is now stated as a fixed point instead -- `slugify(s) == s` -- which subsumes the charset, rejects the uppercase input outright, and names the slug `slugify` would have produced so the author can paste it. The charset was never the whole rule. It only looked like it while nothing downstream rewrote the value.
 
 **Rationale:** decision 63's own default was the wrong half of the pair. A block's `name=` is its eval identity and its tangle identity; `label=` existed to stop a code-driven rename from breaking prose. Defaulting to the artifact's path instead removes the need for the override in the ordinary case. The prose already points at the artifact. The artifact's name does not change when the block's does. The override survives for the case the path itself is the wrong word.
 
@@ -913,7 +922,118 @@ Decision 70 is what makes this reachable often enough to matter. `[[#chart]]` ag
 
 The message names the slug that would have worked rather than only saying the fragment is wrong, for the same reason decision 64 gives each unresolved reference its own message. The next action differs per case. Here it is one word.
 
-**Deferred.** Decisions 69, 71, 73, 74 and 75 of `plans/plan-label-resolution.md` are not built. A `produces=file:` artifact is still not a graph node. `dankg graph`, `dankg check` and the TUI therefore still resolve a figure slug to nothing. `example/weave_example/report.md`'s own *A gap worth knowing about* section is the live demonstration. The plan is the record of how it closes.
+## Decision 69: A `produces=file:` artifact is a node
+
+A block declaring `produces=file:PATH` gets a second node for the file it writes, joined to the block by the same `Produces` edge a relation already uses. The block node stays exactly what it was.
+
+This closes a gap that predates labels. `dankg graph` already drew a produced *relation*, because a `[db.*]` block's own recorded `produces=orders` built one. A produced *file* was left out. A corpus whose blocks write CSVs and charts showed the code and never what the code made.
+
+The artifact is what a figure reference points at. A reference names the thing on the page. The thing on the page is the artifact rather than the source block above it. Two nodes give the two fragments two meanings, instead of making one node answer to two names. The first draft of `plans/plan-label-resolution.md` proposed recording the label as an alias on the block's own node. That draft is abandoned for exactly this reason.
+
+**The slug is file-scoped, not a synthetic namespace.** A relation's own `NodeId` carries the synthetic `db:NAME` in its file half, because a relation belongs to a database rather than to any one file. An artifact is the other way round. Its slug comes out of the declaring file's one `Slugger`, in document order, beside every heading slug and block name. That is what makes `graph::resolve` need no change whatsoever: the slug is a real slug in its own file, so `find_slug` already finds it. A synthetic `file:` namespace was considered and rejected. It would have left `[[#quarterly]]` unresolvable, which is the whole point of the plan.
+
+Order within that one namespace is document order, and the block's own name is reserved just before its artifact. A block written `name=chart produces=file:chart.png` therefore keeps `chart` for the block and gives the artifact `chart-1`. The block's name is its eval identity and its tangle identity (decision 19). It does not move because a path happens to stem to the same word.
+
+**`build` gained a `Diags` for this.** Decision 70 warns and drops a colliding *declared* slug rather than suffixing it, so the one pass that assigns slugs has to be able to refuse. Nothing else in `graph::build` warns, and nothing else needs to. Every other slug it assigns is derived. A derived collision is `Slugger`'s own to settle silently. Both production callers already held a per-file `Diags`. `index::parse_all` stores it in the cache beside the file's nodes, so a warm cache replays the warning rather than swallowing it on the second run.
+
+`usable_label` and `artifact_stem` moved out of `weave.rs`, to `graph::slug::usable_slug` and `graph::build::artifact_stem`. The graph is a second caller for both. Two copies of one rule is two chances for `dankg weave` and `dankg graph` to disagree about what a document declares.
+
+## Decision 73: An artifact node draws, and it is a block's one child
+
+An artifact node is drawn by `dankg graph` and listed in the TUI tree, the way a heading and a block already are. Nothing gates it behind a flag.
+
+`--live` is the precedent for gating, and it does not apply. A live catalog spawns a process per `[db.*]` to ask an external system what exists. An artifact is read straight out of an info string the corpus already holds, at no cost. A flag would hide a node the corpus states outright.
+
+**It is parented to the block that writes it.** `tui::app::build_children` skips a `Relation` outright, because a relation is corpus-wide and parentless and has no place in any one file's tree. An artifact does have a place. Parenting it to its block makes the tree read *the code, then what the code made*, which is decision 69's own framing. It is the same block whose line decision 75 borrows. "A block is always a leaf" was true until this decision and is now narrowed: an artifact is a block's one and only child, and nothing else nests inside a block.
+
+The parent is a `parent` field without a `Contains` edge beside it. The join is `Produces`. One relationship should not be stated twice in two kinds.
+
+Every drawn format gets a look of its own for the new kind, the way a block node already has one: a tint and monospace in dot and in HTML, a `classDef` in mermaid, and a marker in the TUI tree kept clearly distinct from a block's own. `kind_marker`'s match is exhaustive by design, so the new variant refused to compile until its marker was chosen.
+
+## Decision 74: An artifact's title is its path, and its slug is not
+
+A node carries a title and a slug. The two answer different questions. A title is what a reader sees in the TUI tree and in a drawn graph's own label. A slug is what a reference resolves against.
+
+An artifact's title is its path as written: `data/quarterly.csv`. A path is what identifies the file on disk. A stem alone loses the directory. Two artifacts whose paths share one stem would otherwise read as one row in the tree.
+
+Its slug stays decision 70's own: the stem, or `artifact=`. A slug is typed by hand inside a reference. `[[#quarterly]]` is the point of this work. `[[#data/quarterly.csv]]` would not be.
+
+`Relation` is the precedent. `relation_node(id, title)` already takes the two separately. A relation's own title is display text that nothing resolves against.
+
+## Decision 75: An artifact node borrows its block's line, and owns none of it
+
+An artifact node reports the line of the block that produces it. That line is what `enter` hands the reader's editor. It is also what a dot or HTML label prints after the file name. There is no other source to look at. A relation node's own `line: 0` would instead print `report.md:0`, on a node decision 73 now draws.
+
+Borrowing a line is not owning it. An artifact node joins `NodeKind::Relation` in every guard that writes to a line, or reads a span:
+
+- `write_tag_for` and its removal counterpart. A `dankg:tag` marker anchored on a borrowed line would land on the producing block's own fence and read as that block's tag. `open_tag_menu` refuses ahead of both, with a message of its own.
+- `eval_key`'s own block picker, which calls `blocks_in_section` with a node's span. A borrowed span hands back the producing block, which the block node already offers one row up.
+
+`end_line` matches `line`. A span the node does not own has nothing to measure.
+
+The guard those call sites already carried was written for a real bug. Its reasoning survives this change with one word moved. A node whose line was `0` reached `tag::write_back`'s own `anchor_line - 1` on a `u32`, underflowed, and panicked on the resulting near-`u32::MAX` splice index. The post-mortem reads that such a node has no real line for a marker to attach to at all. That stays true of an artifact. What changed is the test: a line of `0` no longer detects it, and the kind does.
+
+**Two bugs surfaced building this, both pinned by tests.**
+
+*The cache never round-tripped a `Produces` edge.* `encode` wrote every edge in a `ParsedFile`'s own containment vec using `EdgeKind::as_str`, which yields `produces` and `reads` for a db block's inferred provenance. `decode` matched `"contains"` and `"link"` alone and returned `None` for anything else, which makes the whole entry a miss. Any file holding such an edge therefore decoded to nothing and missed the cache on every run, forever. No test caught it, because no fixture had ever put such an edge through `encode` and back. This corpus has no `Produces` edges at all, so the bug was latent until decision 69 gave every `produces=file:` block one. `EdgeKind::parse` is now `as_str`'s real inverse, the way `NodeKind::parse` already was. One shared function is what stops the two drifting apart again.
+
+*The tree badge's relation glyph fired for a produced file.* `query::NodeLinks::produces` is documented as the relations a node writes. `badge_for`'s own `⚭` means "touches a relation". Folding an artifact into `produces` made every `produces=file:` block claim a relation it does not have. Artifacts get a field of their own. The cross-reference panel does not read it yet, because `DepData::file_deps` already prints the same fact from its second corpus parse; retiring that parse is `plans/plan-graph-edge-coverage.md`'s own work.
+
+## Decision 71: A rendered pair is addressable, and a bare reference to one is refused in PDF
+
+`[[#chart]]`, naming the block itself, resolves to the pair's own rendered box. HTML puts an `id` on the `<figure class="eval-pair">` it already emits. Typst hangs a label off the `#block(stroke: ...)` it already emits.
+
+Without this, decision 69 moved the disagreement rather than ending it. The graph resolved `[[#chart]]` to the block node while weave still had nothing to point at. A block and the artifact it produces are two targets. Both are addressable now. Each means what it says: a block name reaches the whole code-and-output unit, an artifact slug reaches the file.
+
+**A bare reference to a pair is refused for PDF, and the reason is Typst's own.** Typst cannot reference a plain `#block` at all. `typst compile` answers `cannot reference block` and stops. A *bare* `[[#chart]]` is exactly the form weave turns into `@anchor`. `@` is the form Typst refuses. A labelled `[[#chart|the run]]` becomes `#link(<blk:chart>)[the run]`, which compiles. So the bare form is refused in `resolve_references`, naming the labelled form that works, rather than reaching the compiler as generated markup the author never wrote. That is decision 64's own principle: an author should never see an error pointing into a `.typ` file they did not write.
+
+The refusal is format-specific, and it is the one place the two backends deliberately disagree. HTML has no such limit, so a bare reference to a pair renders there. Reporting it unconditionally would refuse a document HTML renders correctly. The alternative was wrapping the pair in a `#figure` so `@` works. That is rejected: it would put code-and-output into Typst's own figure counter, which decisions 54 and 65 deliberately keep for tables and images on separate counters.
+
+**The refusal tests what a fragment resolved to, never which names exist.** The first cut asked whether the fragment matched any pair's slug. That refused a document Typst renders correctly. A block written `name=quarterly produces=file:data/quarterly.csv` gives its own name and its artifact's stem the same slug. `references` lets the figure win that key. The fragment resolves to `fig:quarterly`, which is a real Typst figure and references perfectly well. `example/weave_example/report.md` is what caught it: a file whose whole job is to exercise every weave feature stopped rendering as PDF. The check now reads the resolved anchor's own `blk:` prefix, which is the only thing that actually implies a `#block`.
+
+**Only a pair that actually renders carries an anchor.** Decision 46's box is what a pair renders. There are three ways to render none. An unpaired block has no recorded result, so there is no box at all. `weave=hidden` drops the pair outright (decision 48). `weave=source-hidden` together with `weave=output-hidden` drops both halves. An empty box is dropped rather than emitted (decision 53). An anchor on any of them would resolve to an id the output does not carry, which is worse than not resolving: the author gets a dead link instead of a diagnostic naming the line.
+
+**This makes decision 72's own case rare rather than dead.** `weave::produced_artifacts` skips any block with no recognized pair, so an artifact figure only ever exists for a pair. A rendered pair now always answers to its block's own name. What is left is the hidden pair. `figures` keeps a hidden figure's label while this decision gives it no anchor, so a fragment naming that block still misses. Decision 72's message still names the slug that would have worked.
+
+## Decision 77: One slug namespace, and `graph::build` owns it
+
+`dankg weave` takes every slug from `graph::build`, through one call, and derives none of its own. `weave::slug_maps` is that call. It hands back a heading's slug by line, and an artifact's and a block's by the index their node came from.
+
+Three derivations lived in `weave.rs` before. `heading_slugs` walked headings, `figures` named artifacts, and `pair_anchors` named blocks. Each started a `Slugger` of its own, and none could see the other two. `graph::build` meanwhile assigned all three from one `Slugger`, in document order. So the two tools could disagree about one document, and the disagreement was silent.
+
+The case is small and real. A block named `chart` ahead of a heading "Chart" gave the heading `chart` in weave and `chart-1` in the graph. `[[#chart]]` then reached the heading in a woven page and the block in `dankg graph`. `dankg check` resolved it against the graph's answer. Nothing reported it, because each tool was self-consistent.
+
+**This corpus had no instance, and that is why it is worth recording.** Around twenty files pair a heading "Tests" with a block named `tests`, so collisions are everywhere. Every one of them puts the heading first, which makes both tools agree by luck rather than by construction. The bug needed a block *ahead* of its colliding heading. Nothing here had one. A latent divergence the corpus cannot reach is still a divergence. The next file written is not obliged to keep the lucky ordering.
+
+**A block's own name wins the bare slug.** Decision 20 forces the order. It fused node scope and eval scope deliberately, so a block `dankg eval` runs as `chart` may not appear in the graph under another name. The artifact is therefore the one that moves: `name=chart produces=file:chart.png` keeps `chart` for the block and gives the artifact `chart-1`.
+
+That is a real consequence for an author, and it is a change. `[[#chart]]` against that block reaches the code-and-output unit (decision 71) rather than the figure. An author who wants the bare name on the figure gives the block a different one -- `name=plot produces=file:chart.png` leaves the figure as `chart`, which is the pairing decision 70's own example already used. Naming a block after the file it writes is the idiom that loses here. It loses to an invariant older than any of this.
+
+**Two behaviours merged rather than one winning on preference.** A declared `artifact=` that collides was refused and dropped in weave, and refused with a fallback to the path in `graph::build`. The fallback survives, because decision 70's own text always specified it and an artifact that exists is better addressed by its path than left unaddressable. Weave's own collision and charset warnings are gone with its derivation: `graph::build` checks once and warns once, through the `Diags` decision 69 gave it.
+
+**A leading heading absorbed by a declared title keeps an anchor.** `graph::build` absorbs that heading whenever a `title` is declared (decision 62), while weave drops it only for a cover page. The absorbed heading therefore has no heading node. `slug_maps` maps its line to the file node's own slug instead. The file node *is* its node. Without this the heading would render with no `id` at all, and only when `cover` is unset, which is exactly the kind of asymmetry one source of truth is supposed to remove.
+
+`weave::artifact_stem` and `weave::usable_label` are gone. Decision 69 said it moved them and in fact copied them, leaving weave's own pair in use by `figures`; this is the commit where the move actually happened. The cache is untouched. `ParsedFile` gained nothing, so no `VERSION` bump.
+
+## Decision 76: A `reads=file:` is an edge, resolved corpus-wide
+
+A block declaring `reads=file:PATH` gets a `Reads` edge from the artifact node of whichever block writes that same file. Direction and kind are a relation's own (decision 35): artifact to reader, reusing `EdgeKind::Reads` rather than inventing a fourth kind.
+
+Decision 69 made an artifact a node and left it a leaf. The graph showed what wrote a file and never what consumed it, so lineage stopped halfway. `plans/plan-label-resolution.md` deferred this on the stated condition that the forward edge exist first. It does now.
+
+**It cannot be built where decision 69 was.** `graph::build` runs per file, and an artifact node is file-scoped. A `reads=` in one file therefore has to find a node in another. That needs the whole corpus, which is `graph::resolve`'s job. A relation's own `Reads` edge *is* built in `build`. The reason is the difference between the two: `db:NAME` is a synthetic global namespace that addresses without a corpus. `file:` deliberately is not one, because `[[#quarterly]]` has to resolve against the declaring file.
+
+So the declaration is recorded as written and matched later. `ParsedFile` carries a `RawRead` list beside its `RawLink` list. The shape is the same because the problem is the same: this module's own doc comment already says a target may live in a file that has not been parsed yet. One pattern, a second instance.
+
+**Both sides compare as resolved paths.** `join_normalize`/`dir_of` turn each half into a root-relative form, which is the same pair a written link resolves through and the same comparison `eval::plan::check_file_deps` already makes. Two blocks in different directories spelling one file differently still match. The graph therefore cannot disagree with `check` about which file an edge is about. The producer side stores nothing extra: an artifact node already carries the path as written as its title (decision 74) and the file that declared it, so its resolved path is recomputed from the node.
+
+**The declaration alone draws the edge.** Decision 33 says `reads=file:` resolves nothing on its own. That is about *staleness*, where the `deps=` edge is what carries the hash. Drawing is a different question. A relation's `Reads` edge is inferred from a block's own SQL. For a file there is nothing to infer, so the declaration is the only signal there is. A `reads=` whose `deps=` names no matching producer is still reported by `check_file_deps`, unchanged.
+
+**A read with no producer gets nothing.** No edge, and no decision 8 placeholder. A block reading a file the corpus does not generate is ordinary, and a checked-in CSV is the common case. A placeholder would report a dangling reference that is not one. It would also make `dankg check` count an unresolved node and fail a corpus that is correct.
+
+**An artifact becomes free to enter against `--depth`.** Decision 38 gave a relation that treatment. The reason now applies here too: once a `reads=` is an edge, an artifact sits *between* two blocks rather than hanging off one. Charging a hop in each direction would hide the producer from the consumer at `--depth 1`, which is exactly the lineage the edge exists to show. Leaving one for a further block still costs the ordinary hop, so decision 38's own warning about collapsing distance in both directions still holds.
+
+Cache `VERSION` 4 to 5. Resolution reads the new list, so an older entry would serve a corpus with no lineage while still hashing as fresh.
 
 ## Block nodes
 
@@ -4815,7 +4935,7 @@ echo "$contains Contains edges against $link Link edges"
 <!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
 
 ```
-921 Contains edges against 72 Link edges
+928 Contains edges against 72 Link edges
 ```
 
 # Open questions

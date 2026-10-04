@@ -94,12 +94,17 @@ exit 3
 # Figures a reader can point at
 
 A block that declares `produces=file:` and carries a caption renders
-as a real figure. Its label is the block's own `name=`, so
+as a real figure. Its slug is the stem of the file it wrote, so
 [[#quarterly]] needs no extra attribute to point at the table below.
 A labelled reference says something else instead:
 [[#quarterly|the quarterly breakdown]].
 
-```sh name=quarterly produces=file:data/quarterly.csv caption="Revenue by region and quarter"
+The block is named `revenue` rather than `quarterly` on purpose. Every
+slug in a file shares one namespace, and a block's own name is reserved
+before its artifact's stem, so naming the block `quarterly` would give
+the *block* that slug and leave the figure as `quarterly-1`.
+
+```sh name=revenue produces=file:data/quarterly.csv caption="Revenue by region and quarter"
 mkdir -p data
 printf 'region,quarter,revenue\n' > data/quarterly.csv
 printf 'North,Q1,1200\nSouth,Q1,980\n' >> data/quarterly.csv
@@ -107,7 +112,7 @@ printf 'North,Q2,1440\nSouth,Q2,1010\n' >> data/quarterly.csv
 echo "wrote data/quarterly.csv"
 ```
 
-<!-- dankg:result name=quarterly hash=8770a213ef93c5d2 -->
+<!-- dankg:result name=revenue hash=8770a213ef93c5d2 -->
 
 ```
 wrote data/quarterly.csv
@@ -230,15 +235,21 @@ way. An artifact that cannot be read or copied fails too.
 All three report every bad line in one run, and write no output file
 of any kind.
 
-# A gap worth knowing about
+# What a figure slug reaches
 
-`dankg check` does not yet know what a figure slug is. The graph
-builds a block's node from its `name=` alone. A produced artifact gets
-no node of its own. The reference [[#trend|to the chart]]
-therefore resolves in weave and is reported as a dead link by
-`check`. Running `dankg check .` in this directory shows it, alongside
-the `[[SomeOtherFile]]` above, which is unresolved on purpose.
+A produced artifact is a node of its own (decision 69), so the graph
+and weave now agree about what a figure is called. The reference
+[[#trend|to the chart]] resolves in both. Running `dankg check .` in
+this directory reports one unresolved node, and it is the
+`[[SomeOtherFile]]` above, which is unresolved on purpose.
 
-Both halves of a figure slug are invisible to the graph: a declared
-`artifact=`, and the path stem a figure takes when none is declared.
-`plans/plan-label-resolution.md` is the plan that closes this.
+Both halves of a figure slug reach the graph: a declared `artifact=`,
+and the path stem a figure takes when none is declared. A block's own
+name reaches it too, and names something different -- the whole
+code-and-output unit rather than the file it wrote (decision 71).
+
+One gap is left. A *bare* reference to a pair cannot render in PDF,
+because Typst refuses to reference a plain block at all, so
+[[#trend|a labelled reference]] is the form to write when the target is
+a block rather than an artifact. `dankg weave --format pdf` says so by
+line rather than letting Typst fail on generated markup.

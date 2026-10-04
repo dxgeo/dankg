@@ -95,7 +95,7 @@ fn zero_cost_relations(graph: &Graph, chosen: &mut Vec<NodeId>, frontier: &mut V
         }
         for (near, far) in [(&edge.from, &edge.to), (&edge.to, &edge.from)] {
             let Some(far_node) = graph.node(far) else { continue };
-            if far_node.kind == NodeKind::Relation
+            if matches!(far_node.kind, NodeKind::Relation | NodeKind::Artifact)
                 && frontier.contains(near)
                 && !chosen.contains(far)
                 && !free.contains(far)
@@ -250,6 +250,55 @@ mod tests {
             edges: vec![edge(EdgeKind::Reads, ("db:t", "r"), ("a", "setup"))],
         };
         assert_eq!(ids(&select(&g, &[NodeId::new("a", "setup")], 0)), vec!["a#setup", "db:t#r"]);
+    }
+
+    fn artifact(file: &str, slug: &str, path: &str) -> Node {
+        Node {
+            id: NodeId::new(file, slug),
+            title: path.to_string(),
+            file: format!("{file}.md"),
+            line: 1,
+            end_line: 1,
+            level: 7,
+            parent: None,
+            tags: Vec::new(),
+            external: Vec::new(),
+            resolved: true,
+            kind: NodeKind::Artifact,
+        }
+    }
+
+    /// Decision 76. An artifact is free to enter for decision 38's own
+    /// reason, now that a `reads=file:` puts one between two blocks.
+    #[test]
+    fn an_artifact_is_free_at_depth_zero() {
+        // a#fetch --Produces--> a#raw
+        let g = Graph {
+            nodes: vec![block("a", "fetch"), artifact("a", "raw", "raw.csv")],
+            edges: vec![edge(EdgeKind::Produces, ("a", "fetch"), ("a", "raw"))],
+        };
+        assert_eq!(ids(&select(&g, &[NodeId::new("a", "fetch")], 0)), vec!["a#fetch", "a#raw"]);
+    }
+
+    /// Leaving one still costs the ordinary hop, so lineage does not
+    /// collapse distance in both directions. Decision 38's own warning.
+    #[test]
+    fn leaving_an_artifact_onto_the_reader_costs_the_ordinary_hop() {
+        // a#fetch --Produces--> a#raw --Reads--> a#clean
+        let g = Graph {
+            nodes: vec![block("a", "fetch"), artifact("a", "raw", "raw.csv"), block("a", "clean")],
+            edges: vec![
+                edge(EdgeKind::Produces, ("a", "fetch"), ("a", "raw")),
+                edge(EdgeKind::Reads, ("a", "raw"), ("a", "clean")),
+            ],
+        };
+        // Free to enter the artifact, but the consumer is a real hop away.
+        assert_eq!(ids(&select(&g, &[NodeId::new("a", "fetch")], 0)), vec!["a#fetch", "a#raw"]);
+        assert_eq!(
+            ids(&select(&g, &[NodeId::new("a", "fetch")], 1)),
+            vec!["a#clean", "a#fetch", "a#raw"],
+            "one hop reaches the consumer the artifact feeds"
+        );
     }
 
     #[test]

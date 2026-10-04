@@ -7,14 +7,14 @@ a bug. The question asked was whether dankg is the best implementation
 of what it is for. Most of the answer is yes. One part is not. That part
 is measurable.
 
-`dankg graph .` on this repo reports 921 containment edges against 72
+`dankg graph .` on this repo reports 928 containment edges against 72
 link edges. Containment is the document outline, which any markdown
 parser derives for free. The 72 link edges are the whole of what the
 graph knows about authored cross-reference. The marker below pins that
 count against the block that measures it. The next drift therefore
 trips `dankg check` rather than sitting here unnoticed.
 
-<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="921 Contains edges against 72 Link edges" -->
+<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="928 Contains edges against 72 Link edges" -->
 
 The same corpus carries over 250 `dankg:depends` markers. `dankg check`
 prints the exact count on every run. No exact number is typed here for
@@ -169,9 +169,14 @@ feature has to argue for reopening a closed phase.
 3. Whether a marker that resolves to a *block* rather than a heading is
    legal. `resolve_target` finds a heading. `find_slug` searches blocks
    too.
-4. Which cache version this lands on. `graph/cache.rs` is at `VERSION`
-   3 and `plans/plan-label-resolution.md` already needs 4. Whichever
-   ships second takes 5. Neither should assume it went first.
+4. Settled by events rather than by argument.
+   `plans/plan-label-resolution.md` shipped first and took two bumps of
+   its own: `VERSION` 4 for decision 69, then 5 for decision 76. This
+   plan therefore lands on 6. The marker below pins that, so a third
+   bump landing first trips `dankg check` rather than leaving the number
+   here to rot.
+
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 5;" -->
 
 ## What this explicitly does not do
 

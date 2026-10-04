@@ -198,7 +198,7 @@ fn parse_all(
 
         let mut file_diags = Diags::new(rel);
         let doc = Document::parse(&content, &mut file_diags);
-        let built = build::build(rel, &doc, content.lines().count() as u32);
+        let built = build::build(rel, &doc, content.lines().count() as u32, &mut file_diags);
         cache.store(rel, len, mtime, &content, &built, file_diags.items());
         diags.absorb(file_diags);
         files.push(built);

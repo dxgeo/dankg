@@ -42,7 +42,7 @@ pub(crate) fn graph_of(files: &[(&str, &str)]) -> Graph {
         .map(|(path, source)| {
             let mut file_diags = Diags::new(*path);
             let doc = Document::parse(source, &mut file_diags);
-            build::build(path, &doc, source.lines().count() as u32)
+            build::build(path, &doc, source.lines().count() as u32, &mut file_diags)
         })
         .collect();
     resolve::resolve(&parsed, &mut diags)

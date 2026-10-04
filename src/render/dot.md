@@ -83,6 +83,11 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
                 // A named code block reads as code, not prose: monospace,
                 // and a tint distinct from an ordinary heading's white.
                 out.push_str(", fillcolor=\"#eef2ff\", fontname=\"Menlo\"");
+            } else if node.kind == NodeKind::Artifact {
+                // An artifact is a path on disk (decision 73). Monospace
+                // for the same reason a block gets it, and a tint of its
+                // own so a file never reads as the code that wrote it.
+                out.push_str(", fillcolor=\"#f0fdf4\", fontname=\"Menlo\"");
             }
             let _ = write!(out, ", tooltip={}", quote(&location(node)));
         }

@@ -1,5 +1,23 @@
 # A produced artifact is a node, and it carries the slug
 
+Status: implemented. Decisions 70 and 72 shipped in 0.9.0. Decisions
+69, 71, 73, 74 and 75 followed, and `architecture.md` is the record of
+each as built. Two of them are narrower there than below, and the prose
+there says why. Decision 71 refuses a *bare* reference to a pair when
+the output is a PDF, because Typst cannot reference a plain block at
+all. Decision 69 keeps the artifact's slug in its file's own namespace
+rather than under the synthetic `file:` prefix proposed below, because
+a synthetic namespace would have left `[[#quarterly]]` unresolvable.
+
+Two things followed it. Decision 76 added the `reads=file:` edge this
+plan deferred. Decision 77 closed the last piece, which was wider than
+this plan framed it: *What this reuses* below asserts that an artifact
+shares one namespace with every heading and block name in its file, and
+that was true of `graph::build` alone. Weave derived its own heading
+slugs, figure labels and pair anchors from three separate `Slugger`s, so
+the two tools could disagree about one document. Weave now takes all
+three from `graph::build`. Nothing is left open.
+
 ## Context
 
 Decision 63 gave a figure a label, defaulting to its block's own
@@ -54,11 +72,13 @@ distinguishes "no such figure" from "that name belongs to something
 else here".
 
 **The cache stores what resolution reads.** `graph/cache.rs` is a
-line-oriented format at `VERSION = 3`. Anything new that resolution
-depends on has to be encoded, decoded, and version-bumped. A warm
-cache otherwise serves pre-change nodes that still hash as fresh.
+line-oriented format, and it stood at `VERSION = 3` when this plan was
+written. Anything new that resolution depends on has to be encoded,
+decoded, and version-bumped. A warm cache otherwise serves pre-change
+nodes that still hash as fresh. Decision 69 took the bump to 4, and
+decision 76 took it to 5.
 
-<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 3;" -->
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 5;" -->
 
 ## What this reuses
 
@@ -256,8 +276,10 @@ gate failing over a document that is right.
 ## Open questions
 
 None. This plan raised three. Each was settled in review.
-Decisions 70, 73, 74 and 75 record the answers. The plan is ready to
-build.
+Decisions 70, 73, 74 and 75 record the answers. The plan was built from
+there. A fourth question surfaced during the build rather than before
+it: whether Typst can reference the element decision 71 labels. It
+cannot, and decision 71 carries the answer.
 
 ## What this explicitly does not do
 
@@ -265,7 +287,8 @@ build.
   reference syntax. `[[#chart]]` and `[text](#chart)` both parse
   today.
 - A node for `reads=file:`. The reverse edge can follow once the
-  forward one exists.
+  forward one exists. It did: decision 76 joins a `reads=file:` to the
+  artifact its producer already built, corpus-wide.
 - Cross-file references. Weave renders one file (decision 41).
   Decision 64 narrows that for a fragment with no file name in it
   alone.
