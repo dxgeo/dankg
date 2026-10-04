@@ -132,6 +132,7 @@ mod tests {
                 kind: EdgeKind::Link,
                 line: 3,
                 reciprocated: true,
+                quote: String::new(),
             }],
         }
     }

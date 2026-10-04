@@ -134,6 +134,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                         kind: EdgeKind::Contains,
                         line: 0,
                         reciprocated: false,
+                        quote: String::new(),
                     });
                 }
 
@@ -200,6 +201,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                     kind: EdgeKind::Contains,
                     line: 0,
                     reciprocated: false,
+                    quote: String::new(),
                 });
                 nodes.push(Node {
                     id: block_id.clone(),
@@ -244,6 +246,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                             kind: EdgeKind::Produces,
                             line: 0,
                             reciprocated: false,
+                            quote: String::new(),
                         });
                     }
                 }
@@ -290,6 +293,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                                 kind: EdgeKind::Produces,
                                 line: 0,
                                 reciprocated: false,
+                                quote: String::new(),
                             });
                         }
                         for rel in &used {
@@ -301,6 +305,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                                 kind: EdgeKind::Reads,
                                 line: 0,
                                 reciprocated: false,
+                                quote: String::new(),
                             });
                         }
                     }

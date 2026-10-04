@@ -130,6 +130,7 @@ mod tests {
             kind: EdgeKind::Produces,
             line: 0,
             reciprocated: false,
+            quote: String::new(),
         }
     }
 
@@ -224,6 +225,7 @@ mod tests {
             kind: EdgeKind::Link,
             line: 0,
             reciprocated: false,
+            quote: String::new(),
         }
     }
 
@@ -234,6 +236,7 @@ mod tests {
             kind: EdgeKind::Contains,
             line: 0,
             reciprocated: false,
+            quote: String::new(),
         }
     }
 
@@ -251,7 +254,14 @@ mod tests {
             nodes: vec![rel.clone()],
             edges: vec![
                 produces(("a", "setup"), &rel.id),
-                Edge { from: rel.id.clone(), to: NodeId::new("b", "report"), kind: EdgeKind::Reads, line: 0, reciprocated: false },
+                Edge {
+                    from: rel.id.clone(),
+                    to: NodeId::new("b", "report"),
+                    kind: EdgeKind::Reads,
+                    line: 0,
+                    reciprocated: false,
+                    quote: String::new(),
+                },
             ],
         };
         assert_eq!(links_for(&g, &NodeId::new("a", "setup")).produces, vec![rel.id.clone()]);

@@ -46,15 +46,24 @@ use std::path::{Path, PathBuf};
 const MAGIC: &str = "!dankg-cache";
 /// Bumped whenever the record format changes, or whenever the same bytes
 /// would now build different nodes. An entry from another version is a miss,
-/// not an error. 2: a node row grew a `kind` field (block nodes). 3: a
-/// declared frontmatter `title` became the file's own top-level node
-/// (decision 62), so an unchanged file's node set changed underneath an
-/// entry that still hashes as fresh. 4: a `produces=file:` artifact
-/// became a node of its own (decision 69), which is the same trap
-/// again -- the file is untouched and its node set is not. 5: a row for
-/// each `reads=file:` a block declares (decision 76), which resolution
-/// now reads and an older entry does not carry.
-const VERSION: u32 = 5;
+/// not an error. Each note below opens on its own line on purpose: a
+/// `dankg:depends` quote is matched after whitespace normalization, which
+/// leaves a `///` prefix standing in the middle of any quote spanning a
+/// line break, so a one-line note is the only kind a plan can pin.
+/// 2: a node row grew a `kind` field (block nodes).
+/// 3: a declared frontmatter `title` became the file's own top-level node
+///    (decision 62), so an unchanged file's node set changed underneath
+///    an entry that still hashes as fresh.
+/// 4: a `produces=file:` artifact became a node of its own (decision 69),
+///    which is the same trap again -- the file is untouched and its node
+///    set is not.
+/// 5: a row for each `reads=file:` a block declares (decision 76), which
+///    resolution now reads and an older entry does not carry.
+/// 6: an edge row grew a `quote` field. A file's own `dankg:depends`
+///    markers and `deps=`/`xdeps=` became edges too. An entry written
+///    before them decodes to a node set that is right and an edge set
+///    that is short.
+const VERSION: u32 = 6;
 /// Separates the items of a list field. `escape` guarantees it never survives
 /// inside one, so splitting on it is exact.
 const UNIT: char = '\u{1f}';
@@ -277,6 +286,7 @@ fn encode(stamp: &Stamp, file: &ParsedFile, diags: &[Diagnostic]) -> String {
                 edge.kind.as_str().to_string(),
                 edge.line.to_string(),
                 flag(edge.reciprocated),
+                escape(&edge.quote),
             ],
         );
     }
@@ -388,12 +398,13 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
                 resolved: unflag(f[11])?,
                 kind: NodeKind::parse(f[12])?,
             }),
-            "edge" if f.len() == 7 => containment.push(Edge {
+            "edge" if f.len() == 8 => containment.push(Edge {
                 from: NodeId::new(unescape(f[0]), unescape(f[1])),
                 to: NodeId::new(unescape(f[2]), unescape(f[3])),
                 kind: EdgeKind::parse(f[4])?,
                 line: f[5].parse().ok()?,
                 reciprocated: unflag(f[6])?,
+                quote: unescape(f[7]),
             }),
             "link" if f.len() == 5 => links.push(RawLink {
                 from: NodeId::new(unescape(f[0]), unescape(f[1])),

@@ -276,7 +276,7 @@ already chose.
    The marker below pins that, so a third bump landing first trips
    `dankg check` rather than leaving the number here to rot.
 
-<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 5;" -->
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 6;" -->
 
 ## Critical files
 

@@ -77,6 +77,17 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
             // has relation nodes to look at.
             (EdgeKind::Produces | EdgeKind::Reads, true) => "---",
             (EdgeKind::Produces | EdgeKind::Reads, false) => "-->",
+            // A prose dependency renders dotted. `check` already treats
+            // one as advisory where it treats an unresolved link as
+            // fatal (decision 32), and that is the distinction a reader
+            // scanning the drawn graph most needs back.
+            (EdgeKind::Depends, true) => "-.-",
+            (EdgeKind::Depends, false) => "-.->",
+            // An eval chain renders like an ordinary reference for now,
+            // the same deferral `Produces`/`Reads` got above and for the
+            // same reason: no corpus has drawn one yet.
+            (EdgeKind::EvalChain, true) => "---",
+            (EdgeKind::EvalChain, false) => "-->",
         };
         let _ = writeln!(out, "    {from} {arrow} {to}");
     }

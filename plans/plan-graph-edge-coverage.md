@@ -209,14 +209,18 @@ feature has to argue for reopening a closed phase.
    collisions* excludes that particular pair from its report on purpose,
    since a block can never reorder ahead of the heading containing it.
 
-4. Settled by events rather than by argument.
+4. **Settled by events rather than by argument, and now landed.**
    `plans/plan-label-resolution.md` shipped first and took two bumps of
    its own: `VERSION` 4 for decision 69, then 5 for decision 76. This
-   plan therefore lands on 6. The marker below pins that, so a third
-   bump landing first trips `dankg check` rather than leaving the number
-   here to rot.
+   plan therefore landed on 6. While it was pending, the marker below
+   pinned the live constant, so a third bump arriving first would trip
+   `dankg check` rather than leave the number here to rot. The bump has
+   now gone in, which makes the claim historical. The marker tracks the
+   version note recording it instead, the same way
+   `plans/plan-label-resolution.md`'s own does, so every later bump no
+   longer trips a plan that already landed.
 
-<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 5;" -->
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="6: an edge row grew a `quote` field" -->
 
 ## What this explicitly does not do
 

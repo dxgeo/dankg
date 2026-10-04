@@ -42,6 +42,7 @@ pub fn resolve(files: &[ParsedFile], diags: &mut Diags) -> Graph {
                     kind: EdgeKind::Link,
                     line: link.line,
                     reciprocated: false,
+                    quote: String::new(),
                 }),
                 Resolution::Dangling(node) => {
                     let id = node.id.clone();
@@ -54,6 +55,7 @@ pub fn resolve(files: &[ParsedFile], diags: &mut Diags) -> Graph {
                         kind: EdgeKind::Link,
                         line: link.line,
                         reciprocated: false,
+                        quote: String::new(),
                     });
                 }
                 Resolution::Refused => {}
@@ -119,6 +121,7 @@ fn resolve_file_reads(files: &[ParsedFile], graph: &mut Graph) {
                     kind: EdgeKind::Reads,
                     line: read.line,
                     reciprocated: false,
+                    quote: String::new(),
                 });
             }
         }
