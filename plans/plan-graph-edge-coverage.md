@@ -158,17 +158,57 @@ feature has to argue for reopening a closed phase.
 
 ## Open questions
 
-1. Whether a prose-dependency edge costs a hop against `--depth`, or
-   enters free the way a relation does (decision 38). A marker is more
-   like an attribute of the section declaring it than a hop a reader
-   clicks through, which argues for free. Decision 38's own warning
-   applies too: free in both directions collapses distance.
-2. Whether the quote itself renders on the edge, or only in `check`'s
-   report. A drawn graph has no room for a sentence. A JSON dump has
-   room for all of it.
-3. Whether a marker that resolves to a *block* rather than a heading is
-   legal. `resolve_target` finds a heading. `find_slug` searches blocks
-   too.
+1. **Settled: the ordinary hop, the same as a `Link`.** The argument
+   for free was that a marker reads more like an attribute of the
+   section declaring it. Decision 38 cannot express that here. Its free
+   pass is keyed on the node kind at the far end. `zero_cost_relations`
+   admits a `Relation` or an `Artifact` and nothing else. Those two sit
+   *between* two blocks. Entry is free for that reason, while the
+   ordinary scan still charges for leaving. A prose dependency joins two
+   headings directly. No second step exists to charge for. Free to enter
+   therefore means free outright. Headings also edge to other headings
+   this way, which turns a deliberately single pass into a fixed point
+   over every marker in the corpus. `--depth 0` would then draw most of
+   a corpus this size. Decision 32's own distinction from a link is
+   about policy, never about distance.
+
+   Depth-0 visibility is still reachable, by decision 76's own move. A
+   marker takes its own node kind. It then sits between the two sections
+   the way an artifact sits between two blocks. Free entry works by
+   construction. The quote gains a node to live on. That is a larger
+   change than this plan. It waits for a reader who wants it.
+
+2. **Settled: `--format json` only.** Neither drawn backend labels an
+   edge at all today. Mermaid picks an arrow string per kind. Dot picks
+   a color and a weight. A quote would be a new mechanism in both rather
+   than an extension of one. The field rides on `Edge` itself, following
+   `line`'s own precedent there: a field that means something for one
+   kind and nothing for the rest, documented as such.
+
+   This bumps `render/json.md`'s own `SCHEMA_VERSION` to 3. The new edge
+   kinds require that bump on their own regardless. Version 2 was bumped
+   for the exactly analogous reason, a node gaining its `kind`. That is
+   a third version number to keep in step with this plan's cache bump,
+   not a consequence of the quote alone.
+
+3. **Settled: already legal. Nothing needs widening.**
+   `resolve_target` narrows nothing. It builds a `NodeId` out of the
+   path and `slugify(fragment)`. `check_cmd` looks that up in
+   `index_graph`, which carries block nodes. `slugify` keeps `_`.
+   Verified against the real binary on a scratch corpus. A marker
+   reading `target=#seed` resolved to the block node. `verify` then ran
+   against that block's own line range: a quote present in it fresh, a
+   quote absent from it stale.
+
+   Two things fall out. A heading's own `section_text` already spans the
+   blocks it contains. Targeting a heading therefore already verifies a
+   quote living inside one. Targeting the block buys precision rather
+   than reach. A bare `#name` is also order-dependent whenever a block
+   and a heading collide on it. The same probe gave a heading `tests`
+   and its own `name=tests` block `tests-1`, by document order. *Title
+   collisions* excludes that particular pair from its report on purpose,
+   since a block can never reorder ahead of the heading containing it.
+
 4. Settled by events rather than by argument.
    `plans/plan-label-resolution.md` shipped first and took two bumps of
    its own: `VERSION` 4 for decision 69, then 5 for decision 76. This
@@ -202,6 +242,8 @@ feature has to argue for reopening a closed phase.
   in favour of the graph.
 - `src/render/dot.md` / `mermaid.md` / `html.md` -- a look for each new
   kind, the way a block node already has one.
+- `src/render/json.md` -- a prose dependency's own `quote` on the edge,
+  and `SCHEMA_VERSION` to 3 (open question 2).
 - `architecture.md` -- the decisions, *Open questions* updated where it
   defers this, and a milestone number for weave.
 
