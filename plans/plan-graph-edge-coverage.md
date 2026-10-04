@@ -7,14 +7,14 @@ a bug. The question asked was whether dankg is the best implementation
 of what it is for. Most of the answer is yes. One part is not. That part
 is measurable.
 
-`dankg graph .` on this repo reports 928 containment edges against 72
+`dankg graph .` on this repo reports 943 containment edges against 72
 link edges. Containment is the document outline, which any markdown
 parser derives for free. The 72 link edges are the whole of what the
 graph knows about authored cross-reference. The marker below pins that
 count against the block that measures it. The next drift therefore
 trips `dankg check` rather than sitting here unnoticed.
 
-<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="928 Contains edges against 72 Link edges" -->
+<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="943 Contains edges against 72 Link edges" -->
 
 The same corpus carries over 250 `dankg:depends` markers. `dankg check`
 prints the exact count on every run. No exact number is typed here for
@@ -213,12 +213,12 @@ feature has to argue for reopening a closed phase.
    `plans/plan-label-resolution.md` shipped first and took two bumps of
    its own: `VERSION` 4 for decision 69, then 5 for decision 76. This
    plan therefore landed on 6. While it was pending, the marker below
-   pinned the live constant, so a third bump arriving first would trip
+   pinned the live constant. A third bump arriving first would then trip
    `dankg check` rather than leave the number here to rot. The bump has
    now gone in, which makes the claim historical. The marker tracks the
    version note recording it instead, the same way
-   `plans/plan-label-resolution.md`'s own does, so every later bump no
-   longer trips a plan that already landed.
+   `plans/plan-label-resolution.md`'s own does. Every later bump
+   therefore stops re-tripping a plan that already landed.
 
 <!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="6: an edge row grew a `quote` field" -->
 

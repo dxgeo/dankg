@@ -630,7 +630,9 @@ struct Node {
 
 // Produces/Reads are inferred, never authored: a db= block's own
 // recorded provenance, and the file a produces=file: block writes.
-enum EdgeKind { Contains, Link, Produces, Reads }
+// Depends/EvalChain are derived rather than written too: a
+// dankg:depends marker, and a deps=/xdeps= eval plan already resolves.
+enum EdgeKind { Contains, Link, Produces, Reads, Depends, EvalChain }
 
 struct Edge {
     from: NodeId,
@@ -3800,10 +3802,11 @@ database, not to whichever file's block happened to name it first.
 
 <!-- dankg:depends target=#slugs-and-node-identity quote="`NodeId` is `<file path relative to root, extension stripped>#<slug>`." -->
 
-Two new edge kinds join `Contains` and `Link`:
+Two new edge kinds join `Contains` and `Link` here. `Depends` and
+`EvalChain` came later again, under *Prose dependencies*:
 
 ```rust
-enum EdgeKind { Contains, Link, Produces, Reads }
+enum EdgeKind { Contains, Link, Produces, Reads, Depends, EvalChain }
 ```
 
 `Produces` runs from the block's node to the relation. `Reads` runs
@@ -4935,7 +4938,7 @@ echo "$contains Contains edges against $link Link edges"
 <!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
 
 ```
-928 Contains edges against 72 Link edges
+943 Contains edges against 72 Link edges
 ```
 
 # Open questions
@@ -4950,11 +4953,15 @@ echo "$contains Contains edges against $link Link edges"
   get a compile-check: see *Tangle*'s own *Open questions*.
 - Should `dankg:depends` (decision 32) ever become a graph edge -- drawn
   in `dot`/`mermaid`/`html`, given its own cache schema bump -- rather
-  than a `check`-only report? Deferred on purpose until a real corpus
-  wants to *see* a prose dependency, not just be warned about one. A
-  marker that never resolves would need a placeholder-node treatment
-  much like a dangling link's own (decision 8), which is one more reason
-  this was left for a real need rather than spun up speculatively.
+  than a `check`-only report? Answered yes, and underway:
+  `plans/plan-graph-edge-coverage.md` argues the deferral's own stated
+  trigger has fired, since the corpus now carries over 250 markers. That
+  plan settles the three questions that touch the code -- the ordinary
+  hop against `--depth`, the quote on `--format json` alone, and a block
+  target already legal. `EdgeKind::Depends` and `EdgeKind::EvalChain`
+  exist and round-trip through the cache at `VERSION` 6. Nothing creates
+  one yet. This entry stays a question until `graph::build` does, and
+  becomes a decision then.
 - Should a marker ever be allowed more than one `quote=`, for a section
   that leans on several claims from the same target at once? Today a
   section wanting that writes several markers. Whether that is a real

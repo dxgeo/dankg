@@ -79,7 +79,7 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
             (EdgeKind::Produces | EdgeKind::Reads, false) => "-->",
             // A prose dependency renders dotted. `check` already treats
             // one as advisory where it treats an unresolved link as
-            // fatal (decision 32), and that is the distinction a reader
+            // fatal (decision 32). That is the distinction a reader
             // scanning the drawn graph most needs back.
             (EdgeKind::Depends, true) => "-.-",
             (EdgeKind::Depends, false) => "-.->",

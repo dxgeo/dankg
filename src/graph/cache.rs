@@ -30,10 +30,10 @@ use std::path::{Path, PathBuf};
 const MAGIC: &str = "!dankg-cache";
 /// Bumped whenever the record format changes, or whenever the same bytes
 /// would now build different nodes. An entry from another version is a miss,
-/// not an error. Each note below opens on its own line on purpose: a
+/// not an error. Each note below opens on its own line on purpose. A
 /// `dankg:depends` quote is matched after whitespace normalization, which
 /// leaves a `///` prefix standing in the middle of any quote spanning a
-/// line break, so a one-line note is the only kind a plan can pin.
+/// line break. A one-line note is therefore the only kind a plan can pin.
 /// 2: a node row grew a `kind` field (block nodes).
 /// 3: a declared frontmatter `title` became the file's own top-level node
 ///    (decision 62), so an unchanged file's node set changed underneath

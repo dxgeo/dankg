@@ -64,9 +64,9 @@ pub enum EdgeKind {
     /// marker names (decision 32). Derived from the marker rather than
     /// written as a link, and advisory for `check`'s own exit code
     /// whatever the graph does with it. Costs the ordinary hop against
-    /// `--depth`, unlike `Produces`/`Reads`: decision 38's free entry
-    /// is keyed on the node kind at the far end, and this one lands on
-    /// an ordinary heading or block rather than on a relation sitting
+    /// `--depth`, unlike `Produces`/`Reads`. Decision 38's free entry is
+    /// keyed on the node kind at the far end. This one lands on an
+    /// ordinary heading or block rather than on a relation sitting
     /// between two of them.
     Depends,
     /// Block to block, over a `deps=` or an `xdeps=`. One kind for
