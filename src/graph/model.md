@@ -126,7 +126,7 @@ impl EdgeKind {
 /// the whole point of decision 69. Its slug shares one namespace with
 /// every heading and block name in its file, so a reference written
 /// `[[#quarterly]]` resolves against it with no namespace spelled out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeKind {
     Heading,
     Block,
@@ -153,6 +153,13 @@ impl NodeKind {
             _ => None,
         }
     }
+
+    /// Every kind, in declaration order. The TUI's filter menu offers
+    /// one entry per kind and reads them from here. A fifth kind added
+    /// above therefore reaches that menu with no second list to
+    /// update.
+    pub const ALL: [NodeKind; 4] =
+        [NodeKind::Heading, NodeKind::Block, NodeKind::Artifact, NodeKind::Relation];
 }
 ```
 

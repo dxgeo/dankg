@@ -128,7 +128,7 @@ Keys:
 - `tab` — toggle focus between the tree and the cross-reference panel (previews the hovered link before you commit to it)
 - `enter` — open the selected node in your configured `[editor] command` (or jump to a focused panel link)
 - `/` — jump to a node by title, anywhere in the corpus; `n`/`N` repeat it forward/backward
-- `f` — open the filter menu (all, blocks, eval-chain, file-artifact, plus any `kind=` a `dankg:tag` marker has actually set anywhere in the corpus); `enter` applies it, `esc` cancels
+- `f` — open the filter menu (all; one entry per node kind — heading, block, artifact, relation; then eval-chain, depends, file-artifact; then any `kind=` a `dankg:tag` marker has actually set anywhere in the corpus); `enter` applies it, `esc` cancels. The relation entry keeps whatever *touches* a relation, since a relation is corpus-wide and never a tree row of its own
 - `t` — tag the selected node: pick from every declared `[kind.*]`, or press `n` to declare a new one (name, then an optional icon); re-tagging overwrites. Refused for a node marked `∅` (see below) a relation, or a produced artifact — none of the three has a real place to attach a marker, since an artifact's own line belongs to the block that writes it
 - `e` then `enter` — cycle and run a node's named code blocks in place
 - `r` — reset
