@@ -4915,6 +4915,28 @@ in the act again.
 <!-- dankg:depends target=plans/tui-tmux-pane-plan.md#tui-editor-handoff-a-tmux-pane-not-a-context-switch quote="hand the same resolved editor command to a new,
 side-by-side pane instead" -->
 
+14. \[DONE\] `dankg weave` (`src/weave.md`, `src/render/typst.md`,
+    `src/render/html.md`). Typesetting one file as a document, the
+    corollary decision 25 named when it defined tangle "as opposed to
+    *weaving* them into typeset documentation". Numbered here, late and
+    retroactively, for a reason worth recording: weave grew as a
+    continuous stream rather than a phase. Decisions 41 through 68 are
+    almost all weave, and none of them closed anything. Every other
+    subsystem above is a numbered phase with a point at which it was
+    declared done. Weave had no such point. Each new feature was
+    therefore an addition to an open stream rather than a reopening of
+    a closed phase.
+
+    `DONE` here is a scope fence, not a claim that weave is finished in
+    some absolute sense. The feature set it closes over is
+    the one *Open questions (Weave)* already fences: corpus-wide weave
+    out of scope, no list of figures, no HTML syntax highlighting, one
+    artifact per block. Nothing about the code changes by writing this
+    down. What changes is that the next weave feature has to argue for
+    reopening a closed phase, the same argument every other subsystem
+    here already owes. `plans/plan-graph-edge-coverage.md`'s own
+    *Scope* section is where the reasoning was worked out.
+
 ## `dankg init`
 
 Every other command reads a corpus that already exists. `init` is
