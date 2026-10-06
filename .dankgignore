@@ -22,3 +22,12 @@
 # literate/hash.md's own config comment). Left excluded here for the same
 # reason, now from the other direction.
 /literate/
+
+# Agent/contributor operating notes, and `/CLAUDE.md` in `.gitignore`:
+# deliberately not committed, so deliberately not part of the corpus
+# either. Those two exclusions have to agree. While they disagreed, this
+# root's own node and edge counts were developer-local -- present on a
+# machine that had the file, absent on a clean checkout -- which quietly
+# made every corpus-wide measurement unreproducible. *Self-hosted corpus
+# stats* was reading nine containment edges that CI could never see.
+/CLAUDE.md

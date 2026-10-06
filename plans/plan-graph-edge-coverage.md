@@ -18,7 +18,7 @@ rather than the one that motivated it: the same block reports 272
 block that measures it. The next drift therefore trips `dankg check`
 rather than sitting here unnoticed.
 
-<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="951 Contains edges against 73 Link, 272 Depends, 0 EvalChain" -->
+<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="942 Contains edges against 73 Link, 272 Depends, 0 EvalChain" -->
 
 The same corpus carries over 250 `dankg:depends` markers. `dankg check`
 prints the exact count on every run. No exact number is typed here for

@@ -5062,7 +5062,13 @@ checks that claim instead of restating a hand count. `dankg eval architecture.md
 writes the current count back below.
 
 It now counts `Depends` as well, which is the whole point of *Prose
-dependencies*. The authored cross-reference this corpus carries was
+dependencies*. The figure it reports was also developer-local until
+`CLAUDE.md` joined `.dankgignore`. That file is in `.gitignore`, so a
+clean checkout never had it. The nine containment edges it contributed
+therefore appeared only on a machine that did. A corpus-derived
+measurement is worth nothing unless the corpus is the same corpus
+everywhere. The CI step added beside this block is what caught the
+difference. The authored cross-reference this corpus carries was
 always there. Until those edges existed, the ratio below measured the
 graph's own blindness rather than the corpus. `EvalChain` is counted
 too and is zero here, because every named block under `src/` is a
@@ -5080,7 +5086,7 @@ echo "$contains Contains edges against $link Link, $depends Depends, $chain Eval
 <!-- dankg:result name=corpus-edge-counts hash=739330e5b06a7148 -->
 
 ```
-951 Contains edges against 73 Link, 272 Depends, 0 EvalChain
+942 Contains edges against 73 Link, 272 Depends, 0 EvalChain
 ```
 
 # Open questions
