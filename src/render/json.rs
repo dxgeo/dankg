@@ -16,7 +16,11 @@ use std::fmt::Write as _;
 /// 2: a node now carries `kind` (`"heading"` or `"block"`). A named
 /// top-level code block is now its own node, not invisible content inside
 /// its heading's line range.
-pub const SCHEMA_VERSION: u32 = 2;
+/// 3: two new edge kinds, `"depends"` and `"eval-chain"`, and a `quote`
+/// field on an edge that has one. The field is omitted rather than
+/// written empty, because only a `"depends"` edge ever carries one and
+/// this dump is meant to be committed and diffed.
+pub const SCHEMA_VERSION: u32 = 3;
 
 pub fn render(graph: &Graph) -> String {
     let mut out = String::new();
@@ -34,13 +38,20 @@ pub fn render(graph: &Graph) -> String {
     for (i, edge) in graph.edges.iter().enumerate() {
         let _ = write!(
             out,
-            "    {{\"from\": {}, \"to\": {}, \"kind\": {}, \"line\": {}, \"reciprocated\": {}}}",
+            "    {{\"from\": {}, \"to\": {}, \"kind\": {}, \"line\": {}, \"reciprocated\": {}",
             string(&edge.from.to_string()),
             string(&edge.to.to_string()),
             string(edge.kind.as_str()),
             edge.line,
             edge.reciprocated
         );
+        // Only a `Depends` edge carries one, so writing `"quote": ""` on
+        // the other thousand would be noise in a dump meant to be
+        // committed and diffed.
+        if !edge.quote.is_empty() {
+            let _ = write!(out, ", \"quote\": {}", string(&edge.quote));
+        }
+        out.push('}');
         out.push_str(if i + 1 < graph.edges.len() { ",\n" } else { "\n" });
     }
     out.push_str("  ]\n}\n");
@@ -138,6 +149,25 @@ mod tests {
     }
 
     #[test]
+    fn a_depends_edge_carries_its_quote_and_other_kinds_omit_the_field() {
+        let mut g = sample();
+        g.edges.push(Edge {
+            from: NodeId::new("a", "one"),
+            to: NodeId::new("a", "two"),
+            kind: EdgeKind::Depends,
+            line: 9,
+            reciprocated: false,
+            quote: "a \"claim\"".into(),
+        });
+        let out = render(&g);
+        assert!(out.contains("\"kind\": \"depends\""), "{out}");
+        assert!(out.contains("\"quote\": \"a \\\"claim\\\"\""), "escaped like any string: {out}");
+        // The `Link` edge `sample` already carries must not gain an empty
+        // one. This dump is committed and diffed.
+        assert_eq!(out.matches("\"quote\"").count(), 1, "{out}");
+    }
+
+    #[test]
     fn escapes_quotes_and_controls() {
         assert_eq!(string("a\"b"), "\"a\\\"b\"");
         assert_eq!(string("a\nb"), "\"a\\nb\"");
@@ -147,7 +177,7 @@ mod tests {
     #[test]
     fn renders_expected_shape() {
         let out = render(&sample());
-        assert!(out.contains("\"version\": 2"));
+        assert!(out.contains("\"version\": 3"));
         assert!(out.contains("\"id\": \"a#one\""));
         assert!(out.contains("\"title\": \"One \\\"quoted\\\"\""));
         assert!(out.contains("\"parent\": null"));
@@ -161,6 +191,6 @@ mod tests {
     #[test]
     fn empty_graph_is_still_valid_json() {
         let out = render(&Graph::default());
-        assert_eq!(out, "{\n  \"version\": 2,\n  \"nodes\": [\n  ],\n  \"edges\": [\n  ]\n}\n");
+        assert_eq!(out, "{\n  \"version\": 3,\n  \"nodes\": [\n  ],\n  \"edges\": [\n  ]\n}\n");
     }
 }

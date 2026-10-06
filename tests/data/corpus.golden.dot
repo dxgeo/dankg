@@ -5,24 +5,36 @@ digraph dankg {
   node [shape=box, style="rounded,filled", fillcolor="#ffffff", color="#3c3c3c", fontname="Helvetica", fontsize=11];
   edge [color="#707070", arrowsize=0.7];
 
-  "notes/ideas#ideas" [label="Ideas", pos="84,242!", width=1.00, height=0.50, tooltip="notes/ideas.md:4"];
-  "orphan#orphan" [label="orphan", pos="186,242!", width=1.06, height=0.50, tooltip="orphan.md:1"];
-  "project#dankg" [label="DanKG", pos="288,242!", width=1.00, height=0.50, tooltip="project.md:1"];
-  "project#overview" [label="Overview", pos="161,142!", width=1.28, height=0.50, tooltip="project.md:5"];
-  "project#code-eval" [label="Code Eval", pos="310,142!", width=1.39, height=0.50, tooltip="project.md:14"];
-  "notes/ideas#future" [label="Future", pos="62,42!", width=1.06, height=0.50, tooltip="notes/ideas.md:8"];
-  "project#constraints" [label="Constraints", pos="186,42!", width=1.61, height=0.50, tooltip="project.md:10"];
-  "nowhere#lost" [label="lost", pos="310,42!", width=1.00, height=0.50, style="rounded,dashed", color="#a0a0a0", fontcolor="#a0a0a0", tooltip="nowhere#lost (unresolved)"];
+  "notes/ideas#ideas" [label="Ideas", pos="115,542!", width=1.00, height=0.50, tooltip="notes/ideas.md:4"];
+  "orphan#orphan" [label="orphan", pos="217,542!", width=1.06, height=0.50, tooltip="orphan.md:1"];
+  "project#dankg" [label="DanKG", pos="319,542!", width=1.00, height=0.50, tooltip="project.md:1"];
+  "project#overview" [label="Overview", pos="166,442!", width=1.28, height=0.50, tooltip="project.md:5"];
+  "project#code-eval" [label="Code Eval", pos="386,442!", width=1.39, height=0.50, tooltip="project.md:24"];
+  "notes/ideas#future" [label="Future", pos="62,342!", width=1.06, height=0.50, tooltip="notes/ideas.md:8"];
+  "project#constraints" [label="Constraints", pos="186,342!", width=1.61, height=0.50, tooltip="project.md:10"];
+  "nowhere#lost" [label="lost", pos="308,342!", width=1.00, height=0.50, style="rounded,dashed", color="#a0a0a0", fontcolor="#a0a0a0", tooltip="nowhere#lost (unresolved)"];
+  "notes/ideas#summary" [label="summary", pos="141,242!", width=1.17, height=0.50, fillcolor="#eef2ff", fontname="Menlo", tooltip="notes/ideas.md:13"];
+  "project#never-written" [label="never written", pos="277,242!", width=1.83, height=0.50, style="rounded,dashed", color="#a0a0a0", fontcolor="#a0a0a0", tooltip="project#never-written (unresolved)"];
+  "project#report" [label="report", pos="370,142!", width=1.06, height=0.50, fillcolor="#eef2ff", fontname="Menlo", tooltip="project.md:34"];
+  "project#setup" [label="setup", pos="435,42!", width=1.00, height=0.50, fillcolor="#eef2ff", fontname="Menlo", tooltip="project.md:30"];
   { rank=same; "notes/ideas#ideas"; "orphan#orphan"; "project#dankg"; }
   { rank=same; "project#overview"; "project#code-eval"; }
   { rank=same; "notes/ideas#future"; "project#constraints"; "nowhere#lost"; }
+  { rank=same; "notes/ideas#summary"; "project#never-written"; }
 
+  "notes/ideas#future" -> "notes/ideas#summary" [weight=2, color="#c0c0c0"];
   "notes/ideas#ideas" -> "notes/ideas#future" [weight=2, color="#c0c0c0"];
   "notes/ideas#ideas" -> "project#overview" [dir=none];
+  "notes/ideas#summary" -> "project#report" [color="#3f7f5f", arrowhead=vee];
   "project#code-eval" -> "nowhere#lost";
+  "project#code-eval" -> "project#report" [weight=2, color="#c0c0c0"];
+  "project#code-eval" -> "project#setup" [weight=2, color="#c0c0c0"];
+  "project#constraints" -> "project#never-written" [style=dashed, color="#8a6fbf"];
+  "project#constraints" -> "project#overview" [style=dashed, color="#8a6fbf"];
   "project#dankg" -> "project#code-eval" [weight=2, color="#c0c0c0"];
   "project#dankg" -> "project#overview" [weight=2, color="#c0c0c0"];
   "project#overview" -> "notes/ideas#future";
   "project#overview" -> "project#constraints" [weight=2, color="#c0c0c0"];
   "project#overview" -> "project#constraints" [dir=none];
+  "project#report" -> "project#setup" [color="#3f7f5f", arrowhead=vee];
 }

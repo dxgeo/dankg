@@ -8,6 +8,7 @@
 
 use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
 use super::slug::{slugify, usable_slug, Slugger};
+use crate::depends;
 use crate::diag::Diags;
 use crate::eval::plan;
 use crate::eval::result::recorded_provenance;
@@ -54,6 +55,43 @@ pub struct RawRead {
     pub line: u32,
 }
 
+/// A `dankg:depends` marker as written, before its target is known to
+/// exist. `RawLink`'s own shape again, recorded here for the same reason
+/// a link is: the section a marker names can live in a file this pass has
+/// not read yet, so [`super::resolve`] owns the match.
+///
+/// The marker's own `quote=` rides along because the edge it becomes
+/// carries it (`Edge::quote`). Nothing here verifies it. `dankg check`
+/// stays the only thing that compares a quote against its target's text,
+/// and stays advisory about the answer (decision 32).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawDepends {
+    /// The section that declared it -- the innermost heading open at the
+    /// marker's own line.
+    pub from: NodeId,
+    /// The `target=` exactly as written, resolved relative to `from`'s
+    /// own file by `depends::resolve_target`.
+    pub target: String,
+    pub quote: String,
+    pub line: u32,
+}
+
+/// A `deps=` or an `xdeps=` entry as written, one record per entry. One
+/// shape for both, because `eval::plan::resolve_dep` already resolves the
+/// two identically and nothing downstream has asked to tell them apart.
+///
+/// Cross-file by construction (`path#name`), which is what forces the
+/// same deferral to [`super::resolve`] a link and a `reads=file:` already
+/// take.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawDep {
+    /// The block that declared it.
+    pub from: NodeId,
+    /// The entry as written: `name`, or `path#name` for a cross-file one.
+    pub target: String,
+    pub line: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedFile {
     /// Path as it appears on disk.
@@ -65,6 +103,10 @@ pub struct ParsedFile {
     pub links: Vec<RawLink>,
     /// Every `reads=file:` this file declares, unmatched (decision 76).
     pub reads: Vec<RawRead>,
+    /// Every `dankg:depends` marker this file declares, unresolved.
+    pub depends: Vec<RawDepends>,
+    /// Every `deps=`/`xdeps=` entry this file's blocks declare, unresolved.
+    pub deps: Vec<RawDep>,
     /// Alternate names this file answers to when resolving wikilinks.
     pub aliases: Vec<String>,
 }
@@ -86,6 +128,8 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
     let mut containment: Vec<Edge> = Vec::new();
     let mut links: Vec<RawLink> = Vec::new();
     let mut reads: Vec<RawRead> = Vec::new();
+    let mut depends: Vec<RawDepends> = Vec::new();
+    let mut deps: Vec<RawDep> = Vec::new();
     // Heading levels seen so far, as (level, id), innermost last.
     let mut stack: Vec<(u8, NodeId)> = Vec::new();
     let mut current: Option<NodeId> = None;
@@ -106,6 +150,8 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                      containment: &mut Vec<Edge>,
                      links: &mut Vec<RawLink>,
                      reads: &mut Vec<RawRead>,
+                     depends: &mut Vec<RawDepends>,
+                     deps: &mut Vec<RawDep>,
                      stack: &mut Vec<(u8, NodeId)>,
                      current: &mut Option<NodeId>| {
         match block {
@@ -263,6 +309,20 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                     });
                 }
 
+                // A block's own eval chain, recorded as written for the
+                // same reason the `reads=` above is: `name` alone means a
+                // block in this file, and `path#name` means one in a file
+                // this pass may not have reached. One list, both
+                // attributes, since `plan::resolve_dep` makes no
+                // distinction and neither does the edge.
+                for target in info.deps().into_iter().chain(info.xdeps()) {
+                    deps.push(RawDep {
+                        from: block_id.clone(),
+                        target: target.to_string(),
+                        line: *line,
+                    });
+                }
+
                 // Provenance without a driver: a db= block's own
                 // inferred Produces/Reads (decision 36's write-back),
                 // materialized the moment its result marker names any.
@@ -311,6 +371,34 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
                     }
                 }
             }
+            // A `dankg:depends` marker, attributed to whichever heading
+            // is open at its own line -- the section that declares it.
+            //
+            // Scoped to top-level blocks, matching `depends::markers_in`
+            // exactly. A marker inside a list item is found by neither,
+            // so the graph and `dankg check` can never disagree about
+            // which markers exist. Widening both at once is a separate
+            // change with its own reason to happen.
+            Block::Passthrough { text, line } if top_level => {
+                for (i, l) in text.lines().enumerate() {
+                    let Some((target, quote)) = depends::parse_marker(l) else { continue };
+                    let owner = match current.clone() {
+                        Some(id) => id,
+                        None => {
+                            let id = file_node(&key, path, doc, nodes, &tags, &mut slugger);
+                            *current = Some(id.clone());
+                            stack.push((0, id.clone()));
+                            id
+                        }
+                    };
+                    depends.push(RawDepends {
+                        from: owner,
+                        target,
+                        quote,
+                        line: *line + i as u32,
+                    });
+                }
+            }
             // A link in a table cell is still a link. Rows are contiguous
             // source lines with no gaps (a table stops at the first blank
             // line, `md/block.rs`'s own `gather_table`), so a row's real
@@ -349,6 +437,8 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
             &mut containment,
             &mut links,
             &mut reads,
+            &mut depends,
+            &mut deps,
             &mut stack,
             &mut current,
         );
@@ -361,7 +451,7 @@ pub fn build(path: &str, doc: &Document, line_count: u32, diags: &mut Diags) -> 
 
     set_extents(&mut nodes, line_count);
 
-    ParsedFile { path: path.to_string(), key, nodes, containment, links, reads, aliases }
+    ParsedFile { path: path.to_string(), key, nodes, containment, links, reads, depends, deps, aliases }
 }
 
 /// Create the synthetic file-level node, titled from frontmatter or the file
@@ -1222,5 +1312,59 @@ mod tests {
             "```sql db=warehouse name=setup\n:\n```\n\n<!-- dankg:result name=setup hash=0000000000000001 produces=orders -->\n\n```\nok\n```\n\n```sql db=warehouse name=report\n:\n```\n\n<!-- dankg:result name=report hash=0000000000000001 reads=orders -->\n\n```\nok\n```\n",
         );
         assert_eq!(f.nodes.iter().filter(|n| n.kind == NodeKind::Relation).count(), 1);
+    }
+
+    #[test]
+    fn a_marker_is_attributed_to_the_innermost_open_heading() {
+        let f = build_src(
+            "a.md",
+            "# One\n\n## Inner\n\n<!-- dankg:depends target=b.md#two quote=\"claim\" -->\n",
+        );
+        assert_eq!(f.depends.len(), 1);
+        assert_eq!(f.depends[0].from, NodeId::new("a", "inner"));
+        assert_eq!(f.depends[0].target, "b.md#two");
+        assert_eq!(f.depends[0].quote, "claim");
+        assert_eq!(f.depends[0].line, 5);
+    }
+
+    /// A marker before any heading has no section to belong to, so it
+    /// takes the file-level node the same way a stray link already does.
+    #[test]
+    fn a_marker_above_every_heading_belongs_to_the_file_node() {
+        let f = build_src("a.md", "<!-- dankg:depends target=b.md#two quote=\"q\" -->\n\n# One\n");
+        assert_eq!(f.depends[0].from, NodeId::new("a", "a"));
+    }
+
+    /// `depends::markers_in` scans top-level blocks only, so `check` never
+    /// sees one here. The graph must not either, or the two would report
+    /// different corpora.
+    #[test]
+    fn a_marker_inside_a_list_item_is_not_recorded() {
+        let f = build_src(
+            "a.md",
+            "# One\n\n- item\n\n  <!-- dankg:depends target=b.md#two quote=\"q\" -->\n",
+        );
+        assert!(f.depends.is_empty(), "{:?}", f.depends);
+        assert!(crate::depends::markers_in(&parse(
+            "# One\n\n- item\n\n  <!-- dankg:depends target=b.md#two quote=\"q\" -->\n"
+        ))
+        .is_empty());
+    }
+
+    #[test]
+    fn a_deps_and_an_xdeps_are_recorded_as_written_in_one_list() {
+        let f = build_src(
+            "a.md",
+            "# One\n\n```python name=report deps=setup,other xdeps=../c.md#far\npass\n```\n",
+        );
+        let targets: Vec<&str> = f.deps.iter().map(|d| d.target.as_str()).collect();
+        assert_eq!(targets, vec!["setup", "other", "../c.md#far"]);
+        assert!(f.deps.iter().all(|d| d.from == NodeId::new("a", "report")));
+    }
+
+    #[test]
+    fn an_unnamed_block_declares_no_eval_chain() {
+        let f = build_src("a.md", "# One\n\n```python deps=setup\npass\n```\n");
+        assert!(f.deps.is_empty(), "there is no block node to hang one on");
     }
 }

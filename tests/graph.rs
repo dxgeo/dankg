@@ -7,7 +7,7 @@
 
 use dankg::diag::Diags;
 use dankg::graph::build::{self, ParsedFile};
-use dankg::graph::{resolve, EdgeKind, Graph, NodeId};
+use dankg::graph::{resolve, EdgeKind, Graph, NodeId, NodeKind};
 use dankg::md::Document;
 use dankg::render::json;
 use std::fs;
@@ -88,10 +88,21 @@ fn containment_follows_document_structure() {
 
     assert!(contains.contains(&("project#overview".into(), "project#constraints".into())));
     assert!(contains.contains(&("notes/ideas#ideas".into(), "notes/ideas#future".into())));
-    assert!(
-        !contains.iter().any(|(f, _)| f == "project#code-eval"),
-        "Code Eval has no subheadings"
-    );
+
+    // "no subheadings" is the claim, so the check is scoped to headings.
+    // Code Eval does contain two named blocks, and a block node is not a
+    // subheading. An unscoped filter conflated the two.
+    let heading_children: Vec<&str> = contains
+        .iter()
+        .filter(|(f, _)| f == "project#code-eval")
+        .filter(|(_, t)| {
+            graph
+                .node(&NodeId::new("project", t.split('#').nth(1).unwrap_or_default()))
+                .is_some_and(|n| n.kind == NodeKind::Heading)
+        })
+        .map(|(_, t)| t.as_str())
+        .collect();
+    assert!(heading_children.is_empty(), "Code Eval has no subheadings: {heading_children:?}");
 }
 
 #[test]
@@ -160,7 +171,12 @@ fn headingless_file_still_gets_a_node() {
 #[test]
 fn frontmatter_tags_reach_every_node_in_the_file() {
     let (graph, _) = build_corpus();
-    for node in graph.nodes.iter().filter(|n| n.id.file == "project") {
+    // Scoped to resolved nodes. A placeholder is addressed in this file's
+    // namespace but was never written in it, so there is no frontmatter
+    // for it to inherit -- `project#never-written` is invented by the
+    // `dankg:depends` marker that names it, exactly as a dangling link's
+    // own placeholder is.
+    for node in graph.nodes.iter().filter(|n| n.id.file == "project" && n.resolved) {
         assert_eq!(node.tags, vec!["rust".to_string(), "graphs".to_string()], "{}", node.id);
     }
 }

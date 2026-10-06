@@ -64,6 +64,8 @@ pub fn resolve(files: &[ParsedFile], diags: &mut Diags) -> Graph {
     }
 
     resolve_file_reads(files, &mut graph);
+    resolve_depends(files, &mut graph, diags);
+    resolve_eval_chain(files, &mut graph);
 
     graph.reciprocate();
     graph.sort();
@@ -124,6 +126,145 @@ fn resolve_file_reads(files: &[ParsedFile], graph: &mut Graph) {
                     quote: String::new(),
                 });
             }
+        }
+    }
+}
+```
+
+## A prose dependency, and an eval chain
+
+Decision 32's marker becomes an edge here rather than in
+[`graph::build`](build.md), for the reason every other authored relation
+waits: the section a marker names routinely lives in another file. Both
+passes below run after `resolve_file_reads` and before `reciprocate`, so
+a `Depends` edge is reciprocated exactly the way a `Link` already is when
+two sections depend on each other's claims.
+
+A marker resolves through `depends::resolve_target`, which is
+`resolve_path`'s own `join_normalize`/`dir_of` narrowed to the one shape a
+`target=` can take. Reusing it is the point. `dankg check` reports a
+marker against the graph it already built. A marker that `check` called
+resolvable and the graph called dangling would be two answers to one
+question.
+
+The three outcomes are a written link's own. A target escaping the root
+is refused and never graphed. A target naming nothing gets decision 8's
+placeholder, which is what makes an unwritten section a reader already
+depends on visible rather than merely warned about. Everything else is an
+edge carrying the marker's `quote=`.
+
+One difference from a link is deliberate. A dangling link warns through
+`Diags`. `dankg check` then fails on it. A dangling marker warns the
+same way. `check` stays advisory about it, because decision 32 says a
+quoted claim is a weak signal. The warning is the graph's, not a new
+gate.
+
+```rust name=resolve_depends path=graph/resolve.rs
+/// Decision 32's `dankg:depends` marker, as an edge from the section that
+/// declared it to the section it names.
+///
+/// Resolution is `depends::resolve_target`, the same function `check_cmd`
+/// resolves a marker through, so the graph and `dankg check` cannot
+/// disagree about where a marker points. The `quote=` rides onto the edge
+/// here and is never verified: comparing it against the target's own text
+/// is `check`'s job and stays advisory (decision 32).
+fn resolve_depends(files: &[ParsedFile], graph: &mut Graph, diags: &mut Diags) {
+    for file in files {
+        for marker in &file.depends {
+            let Some(to) = crate::depends::resolve_target(&file.path, &marker.target) else {
+                diags.warn_in(
+                    &file.path,
+                    marker.line,
+                    format!("`{}` escapes the root, not followed", marker.target),
+                );
+                continue;
+            };
+
+            // An existing-but-unresolved node is a placeholder some
+            // dangling link already pushed. Reusing it is what keeps one
+            // unwritten section one node, however many references reach
+            // it.
+            if !graph.node(&to).is_some_and(|n| n.resolved) {
+                if !graph.contains(&to) {
+                    diags.warn_in(
+                        &file.path,
+                        marker.line,
+                        format!("depends on `{}`, which names no section", marker.target),
+                    );
+                    let node = placeholder(&to.file, &to.slug, &to.file);
+                    graph.nodes.push(node);
+                }
+            }
+
+            graph.edges.push(Edge {
+                from: marker.from.clone(),
+                to,
+                kind: EdgeKind::Depends,
+                line: marker.line,
+                reciprocated: false,
+                quote: marker.quote.clone(),
+            });
+        }
+    }
+}
+```
+
+An eval chain resolves differently. The difference is worth stating. A
+`deps=` entry names a block *by its declared name*, never by its slug.
+Those two come apart. A block whose name collides with a heading's takes
+a `-1` suffix from the file's own `Slugger`. `slugify(name)` would then
+address the wrong node, or no node at all. Matching on the block node's
+own `title` -- which is exactly the declared name -- is therefore exact
+where a slug lookup is a guess.
+
+This is the one place a marker and a dep part company. Open question 3
+settled that a marker addresses its target by slug and accepts the
+order-dependence, because a `target=` is written as a fragment and a
+reader expects fragment rules. A `deps=` entry was never a fragment.
+
+A dep naming no such block gets no edge and no placeholder.
+`eval::plan::resolve_dep` already refuses to plan that corpus, naming the
+block and the entry. `dankg eval` fails on it. A placeholder here would
+draw a second report of one error. A `dankg check` already failing would
+gain a dangling node it cannot act on.
+
+```rust name=resolve_eval_chain path=graph/resolve.rs
+/// Every `deps=`/`xdeps=` entry, as a block-to-block edge.
+///
+/// Path resolution is `plan::split_dep` plus the same
+/// `join_normalize`/`dir_of` `plan::resolve_dep` uses, so the edge and the
+/// eval plan always agree on which file an entry means. The *name* half
+/// is matched against a block node's own `title` rather than slugified: a
+/// block's declared name and its slug come apart under collision
+/// (`tests` beside a `## Tests` heading becomes `tests-1`), and the
+/// declared name is what `deps=` was written against.
+fn resolve_eval_chain(files: &[ParsedFile], graph: &mut Graph) {
+    for file in files {
+        for dep in &file.deps {
+            let (path_part, name) = crate::eval::plan::split_dep(&dep.target);
+            let key = match path_part {
+                None => file.key.clone(),
+                Some(rel) => {
+                    let Some(joined) = join_normalize(dir_of(&file.path), rel) else { continue };
+                    strip_extension(&joined)
+                }
+            };
+            let Some(to) = graph
+                .nodes
+                .iter()
+                .find(|n| n.kind == NodeKind::Block && n.id.file == key && n.title == name)
+                .map(|n| n.id.clone())
+            else {
+                continue;
+            };
+            graph.edges.push(Edge {
+                from: dep.from.clone(),
+                to,
+                kind: EdgeKind::EvalChain,
+                line: dep.line,
+                reciprocated: false,
+                quote: String::new(),
+            });
         }
     }
 }
@@ -701,6 +842,151 @@ mod tests {
         reversed.reverse();
         let (g2, _) = graph_of(&reversed);
         assert_eq!(g1, g2);
+    }
+
+    fn of_kind(g: &Graph, kind: EdgeKind) -> Vec<(String, String, String)> {
+        g.edges
+            .iter()
+            .filter(|e| e.kind == kind)
+            .map(|e| (e.from.to_string(), e.to.to_string(), e.quote.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_marker_becomes_an_edge_from_the_section_that_declares_it() {
+        let (g, d) = graph_of(&[
+            (
+                "a.md",
+                "# One\n\n## Inner\n\n<!-- dankg:depends target=b.md#two quote=\"a claim\" -->\n",
+            ),
+            ("b.md", "# Two\n\nIt makes a claim here.\n"),
+        ]);
+        // `a#inner`, not `a#one`: the innermost heading open at the
+        // marker's own line is the section that declares it.
+        assert_eq!(
+            of_kind(&g, EdgeKind::Depends),
+            vec![("a#inner".to_string(), "b#two".to_string(), "a claim".to_string())]
+        );
+        assert!(d.is_empty(), "a resolving marker warns about nothing: {:?}", d.items());
+    }
+
+    #[test]
+    fn a_marker_naming_no_section_becomes_a_placeholder_and_warns() {
+        let (g, d) = graph_of(&[(
+            "a.md",
+            "# One\n\n<!-- dankg:depends target=#gone quote=\"x\" -->\n",
+        )]);
+        let target = g.node(&NodeId::new("a", "gone")).expect("placeholder exists");
+        assert!(!target.resolved);
+        assert_eq!(of_kind(&g, EdgeKind::Depends).len(), 1, "the edge is drawn anyway");
+        assert!(d.items()[0].message.contains("names no section"));
+        assert_eq!(d.items()[0].line, 3);
+    }
+
+    #[test]
+    fn a_marker_escaping_the_root_is_refused_not_followed() {
+        let (g, d) = graph_of(&[(
+            "a.md",
+            "# One\n\n<!-- dankg:depends target=../../etc/passwd.md#x quote=\"x\" -->\n",
+        )]);
+        assert!(of_kind(&g, EdgeKind::Depends).is_empty(), "no edge is created");
+        assert!(d.items()[0].message.contains("escapes the root"));
+    }
+
+    #[test]
+    fn one_placeholder_serves_a_dangling_link_and_a_marker_naming_the_same_section() {
+        let (g, _) = graph_of(&[(
+            "a.md",
+            "# One\n\n[go](#gone)\n\n<!-- dankg:depends target=#gone quote=\"x\" -->\n",
+        )]);
+        let placeholders: Vec<_> =
+            g.nodes.iter().filter(|n| n.id == NodeId::new("a", "gone")).collect();
+        assert_eq!(placeholders.len(), 1, "one unwritten section is one node: {placeholders:?}");
+    }
+
+    #[test]
+    fn a_marker_and_a_written_link_between_the_same_sections_stay_two_edges() {
+        let (g, _) = graph_of(&[
+            (
+                "a.md",
+                "# One\n\n[go](b.md#two)\n\n<!-- dankg:depends target=b.md#two quote=\"q\" -->\n",
+            ),
+            ("b.md", "# Two\n"),
+        ]);
+        assert_eq!(links(&g), vec![("a#one".into(), "b#two".into(), false)]);
+        assert_eq!(
+            of_kind(&g, EdgeKind::Depends),
+            vec![("a#one".to_string(), "b#two".to_string(), "q".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_deps_and_an_xdeps_each_become_an_eval_chain_edge() {
+        let (g, d) = graph_of(&[
+            (
+                "a.md",
+                "# One\n\n```python name=setup\nx = 1\n```\n\n```python name=report deps=setup\nprint(x)\n```\n",
+            ),
+            (
+                "notes/b.md",
+                "# Two\n\n```python name=summary xdeps=../a.md#report\npass\n```\n",
+            ),
+        ]);
+        let chain: Vec<(String, String)> = of_kind(&g, EdgeKind::EvalChain)
+            .into_iter()
+            .map(|(f, t, _)| (f, t))
+            .collect();
+        assert!(chain.contains(&("a#report".to_string(), "a#setup".to_string())), "{chain:?}");
+        assert!(
+            chain.contains(&("notes/b#summary".to_string(), "a#report".to_string())),
+            "cross-file, through the same `path#name` form: {chain:?}"
+        );
+        assert_eq!(chain.len(), 2);
+        assert!(d.is_empty(), "{:?}", d.items());
+    }
+
+    /// A `deps=` entry names a block by its *declared name*, which comes
+    /// apart from its slug under collision: a `name=tests` block beside a
+    /// `## Tests` heading is slugged `tests-1`. Matching on the slug
+    /// would draw this edge to the heading, or to nothing.
+    #[test]
+    fn an_eval_chain_follows_the_declared_name_not_the_slug() {
+        let (g, _) = graph_of(&[(
+            "a.md",
+            "# Tests\n\n```python name=tests\nx = 1\n```\n\n```python name=run deps=tests\nprint(x)\n```\n",
+        )]);
+        let chain = of_kind(&g, EdgeKind::EvalChain);
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].0, "a#run");
+        let to = g.node(&NodeId::new("a", chain[0].1.split('#').nth(1).unwrap())).unwrap();
+        assert_eq!(to.kind, NodeKind::Block, "the block, never the heading it collided with");
+        assert_eq!(to.title, "tests");
+    }
+
+    /// `eval::plan::resolve_dep` already refuses to plan a corpus whose
+    /// `deps=` names nothing, saying which block and which entry. A
+    /// placeholder here would be a second report of one error.
+    #[test]
+    fn a_deps_naming_no_block_gets_no_edge_and_no_placeholder() {
+        let (g, d) = graph_of(&[(
+            "a.md",
+            "# One\n\n```python name=report deps=missing\npass\n```\n",
+        )]);
+        assert!(of_kind(&g, EdgeKind::EvalChain).is_empty());
+        assert!(g.nodes.iter().all(|n| n.resolved), "{:?}", g.nodes);
+        assert!(d.is_empty(), "{:?}", d.items());
+    }
+
+    #[test]
+    fn a_marker_inside_a_list_item_is_no_edge_matching_check() {
+        let (g, _) = graph_of(&[
+            ("a.md", "# One\n\n- item\n\n  <!-- dankg:depends target=b.md#two quote=\"q\" -->\n"),
+            ("b.md", "# Two\n"),
+        ]);
+        assert!(
+            of_kind(&g, EdgeKind::Depends).is_empty(),
+            "`depends::markers_in` does not find one here either, so the graph must not"
+        );
     }
 }
 ```
