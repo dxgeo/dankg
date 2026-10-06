@@ -271,12 +271,19 @@ already chose.
 4. Whether `[eval] jobs` ever defaults above 1, once results are
    proven to write back in plan order.
 
-5. The cache version this lands on.
-   `plans/plan-graph-edge-coverage.md` takes 6. This plan takes 7.
-   The marker below pins that, so a third bump landing first trips
-   `dankg check` rather than leaving the number here to rot.
+5. The cache version this lands on. `plans/plan-graph-edge-coverage.md`
+   was expected to take 6, leaving 7 for this plan. It took both: 6 for
+   the `quote` field and the two `EdgeKind` variants, then 7 for the
+   rows that actually produce them, once a clean CI checkout showed that
+   a version-6 entry decodes as fresh while carrying no marker rows at
+   all. This plan therefore takes 8.
 
-<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 6;" -->
+   The marker below is what caught the change, which is the mechanism
+   working rather than a number going stale unnoticed. It tracks the
+   live constant. A bump landing before this plan does will therefore
+   trip `dankg check` again rather than leave 8 here to rot.
+
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 7;" -->
 
 ## Critical files
 

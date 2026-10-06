@@ -43,11 +43,18 @@ const MAGIC: &str = "!dankg-cache";
 ///    set is not.
 /// 5: a row for each `reads=file:` a block declares (decision 76), which
 ///    resolution now reads and an older entry does not carry.
-/// 6: an edge row grew a `quote` field, and a `depends`/`dep` row joined
-///    `link` and `read` as a relation recorded raw and resolved later.
-///    An entry written before them decodes to a node set that is right
-///    and an edge set that is short.
-const VERSION: u32 = 6;
+/// 6: an edge row grew a `quote` field.
+/// 7: a `depends`/`dep` row joined `link` and `read` as a relation
+///    recorded raw and resolved later. This is a second bump for one
+///    plan. It is the trap this comment exists to warn about rather
+///    than an exception to it. Version 6 shipped the field and the two
+///    `EdgeKind` variants with nothing creating either. An entry
+///    written by that build therefore decodes as fresh, carries no
+///    `depends` row, and serves a corpus whose prose dependencies have
+///    silently vanished. A stale fixture entry at 6 is exactly what hid
+///    a real bug from the local test run until CI, on a clean checkout,
+///    found it.
+const VERSION: u32 = 7;
 /// Separates the items of a list field. `escape` guarantees it never survives
 /// inside one, so splitting on it is exact.
 const UNIT: char = '\u{1f}';

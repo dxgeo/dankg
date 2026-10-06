@@ -249,7 +249,7 @@ feature has to argue for reopening a closed phase.
    `plans/plan-label-resolution.md`'s own does. Every later bump
    therefore stops re-tripping a plan that already landed.
 
-<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="6: an edge row grew a `quote` field" -->
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="7: a `depends`/`dep` row joined `link` and `read` as a relation" -->
 
 ## What this explicitly does not do
 

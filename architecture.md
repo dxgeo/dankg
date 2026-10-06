@@ -1065,7 +1065,11 @@ A block's `deps=` and `xdeps=` entries each get an `EvalChain` edge from the dec
 
 This corpus has zero of these edges, which is worth recording rather than hiding. Every named block under `src/` is a tangle block carrying `name=` and `path=` and no `deps=`. Neither `example/` nor `literate/` is indexed. The fixture corpus is where both directions are exercised, same-file and cross-file.
 
-Cache `VERSION` 5 to 6, and `render::json`'s `SCHEMA_VERSION` 2 to 3. Both new kinds, and the `quote` field, are things an older entry or an older consumer does not carry.
+Cache `VERSION` 5 to 7, and `render::json`'s `SCHEMA_VERSION` 2 to 3. Both new kinds, and the `quote` field, are things an older entry or an older consumer does not carry.
+
+**Two cache bumps for one plan.** The second one is the lesson. Version 6 shipped the `quote` field and both `EdgeKind` variants with nothing creating either. Version 7 shipped the `depends`/`dep` rows that actually produce them. An entry written by the version-6 build therefore decodes as fresh, carries no marker rows, and serves a corpus whose prose dependencies have silently vanished -- precisely the trap `cache.md`'s own comment warns about, walked into while implementing the plan that quotes that comment. It stayed hidden locally because the fixture corpora keep caches of their own. Clearing the repo root's cache does not touch those. A clean CI checkout found it within a minute.
+
+**A placeholder must not fail the build.** Giving an unresolvable target decision 8's placeholder had a consequence this decision did not anticipate. An unresolved node is otherwise fatal to `dankg check`. A marker naming a section nobody had written yet therefore failed a build that the bare `check` report is deliberately allowed not to fail. That is decision 32 broken by a side effect rather than by argument. `check_cmd` now ignores a placeholder that *only* a `Depends` edge reaches. A written link to the same unwritten section still fails: a broken reference stays broken whatever else also points there, and one unwritten section is one shared node.
 
 ## Block nodes
 

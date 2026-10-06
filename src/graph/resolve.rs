@@ -610,7 +610,6 @@ mod tests {
         assert!(d.is_empty());
     }
 
-    #[test]
     /// Decision 76, same file. The artifact sits between the two blocks:
     /// producer writes it, consumer reads it.
     #[test]

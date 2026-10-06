@@ -333,7 +333,11 @@ fn check_cmd(paths: &[String], cache: bool) -> Result<bool, String> {
     let mut diags = Diags::new("dankg");
     let corpus = index::load(paths, cache, &mut diags)?;
     let index_graph = resolve::resolve(&corpus.files, &mut diags);
-    let unresolved = index_graph.nodes.iter().filter(|n| !n.resolved).count();
+    let unresolved = index_graph
+        .nodes
+        .iter()
+        .filter(|n| !n.resolved && !only_depended_on(&index_graph, &n.id))
+        .count();
 
     let mut files = eval_files::Files::new(corpus.root.clone());
     files.load_all(&corpus.paths, &mut diags);
@@ -660,6 +664,36 @@ fn add_live_orphans(index: &mut Graph, config: &Config, diags: &mut Diags) {
         }
     }
     index.sort();
+}
+
+/// A placeholder nothing but a `dankg:depends` marker reaches.
+///
+/// Decision 32 makes a prose dependency advisory for this command's
+/// exit code. Decision 78 says drawing one changes nothing about that.
+/// Counting its placeholder here would break both, since an unresolved
+/// node is otherwise fatal: a marker naming a section nobody has
+/// written yet would fail the build that a bare `check` report is
+/// deliberately allowed not to.
+///
+/// Scoped to placeholders *only* a marker reaches. A written link to
+/// the same unwritten section still fails, exactly as it did before
+/// markers were edges, because that link is a broken reference whatever
+/// else also points there. One unwritten section is one node, since
+/// `resolve_depends` reuses an existing placeholder. The two cases
+/// genuinely share one, and the only question is which edges reach
+/// it.
+fn only_depended_on(graph: &Graph, id: &NodeId) -> bool {
+    let mut reached = false;
+    for edge in &graph.edges {
+        if &edge.to != id && &edge.from != id {
+            continue;
+        }
+        if edge.kind != EdgeKind::Depends {
+            return false;
+        }
+        reached = true;
+    }
+    reached
 }
 
 /// One line each to stderr. This way, stdout stays a clean pipe.
