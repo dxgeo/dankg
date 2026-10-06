@@ -149,6 +149,65 @@ unsafe extern "C" {
     // which never dereference it as a function either when it might be
     // one of the two sentinels.
     fn signal(signum: i32, handler: usize) -> usize;
+    // `read`'s own return type is `ssize_t`, not `size_t`: -1 on error.
+    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+}
+```
+
+## An unbuffered stdin, and the arrow keys it fixes
+
+`stdin_ready` above polls the *file descriptor*. `io::stdin()` reads
+through an 8KB `BufReader` of its own. Pairing the two broke every
+arrow key in the TUI. The way it broke is worth recording, because
+neither half was wrong on its own.
+
+`input::read_key` reads one byte at a time, and asks `stdin_ready`
+whether more are coming only when it holds a lone `ESC`. A real
+terminal sends `ESC [ A` in one write. So the first one-byte read
+pulled all three bytes out of the fd and into `io::stdin()`'s buffer,
+handed back the `ESC`, and left `[` and `A` where `poll` could not see
+them. `esc_ready` then asked the kernel, which honestly answered that
+the fd was empty. `read_key` concluded the reader had pressed Esc
+alone. The two remaining bytes sat in a buffer until the next keypress
+dislodged them as `Char('[')` and `Char('A')`.
+
+Raising `ESC_TIMEOUT_MS` could never have fixed this, which is what
+makes it a different bug from the tmux one *An escape sequence tmux
+delivered in two pieces* records. There, the bytes really were still
+in flight and the timeout really was too short. Here they had already
+arrived. No timeout reaches a byte that is on the wrong side of a
+buffer.
+
+The fix is to stop having two buffers. `Stdin` below reads fd 0
+directly. `read` and `poll` therefore ask about the same bytes. It is
+deliberately unbuffered rather than buffered-and-queried. `read_key`
+already owns a `pending` buffer for exactly the byte it cannot yet
+use. A second buffer underneath that one is what caused this.
+
+```rust name=stdin path=tui/term.rs
+/// Fd 0, unbuffered. `io::stdin()` cannot be used here. It buffers
+/// internally, while [`stdin_ready`] polls the descriptor, which
+/// leaves bytes already pulled into that buffer invisible to the poll.
+/// That mismatch broke every escape sequence a terminal sends in one
+/// write -- every arrow key -- for the reason this module's own prose
+/// above gives in full.
+///
+/// One `read` syscall per call, with whatever the kernel hands back.
+/// A short read is not an error: [`input::read_key`] asks for one byte
+/// at a time and keeps what it cannot yet decode.
+pub struct Stdin;
+
+impl io::Read for Stdin {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let n = unsafe { read(STDIN_FILENO, buf.as_mut_ptr(), buf.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(n as usize)
+    }
 }
 ```
 

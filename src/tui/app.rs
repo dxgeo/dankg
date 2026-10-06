@@ -417,7 +417,12 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
     loop {
         let key = loop {
             if input::decode(&pending).is_some() || term::stdin_ready(RESIZE_POLL_MS) {
-                break input::read_key(io::stdin(), &mut pending, esc_timeout_ms, |ms| term::stdin_ready(ms))?;
+                // `term::Stdin`, never `io::stdin()`: the latter
+                // buffers internally while `stdin_ready` polls the
+                // descriptor, which strands the tail of every escape
+                // sequence a terminal sends in one write. See
+                // `term::Stdin`'s own doc comment.
+                break input::read_key(term::Stdin, &mut pending, esc_timeout_ms, |ms| term::stdin_ready(ms))?;
             }
             let mut dirty = term::take_resized();
             app.sweep_tick += 1;

@@ -129,6 +129,33 @@ unsafe extern "C" {
     // which never dereference it as a function either when it might be
     // one of the two sentinels.
     fn signal(signum: i32, handler: usize) -> usize;
+    // `read`'s own return type is `ssize_t`, not `size_t`: -1 on error.
+    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+}
+
+/// Fd 0, unbuffered. `io::stdin()` cannot be used here. It buffers
+/// internally, while [`stdin_ready`] polls the descriptor, which
+/// leaves bytes already pulled into that buffer invisible to the poll.
+/// That mismatch broke every escape sequence a terminal sends in one
+/// write -- every arrow key -- for the reason this module's own prose
+/// above gives in full.
+///
+/// One `read` syscall per call, with whatever the kernel hands back.
+/// A short read is not an error: [`input::read_key`] asks for one byte
+/// at a time and keeps what it cannot yet decode.
+pub struct Stdin;
+
+impl io::Read for Stdin {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let n = unsafe { read(STDIN_FILENO, buf.as_mut_ptr(), buf.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(n as usize)
+    }
 }
 
 /// Terminal rows and columns, via `TIOCGWINSZ`. Fails with the OS
