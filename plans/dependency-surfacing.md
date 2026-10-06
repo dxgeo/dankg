@@ -8,8 +8,17 @@ and, for six visibility changes, `eval/plan.md`/`eval/result.md`.
 Give code-block nodes their own visual identity in the tree, and make
 two kinds of block-to-block dependency -- the `deps=`/`xdeps=` eval
 chain, and `produces=`/`reads=file:PATH` file artifacts -- visible and
-filterable. Prose dependencies (`dankg:depends`) are explicitly out of
-scope for this pass.
+filterable.
+
+Prose dependencies (`dankg:depends`) were explicitly out of scope for
+this pass, and are no longer out of scope at all.
+`plans/plan-graph-edge-coverage.md` made a marker a graph edge
+(decision 78). The TUI then gained `⇢N`/`⇠N` badges, navigable
+`Depends`/`DependedOnBy` panel rows carrying the quote, and a
+`depends` filter entry reading §3's own "declares *or* is targeted"
+rule. They arrive by a different route than anything below. This pass
+read `eval::plan` through a second corpus parse; those rows read the
+graph the tree is already built from.
 
 ## 1\. Where things stand today
 
@@ -191,6 +200,11 @@ which nodes are *expanded*, never which ones exist at all. A new
 ```
 All, Blocks, Eval-chain, File-artifact
 ```
+
+Shipped as written. The list has since grown: a `Tag` entry per
+`kind=` actually set (eval-custom-plan.md), a `Depends` entry
+(decision 78), and `Blocks` generalized to one entry per node kind
+(`Filter::Kind`, read off `NodeKind::ALL`).
 
 Status line shows `filter: eval-chain`, the same way search shows
 `/query` and eval-cycling shows `eval: [...]`. `f` is free today --

@@ -95,6 +95,21 @@ dankg graph notes/index.md --format mermaid
 point. That's what makes it a stable, scriptable surface. `--depth` and
 `--all` shape only the rendered formats: `html`, `dot`, and `mermaid`.
 
+Edges come in six kinds. `contains` is the document outline. `link` is
+a written link or wikilink. `produces` and `reads` are inferred from a
+block's own recorded provenance and the files it declares. `depends` is
+a `dankg:depends` marker (see *`check`* below). It draws as a broken
+line in every rendered format, and carries the marker's `quote=` in
+`--format json` alone -- there is no room for a sentence on a drawn
+edge. `eval-chain` is a `deps=`/`xdeps=` entry, joining the two blocks
+it orders.
+
+A marker whose target names no section becomes a placeholder node, the
+same treatment a dangling link already gets. A section you depend on
+but have not written yet is therefore visible, not merely reported.
+
+<!-- dankg:depends target=architecture.md#decision-78-a-dankgdepends-marker-is-an-edge-and-it-carries-its-quote quote="The quote is emitted by `--format json` alone." -->
+
 A file that declares a frontmatter `title` gets that title as its own
 top-level node, and every heading in the file hangs off it. A leading
 heading repeating the title is absorbed rather than graphed twice, so
@@ -135,6 +150,24 @@ Keys:
 - `b` — toggle the origin breadcrumb (status line, while the panel has focus)
 - `q` — quit
 - `?` — full keybinding reference, including any `[tui] commands` below; both this and the filter menu draw as a small box over the tree, not a full-screen replacement
+
+The cross-reference panel lists what the selected node connects to:
+outgoing links and backlinks, its `deps=`/`xdeps=` chain in both
+directions, its prose dependencies in both directions, the relations it
+writes or reads, and its declared file artifacts. A prose-dependency
+row carries the quoted claim alongside the target's title, since which
+claim is leaned on is the whole content of the relation.
+
+Links, chain entries and prose dependencies are all navigable. `enter`
+jumps along a prose dependency the way it jumps along a link. The
+relation and file-artifact rows are plain text, having no single node
+to jump to.
+
+Each tree row carries a compact badge summarizing the same facts:
+`→N ←N` for links, `⇒N ⇐N` for the eval chain, `⇢N ⇠N` for prose
+dependencies declared and received, `⚭` for a relation touch, `▤` for
+a declared file artifact, `✗N` for a dependency entry that failed to
+resolve, and `↻N` for one that resolved but has not run yet.
 
 A node marked `∅` is a dangling link's own placeholder, not real
 content — the same thing `dankg check` counts as unresolved. `t`
@@ -352,6 +385,10 @@ whitespace differences aside, in the section it names. This is advisory
 only. It never affects the exit code, because a substring match is a
 much weaker signal than a source hash (see architecture.md, *Prose
 dependencies*).
+
+A marker is also a graph edge. `graph` and `tui` therefore show it
+alongside written links (see *`graph`* above). Drawing it changes
+nothing about the severity here: a stale quote stays advisory.
 
 <!-- dankg:depends target=architecture.md#prose-dependencies quote="A substring match is a much weaker signal than a content hash" -->
 

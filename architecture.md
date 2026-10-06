@@ -1837,7 +1837,7 @@ has actually set, and lost `Copy` in the process -- a `String` payload
 made that unavoidable. Its full option list is no longer the fixed
 four-variant constant the filter menu used to cycle through:
 `App::filter_options` rebuilds it from `self.annotations` every time
-the menu opens or moves, the four built-ins first, then one `Tag` per
+the menu opens or moves, the built-ins first, then one `Tag` per
 distinct kind, alphabetical -- the same "just rebuild it, cheap at
 this corpus's size" reasoning `filter_membership` already uses. A kind
 nothing has tagged yet simply is not a menu option; there is no way to
@@ -2118,14 +2118,59 @@ the ceiling rather than always waiting it out.
 
 <!-- dankg:depends target=src/tui/app.md#run_and_event_loop quote="split an escape sequence's leading `ESC` byte from its" -->
 
+### An escape sequence that arrived all at once
+
+The two fixes above both treated a missing second byte as a timing
+problem. A reader then reported that arrow keys did nothing in a plain
+terminal, where `hjkl` worked fine. No timeout was involved. The bytes
+had already arrived.
+
+`read_key` read through `io::stdin()`, which keeps an 8KB `BufReader`
+of its own. `term::stdin_ready` polls the file descriptor. A terminal
+sends `ESC [ A` in one write. So the first one-byte read pulled all
+three bytes out of the descriptor and into that buffer, handed back the
+`ESC`, and left `[` and `A` where no `poll` could see them. `esc_ready`
+asked the kernel, which accurately reported an empty descriptor.
+`read_key` concluded the reader had pressed Esc alone. The two stranded
+bytes surfaced on the next keypress as `Char('[')` and `Char('A')`.
+
+Neither half was wrong by itself, which is why this survived two
+earlier passes over the same code. `read_key` reasoned correctly from
+the answers it was given. `stdin_ready` reported the descriptor
+honestly. The pairing was what failed. A pairing is not a thing either
+function's own tests can see.
+
+This is also why raising `ESC_TIMEOUT_MS` could never have fixed it,
+and why *An escape sequence tmux delivered in two pieces* above is a
+genuinely different bug rather than the same one recurring. There the
+bytes were still in flight and the ceiling really was too low. Here
+they had arrived before `esc_ready` was ever called. No timeout reaches
+a byte on the wrong side of a buffer.
+
+The fix removes the second buffer. `term::Stdin` reads fd 0 directly,
+through one more hand-declared `extern "C"` `read` rather than a crate
+(decision 1). `read` and `poll` now ask about the same bytes.
+
+Two tests, because the hazard is a pairing rather than a function. One
+models the fixed arrangement: one queue, a byte at a time, readiness
+reported from that same queue. An arrow delivered all at once resolves
+there. The other models a reader that buffers ahead of its own
+readiness probe and asserts the arrow is lost. Anything that pairs
+`read_key` with a buffered reader again therefore fails a test
+explaining why. The existing suite could not have caught this. It
+passes a `&[u8]` as the reader and stubs `esc_ready`. The two buffers
+never coexist in it.
+Found by hand, confirmed against a real pty.
+
 ## The tree and the cross-reference panel
 
 `dankg tui` rendered a Sugiyama graph layout, boxes and polylines on a
 character grid, until this pass replaced it with a nerdtree-style
 collapsible tree plus a persistent detail panel. The corpus's own graph
-is overwhelmingly a containment hierarchy -- on this repo's own
-self-hosted corpus, 496 `Contains` edges against 56 `Link` edges and a
-handful of `Produces`/`Reads` -- so a general-DAG layout was spending
+is overwhelmingly a containment hierarchy -- *Self-hosted corpus
+stats* counts that ratio rather than restating it here, having already
+watched the figure move twice -- so a general-DAG layout was
+spending
 its whole visual budget (crossing lines, wide ranks) on structure the
 data barely has. A tree matches its actual shape.
 
@@ -2205,12 +2250,24 @@ that failed to resolve, and `↻N` for one that resolved but has not
 actually run. `xdeps=` alone never triggers a run, so that last case
 is a real, expected state, not a corpus error.
 
+Decision 78 added a fifth and sixth glyph beside those: `⇢N` for the
+prose dependencies a section declares, and `⇠N` for the sections that
+lean on a claim it makes. They read as dashed arrows on purpose,
+against `⇒N`/`⇐N`'s solid ones. An eval chain is execution order. A
+prose dependency is a quoted claim. `check` treats the two with
+deliberately different severity.
+
 <!-- dankg:depends target=plans/dependency-surfacing.md#e-unresolved-but-correct----needs-to-run-not-broken quote="An `xdeps=` target, block- or `table:`-targeted, never does: it is checked, not run." -->
 
-Five matching panel rows (`PanelRow::DepOut`/`DepIn`/`FileDep`/
-`DepBroken`/`DepPending`) carry the same facts in full for the
-selected node. `DepOut`/`DepIn` are navigable exactly like
-`Outgoing`/`Backlink`; the rest are plain text, reusing `PlanError`'s
+Seven matching panel rows carry the same facts in full for the
+selected node: `PanelRow::DepOut`/`DepIn`, `Depends`/`DependedOnBy`,
+`FileDep`, `DepBroken` and `DepPending`. The first four are navigable
+exactly like `Outgoing`/`Backlink`. `enter` therefore jumps along a
+prose dependency the way it already jumps along a link. A `Depends` row also
+carries the marker's own `quote=`, which is the whole content of the
+relation: a row naming only the target section would say that some
+dependency exists without saying which claim it rests on. The rest are
+plain text, reusing `PlanError`'s
 and `eval::result`'s own existing wording rather than inventing new
 copy, so a broken or pending dependency reads the same in the TUI as
 it would from `dankg check`. `App::compute_dep_data` computes all of
@@ -2225,8 +2282,9 @@ private to
 `eval::result::verified_hash`/`block_index_for`.
 
 `f` opens a small filter-picker overlay rather than cycling in place:
-up/down move the menu's own cursor among `All`/`Blocks`/`Eval-chain`/
-`File-artifact` (`App::move_filter_menu_cursor`, never touching
+up/down move the menu's own cursor among `All`, one entry per node
+kind, `Eval-chain`, `Depends` and `File-artifact`
+(`App::move_filter_menu_cursor`, never touching
 `self.filter` itself), `enter` applies whichever it lands on
 (`App::confirm_filter_menu` -> `apply_filter`), `esc` closes it
 unapplied. Applying a `Filter` hides a non-matching row while keeping
@@ -2236,7 +2294,22 @@ a one-shot jump. `Eval-chain` settles dependency-surfacing.md §3's
 own open question in favor of "declares *or* is targeted": a block
 only ever named by another's `deps=`/`xdeps=`, with nothing of its
 own to declare, still matches -- otherwise the filter would hide the
-very leaves a reader turns it on to find.
+very leaves a reader turns it on to find. `Depends` reads the same
+way, over decision 78's own edges.
+
+The per-kind entries replaced a single `Blocks` variant with
+`Filter::Kind(NodeKind)`, reading its option list straight off
+`NodeKind::ALL`. A block was the only kind worth singling out when the
+menu was first built. A relation and an artifact are nodes a reader has
+the same reason to isolate. Deriving the list from the enum also means a
+fifth kind reaches the menu with no second list to update.
+
+A relation is the one kind that entry cannot read literally.
+`build_children` leaves relations out of the tree on purpose, since one
+is corpus-wide and parentless. Matching a row against
+`NodeKind::Relation` could therefore never keep one, leaving the entry
+to do nothing at all. It matches a node that *touches* a relation instead,
+which is exactly what the `⚭` badge already reports.
 
 Each `Filter` remembers its own last selected row independently
 (`App::filter_history`, keyed by variant), restored on returning to
@@ -5003,7 +5076,7 @@ echo "$contains Contains edges against $link Link, $depends Depends, $chain Eval
 <!-- dankg:result name=corpus-edge-counts hash=739330e5b06a7148 -->
 
 ```
-948 Contains edges against 73 Link, 271 Depends, 0 EvalChain
+951 Contains edges against 73 Link, 272 Depends, 0 EvalChain
 ```
 
 # Open questions
