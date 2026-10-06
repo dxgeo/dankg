@@ -7,14 +7,18 @@ a bug. The question asked was whether dankg is the best implementation
 of what it is for. Most of the answer is yes. One part is not. That part
 is measurable.
 
-`dankg graph .` on this repo reports 943 containment edges against 72
-link edges. Containment is the document outline, which any markdown
-parser derives for free. The 72 link edges are the whole of what the
-graph knows about authored cross-reference. The marker below pins that
-count against the block that measures it. The next drift therefore
-trips `dankg check` rather than sitting here unnoticed.
+`dankg graph .` on this repo reported 943 containment edges against 72
+link edges when this plan was written. Containment is the document
+outline, which any markdown parser derives for free. Those 72 link edges
+were the whole of what the graph knew about authored cross-reference.
 
-<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="943 Contains edges against 72 Link edges" -->
+The plan has now landed. The figure below is therefore the one after it
+rather than the one that motivated it: the same block reports 271
+`Depends` edges beside the 73 links. The marker still pins prose to the
+block that measures it. The next drift therefore trips `dankg check`
+rather than sitting here unnoticed.
+
+<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="948 Contains edges against 73 Link, 271 Depends, 0 EvalChain" -->
 
 The same corpus carries over 250 `dankg:depends` markers. `dankg check`
 prints the exact count on every run. No exact number is typed here for
@@ -102,9 +106,34 @@ Collapsing them would lose the distinction `check` already acts on.
 
 ### `deps=`/`xdeps=` are edges
 
-One kind for both, since resolution is already shared. This retires
-`compute_dep_data`'s second corpus parse: the panel reads the graph the
-tree is already built from.
+One kind for both, since resolution is already shared.
+
+**The parse retirement does not follow.** This plan was wrong about
+that. It claimed the edges would retire `compute_dep_data`'s second
+corpus parse, with the panel reading the graph instead. Implementation
+showed the opposite. `DepData` carries five maps. The graph can supply
+two of them.
+
+`dep_out` and `dep_in` are exactly `EvalChain`, both directions. The
+other three are not in the graph, by decisions taken deliberately.
+`dep_broken` is `PlanError`'s own text for an entry that failed to
+resolve. Decision 79 gives such an entry no edge at all, because
+`eval::plan` already reports it. `dep_pending` comes from
+`result::verified_hash`, which needs loaded sources and recorded
+hashes. `file_deps` is the raw `produces=`/`reads=` row text. A `reads=file:`
+with no producer anywhere gets no edge either, by `resolve_file_reads`'s
+own stated rule.
+
+So `Files::load_all` still has to run for three of the five. Moving
+`dep_out`/`dep_in` onto the graph would save no parse, split one panel
+section across two sources, and churn the riskiest file in the TUI for
+no gain. The second parse stays until something retires all five, which
+is a different change with a different argument.
+
+The edges are still worth having. They are what a drawn graph and
+`--format json` show of an eval chain, which was previously nothing.
+The plan's own claim that the duplicated parse was "the better reason"
+is the part that did not survive contact.
 
 ### A corpus-derived measurement can declare its input
 
@@ -242,8 +271,9 @@ feature has to argue for reopening a closed phase.
   own placeholder.
 - `src/graph/cache.md` -- the new edges encoded, and a `VERSION` bump
   coordinated with the label-resolution plan's own.
-- `src/tui/app.md` -- `compute_dep_data`'s second corpus parse retired
-  in favour of the graph.
+- `src/tui/app.md` -- untouched. The parse retirement this plan assumed
+  turned out not to follow from the edges; see *`deps=`/`xdeps=` are
+  edges* above for what was found and why the parse stays.
 - `src/render/dot.md` / `mermaid.md` / `html.md` -- a look for each new
   kind, the way a block node already has one.
 - `src/render/json.md` -- a prose dependency's own `quote` on the edge,

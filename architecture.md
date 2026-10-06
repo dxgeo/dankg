@@ -1037,6 +1037,36 @@ So the declaration is recorded as written and matched later. `ParsedFile` carrie
 
 Cache `VERSION` 4 to 5. Resolution reads the new list, so an older entry would serve a corpus with no lineage while still hashing as fresh.
 
+## Decision 78: A `dankg:depends` marker is an edge, and it carries its quote
+
+A `dankg:depends` marker gets a `Depends` edge from the section that declares it to the section its `target=` names. The marker's `quote=` rides on the edge itself.
+
+Decision 32 made a prose dependency a `check`-only report and said so on purpose. *Open questions* then deferred the edge "until a real corpus wants to *see* a prose dependency, not just be warned about one". The trigger fired by accumulation rather than by request. This corpus carries 271 markers against 73 written links. The mechanism it actually adopted for cross-reference was therefore the one mechanism the graph could not show. `plans/plan-graph-edge-coverage.md` is the argument in full.
+
+**It is its own kind, not a `Link`.** A link is a reference a reader follows. A prose dependency is a claim one section makes about another. `check` acts on that difference already, treating a stale quote as advisory and an unresolved link as fatal. One edge kind cannot carry both policies.
+
+**It costs the ordinary hop against `--depth`.** Decision 38's free entry is keyed on the node kind at the far end. `zero_cost_relations` admits a `Relation` or an `Artifact`. Both of those sit *between* two blocks. Entry is free for that reason, while leaving still charges. A prose dependency joins two headings directly. No second step exists to charge for, which makes free-to-enter mean free outright. Headings would then edge to headings that way, turning a deliberately single pass into a fixed point over every marker in the corpus. `--depth 0` would draw most of a corpus this size.
+
+**The quote is emitted by `--format json` alone.** Neither drawn backend labels an edge at all today: mermaid picks an arrow string per kind and dot picks a colour and a weight. A quote would be a new mechanism in both rather than an extension of one. The field rides on `Edge` following `line`'s own precedent there -- meaningful for one kind, inert for the rest -- and `render::json` omits it rather than writing it empty, because that dump is committed and diffed.
+
+**An unresolvable target gets decision 8's placeholder.** A section a reader already depends on, and nobody has written, becomes visible rather than merely warned about. One placeholder serves a dangling link and a marker naming that same section. An unwritten section therefore stays one node, however many references reach it.
+
+The marker stays advisory for `check`'s exit code. Decision 32 is unchanged: drawing a weak signal does not make it a strong one.
+
+Resolution is `depends::resolve_target`, the function `check_cmd` already resolves a marker through. The graph and `dankg check` therefore cannot disagree about where a marker points. Scope matches too. `depends::markers_in` scans top-level blocks only, which leaves a marker inside a list item invisible to both.
+
+## Decision 79: A `deps=`/`xdeps=` entry is an edge, matched by declared name
+
+A block's `deps=` and `xdeps=` entries each get an `EvalChain` edge from the declaring block to the block named. One kind for both, because `eval::plan::resolve_dep` already resolves the two identically and nothing downstream has asked to tell them apart.
+
+**The name half is matched against a block node's `title`, never slugified.** A block's declared name and its slug come apart under collision: a `name=tests` block beside a `## Tests` heading is slugged `tests-1`. A slug lookup would draw the edge to the heading, or to nothing. This is the one place a dep and a marker part company. The reason is that a `deps=` entry was never written as a fragment, where a `target=` was.
+
+**An entry naming no block gets no edge and no placeholder.** `eval::plan::resolve_dep` already refuses to plan that corpus, naming the block and the entry. `dankg eval` fails on it. A placeholder would be a second report of one error, against a node nothing can act on.
+
+This corpus has zero of these edges, which is worth recording rather than hiding. Every named block under `src/` is a tangle block carrying `name=` and `path=` and no `deps=`. Neither `example/` nor `literate/` is indexed. The fixture corpus is where both directions are exercised, same-file and cross-file.
+
+Cache `VERSION` 5 to 6, and `render::json`'s `SCHEMA_VERSION` 2 to 3. Both new kinds, and the `quote` field, are things an older entry or an older consumer does not carry.
+
 ## Block nodes
 
 A named, top-level code block is a node too (decision 20). It is scoped to
@@ -2796,11 +2826,15 @@ of that line a real report will fall. A mechanism that gates a build on a
 signal this weak trains a reader to add `--no-verify`-shaped workarounds,
 or to stop reading its output at all, rather than to treat a report as
 worth a look. `dankg:depends` stays a `dankg check`-reported hint, one a
-reader chooses to act on, not a build gate. Nothing here creates a graph
-node or edge, unlike a written link: rendering a dependency in `dot`,
-`mermaid`, and `html`, and giving it a cache schema of its own, is a
-real, separable feature this decision deliberately leaves for whenever a
-real corpus actually asks for it. See *Open questions*.
+reader chooses to act on, not a build gate.
+
+That last part held. The part about the graph did not. This decision
+left the edge out as a separable feature, "for whenever a real corpus
+actually asks for it". It asked by accumulation rather than by request.
+271 markers against 73 written links made this the mechanism the corpus
+had adopted for cross-reference, and the only one the graph could not
+show. Decision 78 is the edge. It changes nothing here -- a stale quote
+is still advisory, for exactly the reason given above.
 
 # Tangle
 
@@ -4928,17 +4962,26 @@ overwhelmingly a containment hierarchy, not a general DAG. This block
 checks that claim instead of restating a hand count. `dankg eval architecture.md --block corpus-edge-counts --yes` re-runs it and
 writes the current count back below.
 
+It now counts `Depends` as well, which is the whole point of *Prose
+dependencies*. The authored cross-reference this corpus carries was
+always there. Until those edges existed, the ratio below measured the
+graph's own blindness rather than the corpus. `EvalChain` is counted
+too and is zero here, because every named block under `src/` is a
+tangle block declaring no `deps=`.
+
 ```sh name=corpus-edge-counts
 json=$(cargo run --release --quiet -- graph . --format json 2>/dev/null)
 contains=$(printf '%s\n' "$json" | grep -c '"kind": "contains"')
 link=$(printf '%s\n' "$json" | grep -c '"kind": "link"')
-echo "$contains Contains edges against $link Link edges"
+depends=$(printf '%s\n' "$json" | grep -c '"kind": "depends"')
+chain=$(printf '%s\n' "$json" | grep -c '"kind": "eval-chain"')
+echo "$contains Contains edges against $link Link, $depends Depends, $chain EvalChain"
 ```
 
-<!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
+<!-- dankg:result name=corpus-edge-counts hash=739330e5b06a7148 -->
 
 ```
-943 Contains edges against 72 Link edges
+948 Contains edges against 73 Link, 271 Depends, 0 EvalChain
 ```
 
 # Open questions
@@ -4951,17 +4994,10 @@ echo "$contains Contains edges against $link Link edges"
 - Cross-file tangle, an eval-able-but-not-tangled escape hatch, and
   whether a language with no configured `[tangle.*] command` should still
   get a compile-check: see *Tangle*'s own *Open questions*.
-- Should `dankg:depends` (decision 32) ever become a graph edge -- drawn
-  in `dot`/`mermaid`/`html`, given its own cache schema bump -- rather
-  than a `check`-only report? Answered yes, and underway:
-  `plans/plan-graph-edge-coverage.md` argues the deferral's own stated
-  trigger has fired, since the corpus now carries over 250 markers. That
-  plan settles the three questions that touch the code -- the ordinary
-  hop against `--depth`, the quote on `--format json` alone, and a block
-  target already legal. `EdgeKind::Depends` and `EdgeKind::EvalChain`
-  exist and round-trip through the cache at `VERSION` 6. Nothing creates
-  one yet. This entry stays a question until `graph::build` does, and
-  becomes a decision then.
+- Should a marker's own `quote=` ever render on a drawn edge, rather than
+  in `--format json` alone? Decision 78 settled the field itself and left
+  this open, because neither dot nor mermaid labels an edge at all today.
+  A reader who wants the claim beside the line is the trigger.
 - Should a marker ever be allowed more than one `quote=`, for a section
   that leans on several claims from the same target at once? Today a
   section wanting that writes several markers. Whether that is a real
