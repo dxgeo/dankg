@@ -252,7 +252,14 @@ mod tests {
     }
 
     fn edge(kind: EdgeKind, from: (&str, &str), to: (&str, &str)) -> Edge {
-        Edge { from: NodeId::new(from.0, from.1), to: NodeId::new(to.0, to.1), kind, line: 0, reciprocated: false }
+        Edge {
+            from: NodeId::new(from.0, from.1),
+            to: NodeId::new(to.0, to.1),
+            kind,
+            line: 0,
+            reciprocated: false,
+            quote: String::new(),
+        }
     }
 
     fn block(file: &str, slug: &str) -> Node {

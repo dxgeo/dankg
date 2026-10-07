@@ -26,6 +26,7 @@
 //! instead of blocking on `read` directly, since a flag set by a signal
 //! is otherwise invisible to a thread blocked in a blocking read.
 
+use std::ffi::c_void;
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,6 +130,40 @@ unsafe extern "C" {
     // which never dereference it as a function either when it might be
     // one of the two sentinels.
     fn signal(signum: i32, handler: usize) -> usize;
+    // `read`'s own return type is `ssize_t`, not `size_t`: -1 on error.
+    // The buffer is `void *`. Spelling it `*mut u8` instead is not a
+    // harmless simplification. rustc's own
+    // `suspicious_runtime_symbol_definitions` lint compares this
+    // declaration against the real `read` the standard library already
+    // links, and a mismatched pointer type is what it looks for. Caught
+    // by CI rather than locally -- the lint is newer than the toolchain
+    // this was written on.
+    fn read(fd: i32, buf: *mut c_void, count: usize) -> isize;
+}
+
+/// Fd 0, unbuffered. `io::stdin()` cannot be used here. It buffers
+/// internally, while [`stdin_ready`] polls the descriptor, which
+/// leaves bytes already pulled into that buffer invisible to the poll.
+/// That mismatch broke every escape sequence a terminal sends in one
+/// write -- every arrow key -- for the reason this module's own prose
+/// above gives in full.
+///
+/// One `read` syscall per call, with whatever the kernel hands back.
+/// A short read is not an error: [`input::read_key`] asks for one byte
+/// at a time and keeps what it cannot yet decode.
+pub struct Stdin;
+
+impl io::Read for Stdin {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let n = unsafe { read(STDIN_FILENO, buf.as_mut_ptr().cast::<c_void>(), buf.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(n as usize)
+    }
 }
 
 /// Terminal rows and columns, via `TIOCGWINSZ`. Fails with the OS

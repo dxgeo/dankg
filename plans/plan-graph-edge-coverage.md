@@ -7,14 +7,18 @@ a bug. The question asked was whether dankg is the best implementation
 of what it is for. Most of the answer is yes. One part is not. That part
 is measurable.
 
-`dankg graph .` on this repo reports 928 containment edges against 72
-link edges. Containment is the document outline, which any markdown
-parser derives for free. The 72 link edges are the whole of what the
-graph knows about authored cross-reference. The marker below pins that
-count against the block that measures it. The next drift therefore
-trips `dankg check` rather than sitting here unnoticed.
+`dankg graph .` on this repo reported 943 containment edges against 72
+link edges when this plan was written. Containment is the document
+outline, which any markdown parser derives for free. Those 72 link edges
+were the whole of what the graph knew about authored cross-reference.
 
-<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="928 Contains edges against 72 Link edges" -->
+The plan has now landed. The figure below is therefore the one after it
+rather than the one that motivated it: the same block reports 272
+`Depends` edges beside the 73 links. The marker still pins prose to the
+block that measures it. The next drift therefore trips `dankg check`
+rather than sitting here unnoticed.
+
+<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="942 Contains edges against 73 Link, 272 Depends, 0 EvalChain" -->
 
 The same corpus carries over 250 `dankg:depends` markers. `dankg check`
 prints the exact count on every run. No exact number is typed here for
@@ -102,9 +106,34 @@ Collapsing them would lose the distinction `check` already acts on.
 
 ### `deps=`/`xdeps=` are edges
 
-One kind for both, since resolution is already shared. This retires
-`compute_dep_data`'s second corpus parse: the panel reads the graph the
-tree is already built from.
+One kind for both, since resolution is already shared.
+
+**The parse retirement does not follow.** This plan was wrong about
+that. It claimed the edges would retire `compute_dep_data`'s second
+corpus parse, with the panel reading the graph instead. Implementation
+showed the opposite. `DepData` carries five maps. The graph can supply
+two of them.
+
+`dep_out` and `dep_in` are exactly `EvalChain`, both directions. The
+other three are not in the graph, by decisions taken deliberately.
+`dep_broken` is `PlanError`'s own text for an entry that failed to
+resolve. Decision 79 gives such an entry no edge at all, because
+`eval::plan` already reports it. `dep_pending` comes from
+`result::verified_hash`, which needs loaded sources and recorded
+hashes. `file_deps` is the raw `produces=`/`reads=` row text. A `reads=file:`
+with no producer anywhere gets no edge either, by `resolve_file_reads`'s
+own stated rule.
+
+So `Files::load_all` still has to run for three of the five. Moving
+`dep_out`/`dep_in` onto the graph would save no parse, split one panel
+section across two sources, and churn the riskiest file in the TUI for
+no gain. The second parse stays until something retires all five, which
+is a different change with a different argument.
+
+The edges are still worth having. They are what a drawn graph and
+`--format json` show of an eval chain, which was previously nothing.
+The plan's own claim that the duplicated parse was "the better reason"
+is the part that did not survive contact.
 
 ### A corpus-derived measurement can declare its input
 
@@ -158,25 +187,69 @@ feature has to argue for reopening a closed phase.
 
 ## Open questions
 
-1. Whether a prose-dependency edge costs a hop against `--depth`, or
-   enters free the way a relation does (decision 38). A marker is more
-   like an attribute of the section declaring it than a hop a reader
-   clicks through, which argues for free. Decision 38's own warning
-   applies too: free in both directions collapses distance.
-2. Whether the quote itself renders on the edge, or only in `check`'s
-   report. A drawn graph has no room for a sentence. A JSON dump has
-   room for all of it.
-3. Whether a marker that resolves to a *block* rather than a heading is
-   legal. `resolve_target` finds a heading. `find_slug` searches blocks
-   too.
-4. Settled by events rather than by argument.
+1. **Settled: the ordinary hop, the same as a `Link`.** The argument
+   for free was that a marker reads more like an attribute of the
+   section declaring it. Decision 38 cannot express that here. Its free
+   pass is keyed on the node kind at the far end. `zero_cost_relations`
+   admits a `Relation` or an `Artifact` and nothing else. Those two sit
+   *between* two blocks. Entry is free for that reason, while the
+   ordinary scan still charges for leaving. A prose dependency joins two
+   headings directly. No second step exists to charge for. Free to enter
+   therefore means free outright. Headings also edge to other headings
+   this way, which turns a deliberately single pass into a fixed point
+   over every marker in the corpus. `--depth 0` would then draw most of
+   a corpus this size. Decision 32's own distinction from a link is
+   about policy, never about distance.
+
+   Depth-0 visibility is still reachable, by decision 76's own move. A
+   marker takes its own node kind. It then sits between the two sections
+   the way an artifact sits between two blocks. Free entry works by
+   construction. The quote gains a node to live on. That is a larger
+   change than this plan. It waits for a reader who wants it.
+
+2. **Settled: `--format json` only.** Neither drawn backend labels an
+   edge at all today. Mermaid picks an arrow string per kind. Dot picks
+   a color and a weight. A quote would be a new mechanism in both rather
+   than an extension of one. The field rides on `Edge` itself, following
+   `line`'s own precedent there: a field that means something for one
+   kind and nothing for the rest, documented as such.
+
+   This bumps `render/json.md`'s own `SCHEMA_VERSION` to 3. The new edge
+   kinds require that bump on their own regardless. Version 2 was bumped
+   for the exactly analogous reason, a node gaining its `kind`. That is
+   a third version number to keep in step with this plan's cache bump,
+   not a consequence of the quote alone.
+
+3. **Settled: already legal. Nothing needs widening.**
+   `resolve_target` narrows nothing. It builds a `NodeId` out of the
+   path and `slugify(fragment)`. `check_cmd` looks that up in
+   `index_graph`, which carries block nodes. `slugify` keeps `_`.
+   Verified against the real binary on a scratch corpus. A marker
+   reading `target=#seed` resolved to the block node. `verify` then ran
+   against that block's own line range: a quote present in it fresh, a
+   quote absent from it stale.
+
+   Two things fall out. A heading's own `section_text` already spans the
+   blocks it contains. Targeting a heading therefore already verifies a
+   quote living inside one. Targeting the block buys precision rather
+   than reach. A bare `#name` is also order-dependent whenever a block
+   and a heading collide on it. The same probe gave a heading `tests`
+   and its own `name=tests` block `tests-1`, by document order. *Title
+   collisions* excludes that particular pair from its report on purpose,
+   since a block can never reorder ahead of the heading containing it.
+
+4. **Settled by events rather than by argument, and now landed.**
    `plans/plan-label-resolution.md` shipped first and took two bumps of
    its own: `VERSION` 4 for decision 69, then 5 for decision 76. This
-   plan therefore lands on 6. The marker below pins that, so a third
-   bump landing first trips `dankg check` rather than leaving the number
-   here to rot.
+   plan therefore landed on 6. While it was pending, the marker below
+   pinned the live constant. A third bump arriving first would then trip
+   `dankg check` rather than leave the number here to rot. The bump has
+   now gone in, which makes the claim historical. The marker tracks the
+   version note recording it instead, the same way
+   `plans/plan-label-resolution.md`'s own does. Every later bump
+   therefore stops re-tripping a plan that already landed.
 
-<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 5;" -->
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="7: a `depends`/`dep` row joined `link` and `read` as a relation" -->
 
 ## What this explicitly does not do
 
@@ -198,10 +271,13 @@ feature has to argue for reopening a closed phase.
   own placeholder.
 - `src/graph/cache.md` -- the new edges encoded, and a `VERSION` bump
   coordinated with the label-resolution plan's own.
-- `src/tui/app.md` -- `compute_dep_data`'s second corpus parse retired
-  in favour of the graph.
+- `src/tui/app.md` -- untouched. The parse retirement this plan assumed
+  turned out not to follow from the edges; see *`deps=`/`xdeps=` are
+  edges* above for what was found and why the parse stays.
 - `src/render/dot.md` / `mermaid.md` / `html.md` -- a look for each new
   kind, the way a block node already has one.
+- `src/render/json.md` -- a prose dependency's own `quote` on the edge,
+  and `SCHEMA_VERSION` to 3 (open question 2).
 - `architecture.md` -- the decisions, *Open questions* updated where it
   defers this, and a milestone number for weave.
 

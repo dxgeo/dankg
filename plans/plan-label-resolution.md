@@ -78,7 +78,7 @@ decoded, and version-bumped. A warm cache otherwise serves pre-change
 nodes that still hash as fresh. Decision 69 took the bump to 4, and
 decision 76 took it to 5.
 
-<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="const VERSION: u32 = 5;" -->
+<!-- dankg:depends target=../src/graph/cache.md#graph-cache quote="5: a row for each `reads=file:` a block declares (decision 76)" -->
 
 ## What this reuses
 

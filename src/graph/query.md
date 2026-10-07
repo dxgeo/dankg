@@ -97,6 +97,16 @@ pub struct NodeLinks {
     pub produces: Vec<NodeId>,
     /// `Reads` edges `id` is the `to` of: relations `id` reads.
     pub reads: Vec<NodeId>,
+    /// `Depends` edges `id` is the `from` of: sections whose claims
+    /// `id` leans on, each with the `quote=` it leans on (decision 78).
+    pub depends: Vec<(NodeId, String)>,
+    /// `Depends` edges `id` is the `to` of: sections that lean on a
+    /// claim `id` makes, each with the quote they pinned.
+    ///
+    /// This is a backlink in the sense that matters most for editing.
+    /// A reader about to rewrite a section wants to know who quoted it
+    /// before the rewrite, not after `dankg check` reports the breakage.
+    pub depended_on_by: Vec<(NodeId, String)>,
     /// `Produces` edges whose far end is an artifact instead
     /// (decision 69): the files `id` writes.
     ///
@@ -106,10 +116,14 @@ pub struct NodeLinks {
     /// relation". Folding an artifact into `produces` made every
     /// `produces=file:` block claim a relation it does not have.
     ///
-    /// The cross-reference panel does not read this yet. It already
-    /// prints the same fact from `DepData::file_deps`, whose second
-    /// corpus parse `plans/plan-graph-edge-coverage.md` is what retires.
-    /// Two rows saying `produces: out.csv` would be worse than one.
+    /// The cross-reference panel does not read this. It already prints
+    /// the same fact from `DepData::file_deps`. Two rows saying
+    /// `produces: out.csv` would be worse than one. That duplication was
+    /// expected to go away with `compute_dep_data`'s own second corpus
+    /// parse. It does not. Three of that struct's five maps rest on
+    /// decisions that keep them out of the graph, which leaves both the
+    /// parse and this note in place
+    /// (`plans/plan-graph-edge-coverage.md`).
     pub artifacts: Vec<NodeId>,
 }
 
@@ -127,6 +141,17 @@ pub fn links_for(graph: &Graph, id: &NodeId) -> NodeLinks {
                 }
             }
             EdgeKind::Reads if edge.to == *id => out.reads.push(edge.from.clone()),
+            EdgeKind::Depends if edge.from == *id => {
+                out.depends.push((edge.to.clone(), edge.quote.clone()));
+            }
+            EdgeKind::Depends if edge.to == *id => {
+                out.depended_on_by.push((edge.from.clone(), edge.quote.clone()));
+            }
+            // `EvalChain` is deliberately absent. The TUI panel already
+            // prints this relation from `DepData::dep_out`/`dep_in`, and
+            // reading it here too would double every row. `DepData` is
+            // the richer source besides: it also reports an entry that
+            // failed to resolve, which decision 79 gives no edge at all.
             _ => {}
         }
     }
@@ -165,6 +190,7 @@ mod tests {
             kind: EdgeKind::Produces,
             line: 0,
             reciprocated: false,
+            quote: String::new(),
         }
     }
 
@@ -259,6 +285,7 @@ mod tests {
             kind: EdgeKind::Link,
             line: 0,
             reciprocated: false,
+            quote: String::new(),
         }
     }
 
@@ -269,6 +296,7 @@ mod tests {
             kind: EdgeKind::Contains,
             line: 0,
             reciprocated: false,
+            quote: String::new(),
         }
     }
 
@@ -286,7 +314,14 @@ mod tests {
             nodes: vec![rel.clone()],
             edges: vec![
                 produces(("a", "setup"), &rel.id),
-                Edge { from: rel.id.clone(), to: NodeId::new("b", "report"), kind: EdgeKind::Reads, line: 0, reciprocated: false },
+                Edge {
+                    from: rel.id.clone(),
+                    to: NodeId::new("b", "report"),
+                    kind: EdgeKind::Reads,
+                    line: 0,
+                    reciprocated: false,
+                    quote: String::new(),
+                },
             ],
         };
         assert_eq!(links_for(&g, &NodeId::new("a", "setup")).produces, vec![rel.id.clone()]);

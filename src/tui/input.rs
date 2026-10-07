@@ -308,6 +308,69 @@ mod tests {
         assert_eq!(read_key(&mut src, &mut pending, 50, |_| true).unwrap(), Key::Left);
     }
 
+    /// A terminal sends `ESC [ A` in one write. `esc_ready` therefore
+    /// has to answer about bytes that write left unconsumed. This models
+    /// the
+    /// arrangement `event_loop` actually uses: one queue, read a byte at
+    /// a time, readiness reported from that same queue.
+    #[test]
+    fn an_arrow_key_delivered_all_at_once_resolves_without_waiting() {
+        let queue = std::cell::RefCell::new(b"\x1b[A".to_vec());
+        struct Drip<'a>(&'a std::cell::RefCell<Vec<u8>>);
+        impl io::Read for Drip<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let mut q = self.0.borrow_mut();
+                if q.is_empty() || buf.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = q.remove(0);
+                Ok(1)
+            }
+        }
+        let mut pending = Vec::new();
+        let key = read_key(Drip(&queue), &mut pending, 50, |_| !queue.borrow().is_empty());
+        assert_eq!(key.unwrap(), Key::Up);
+        assert!(pending.is_empty());
+    }
+
+    /// Why `event_loop` reads `term::Stdin` and never `io::stdin()`.
+    ///
+    /// A reader that buffers ahead of the descriptor strands the tail of
+    /// an escape sequence where a `poll` cannot see it. `read_key` then
+    /// gets an honest "nothing ready" and correctly reports a standalone
+    /// Esc, having been lied to about where the bytes are. Every arrow
+    /// key in the TUI broke exactly this way.
+    ///
+    /// This pins the hazard rather than a bug: `read_key` is doing the
+    /// right thing with the answers it is given. Anything that pairs it
+    /// with a buffered reader again has a failing test explaining why.
+    #[test]
+    fn a_reader_that_buffers_ahead_of_its_readiness_probe_breaks_an_arrow_key() {
+        let fd = std::cell::RefCell::new(b"\x1b[A".to_vec());
+        // Slurps the whole descriptor on first read, like `BufReader`.
+        struct Slurp<'a> {
+            fd: &'a std::cell::RefCell<Vec<u8>>,
+            buf: Vec<u8>,
+        }
+        impl io::Read for Slurp<'_> {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if self.buf.is_empty() {
+                    self.buf = std::mem::take(&mut *self.fd.borrow_mut());
+                }
+                if self.buf.is_empty() || out.is_empty() {
+                    return Ok(0);
+                }
+                out[0] = self.buf.remove(0);
+                Ok(1)
+            }
+        }
+        let reader = Slurp { fd: &fd, buf: Vec::new() };
+        let mut pending = Vec::new();
+        // Readiness asks the descriptor, which the slurp already drained.
+        let key = read_key(reader, &mut pending, 50, |_| !fd.borrow().is_empty());
+        assert_eq!(key.unwrap(), Key::Esc, "the arrow is lost, which is the bug");
+    }
+
     #[test]
     fn parse_reads_a_single_character() {
         assert_eq!(parse("g"), Some(Key::Char('g')));

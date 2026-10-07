@@ -51,6 +51,21 @@ pub enum EdgeKind {
     /// Relation to block, `Produces`'s own reverse direction. Inferred
     /// from a SQL block's own read targets, minus whatever it produces.
     Reads,
+    /// The section declaring a `dankg:depends` marker, to the node that
+    /// marker names (decision 32). Derived from the marker rather than
+    /// written as a link, and advisory for `check`'s own exit code
+    /// whatever the graph does with it. Costs the ordinary hop against
+    /// `--depth`, unlike `Produces`/`Reads`. Decision 38's free entry is
+    /// keyed on the node kind at the far end. This one lands on an
+    /// ordinary heading or block rather than on a relation sitting
+    /// between two of them.
+    Depends,
+    /// Block to block, over a `deps=` or an `xdeps=`. One kind for
+    /// both, since `eval::plan` already resolves the two the same way
+    /// and nothing downstream has asked to tell them apart. The TUI's
+    /// own panel and filter already call this a block's eval chain, so
+    /// the edge carries that name rather than a second one.
+    EvalChain,
 }
 
 impl EdgeKind {
@@ -60,6 +75,8 @@ impl EdgeKind {
             EdgeKind::Link => "link",
             EdgeKind::Produces => "produces",
             EdgeKind::Reads => "reads",
+            EdgeKind::Depends => "depends",
+            EdgeKind::EvalChain => "eval-chain",
         }
     }
 
@@ -78,6 +95,8 @@ impl EdgeKind {
             "link" => Some(EdgeKind::Link),
             "produces" => Some(EdgeKind::Produces),
             "reads" => Some(EdgeKind::Reads),
+            "depends" => Some(EdgeKind::Depends),
+            "eval-chain" => Some(EdgeKind::EvalChain),
             _ => None,
         }
     }
@@ -98,7 +117,7 @@ impl EdgeKind {
 /// the whole point of decision 69. Its slug shares one namespace with
 /// every heading and block name in its file, so a reference written
 /// `[[#quarterly]]` resolves against it with no namespace spelled out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeKind {
     Heading,
     Block,
@@ -125,6 +144,13 @@ impl NodeKind {
             _ => None,
         }
     }
+
+    /// Every kind, in declaration order. The TUI's filter menu offers
+    /// one entry per kind and reads them from here. A fifth kind added
+    /// above therefore reaches that menu with no second list to
+    /// update.
+    pub const ALL: [NodeKind; 4] =
+        [NodeKind::Heading, NodeKind::Block, NodeKind::Artifact, NodeKind::Relation];
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +193,14 @@ pub struct Edge {
     /// rather than written.
     pub line: u32,
     pub reciprocated: bool,
+    /// The `quote=` a `dankg:depends` marker carries, for a `Depends`
+    /// edge alone. Empty for every other kind, exactly the way `line`
+    /// above is zero for containment: a field one kind gives meaning to
+    /// and the rest leave alone, documented here rather than split off
+    /// into a table parallel to `edges`. `render::json` is the only
+    /// renderer that emits it, since neither drawn backend labels an
+    /// edge at all.
+    pub quote: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -266,6 +300,7 @@ mod tests {
             kind: EdgeKind::Link,
             line: 1,
             reciprocated: false,
+            quote: String::new(),
         }
     }
 
@@ -322,6 +357,7 @@ mod tests {
                 kind: EdgeKind::Contains,
                 line: 0,
                 reciprocated: false,
+                quote: String::new(),
             }],
         };
         assert_eq!(g.incoming_link_count(&NodeId::new("a", "y")), 0);
@@ -338,6 +374,7 @@ mod tests {
                     kind: EdgeKind::Contains,
                     line: 0,
                     reciprocated: false,
+                    quote: String::new(),
                 },
                 link(("a", "y"), ("a", "x")),
             ],

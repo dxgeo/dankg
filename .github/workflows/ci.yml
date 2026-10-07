@@ -55,3 +55,18 @@ jobs:
       # dependencies* and *Title collisions*.
       - name: Corpus check (dankg check)
         run: ./target/release/dankg check .
+
+      # `check` cannot catch this one, by decision 39: it hashes a
+      # block's source, never its output. *Self-hosted corpus stats*
+      # reads the corpus, and the corpus is not in its hash, so the
+      # recorded figure can rot while every gate above stays green. It
+      # has done: once by a third, unnoticed until a review went
+      # looking. Re-running the block and failing on a diff is the
+      # narrow fix
+      # `plans/plan-graph-edge-coverage.md` names; a way for a block to
+      # declare the corpus as its input is the general one, still open.
+      - name: Corpus-derived stats are current
+        run: |
+          ./target/release/dankg eval architecture.md \
+            --block corpus-edge-counts --yes
+          git diff --exit-code architecture.md

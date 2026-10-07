@@ -23,6 +23,8 @@ pub const CSS: &str = r##"
   --node-line: #3c3c3c;
   --edge: #8f8f8f;
   --contains: #c4c4be;
+  --depends: #8a6fbf;
+  --eval-chain: #3f7f5f;
   --accent: #2f6f4f;
   --accent-soft: #d9e8df;
   /* A named code block's own node. Distinct from an ordinary heading's
@@ -48,6 +50,8 @@ pub const CSS: &str = r##"
     --node-line: #9aa0a8;
     --edge: #6d727a;
     --contains: #3c4046;
+    --depends: #9a86c9;
+    --eval-chain: #5f9f7f;
     --accent: #74c39a;
     --accent-soft: #24382e;
     --block-bg: #23263a;
@@ -110,6 +114,8 @@ header .legend i {
 }
 
 header .legend i.contains { border-top-color: var(--contains); border-top-width: 3px; }
+header .legend i.depends { border-top-style: dashed; border-top-color: var(--depends); }
+header .legend i.eval-chain { border-top-color: var(--eval-chain); }
 header .legend i.dangling { border-top-style: dashed; border-top-color: var(--muted); }
 
 header .controls {
@@ -156,6 +162,19 @@ svg.canvas.panning { cursor: grabbing; }
 .edge.contains {
   stroke: var(--contains);
   stroke-width: 2.2;
+}
+
+/* A prose dependency is dashed and tinted, matching dot's own
+   `style=dashed` and mermaid's dotted arrow. All three say the same
+   thing: `check` treats this edge as advisory where it treats an
+   unresolved link as fatal (decision 32). */
+.edge.depends {
+  stroke: var(--depends);
+  stroke-dasharray: 6 3;
+}
+
+.edge.eval-chain {
+  stroke: var(--eval-chain);
 }
 
 .edge.dangling { stroke-dasharray: 4 3; }

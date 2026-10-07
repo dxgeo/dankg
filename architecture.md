@@ -630,7 +630,9 @@ struct Node {
 
 // Produces/Reads are inferred, never authored: a db= block's own
 // recorded provenance, and the file a produces=file: block writes.
-enum EdgeKind { Contains, Link, Produces, Reads }
+// Depends/EvalChain are derived rather than written too: a
+// dankg:depends marker, and a deps=/xdeps= eval plan already resolves.
+enum EdgeKind { Contains, Link, Produces, Reads, Depends, EvalChain }
 
 struct Edge {
     from: NodeId,
@@ -1034,6 +1036,40 @@ So the declaration is recorded as written and matched later. `ParsedFile` carrie
 **An artifact becomes free to enter against `--depth`.** Decision 38 gave a relation that treatment. The reason now applies here too: once a `reads=` is an edge, an artifact sits *between* two blocks rather than hanging off one. Charging a hop in each direction would hide the producer from the consumer at `--depth 1`, which is exactly the lineage the edge exists to show. Leaving one for a further block still costs the ordinary hop, so decision 38's own warning about collapsing distance in both directions still holds.
 
 Cache `VERSION` 4 to 5. Resolution reads the new list, so an older entry would serve a corpus with no lineage while still hashing as fresh.
+
+## Decision 78: A `dankg:depends` marker is an edge, and it carries its quote
+
+A `dankg:depends` marker gets a `Depends` edge from the section that declares it to the section its `target=` names. The marker's `quote=` rides on the edge itself.
+
+Decision 32 made a prose dependency a `check`-only report and said so on purpose. *Open questions* then deferred the edge "until a real corpus wants to *see* a prose dependency, not just be warned about one". The trigger fired by accumulation rather than by request. This corpus carries 271 markers against 73 written links. The mechanism it actually adopted for cross-reference was therefore the one mechanism the graph could not show. `plans/plan-graph-edge-coverage.md` is the argument in full.
+
+**It is its own kind, not a `Link`.** A link is a reference a reader follows. A prose dependency is a claim one section makes about another. `check` acts on that difference already, treating a stale quote as advisory and an unresolved link as fatal. One edge kind cannot carry both policies.
+
+**It costs the ordinary hop against `--depth`.** Decision 38's free entry is keyed on the node kind at the far end. `zero_cost_relations` admits a `Relation` or an `Artifact`. Both of those sit *between* two blocks. Entry is free for that reason, while leaving still charges. A prose dependency joins two headings directly. No second step exists to charge for, which makes free-to-enter mean free outright. Headings would then edge to headings that way, turning a deliberately single pass into a fixed point over every marker in the corpus. `--depth 0` would draw most of a corpus this size.
+
+**The quote is emitted by `--format json` alone.** Neither drawn backend labels an edge at all today: mermaid picks an arrow string per kind and dot picks a colour and a weight. A quote would be a new mechanism in both rather than an extension of one. The field rides on `Edge` following `line`'s own precedent there -- meaningful for one kind, inert for the rest -- and `render::json` omits it rather than writing it empty, because that dump is committed and diffed.
+
+**An unresolvable target gets decision 8's placeholder.** A section a reader already depends on, and nobody has written, becomes visible rather than merely warned about. One placeholder serves a dangling link and a marker naming that same section. An unwritten section therefore stays one node, however many references reach it.
+
+The marker stays advisory for `check`'s exit code. Decision 32 is unchanged: drawing a weak signal does not make it a strong one.
+
+Resolution is `depends::resolve_target`, the function `check_cmd` already resolves a marker through. The graph and `dankg check` therefore cannot disagree about where a marker points. Scope matches too. `depends::markers_in` scans top-level blocks only, which leaves a marker inside a list item invisible to both.
+
+## Decision 79: A `deps=`/`xdeps=` entry is an edge, matched by declared name
+
+A block's `deps=` and `xdeps=` entries each get an `EvalChain` edge from the declaring block to the block named. One kind for both, because `eval::plan::resolve_dep` already resolves the two identically and nothing downstream has asked to tell them apart.
+
+**The name half is matched against a block node's `title`, never slugified.** A block's declared name and its slug come apart under collision: a `name=tests` block beside a `## Tests` heading is slugged `tests-1`. A slug lookup would draw the edge to the heading, or to nothing. This is the one place a dep and a marker part company. The reason is that a `deps=` entry was never written as a fragment, where a `target=` was.
+
+**An entry naming no block gets no edge and no placeholder.** `eval::plan::resolve_dep` already refuses to plan that corpus, naming the block and the entry. `dankg eval` fails on it. A placeholder would be a second report of one error, against a node nothing can act on.
+
+This corpus has zero of these edges, which is worth recording rather than hiding. Every named block under `src/` is a tangle block carrying `name=` and `path=` and no `deps=`. Neither `example/` nor `literate/` is indexed. The fixture corpus is where both directions are exercised, same-file and cross-file.
+
+Cache `VERSION` 5 to 7, and `render::json`'s `SCHEMA_VERSION` 2 to 3. Both new kinds, and the `quote` field, are things an older entry or an older consumer does not carry.
+
+**Two cache bumps for one plan.** The second one is the lesson. Version 6 shipped the `quote` field and both `EdgeKind` variants with nothing creating either. Version 7 shipped the `depends`/`dep` rows that actually produce them. An entry written by the version-6 build therefore decodes as fresh, carries no marker rows, and serves a corpus whose prose dependencies have silently vanished -- precisely the trap `cache.md`'s own comment warns about, walked into while implementing the plan that quotes that comment. It stayed hidden locally because the fixture corpora keep caches of their own. Clearing the repo root's cache does not touch those. A clean CI checkout found it within a minute.
+
+**A placeholder must not fail the build.** Giving an unresolvable target decision 8's placeholder had a consequence this decision did not anticipate. An unresolved node is otherwise fatal to `dankg check`. A marker naming a section nobody had written yet therefore failed a build that the bare `check` report is deliberately allowed not to fail. That is decision 32 broken by a side effect rather than by argument. `check_cmd` now ignores a placeholder that *only* a `Depends` edge reaches. A written link to the same unwritten section still fails: a broken reference stays broken whatever else also points there, and one unwritten section is one shared node.
 
 ## Block nodes
 
@@ -1805,7 +1841,7 @@ has actually set, and lost `Copy` in the process -- a `String` payload
 made that unavoidable. Its full option list is no longer the fixed
 four-variant constant the filter menu used to cycle through:
 `App::filter_options` rebuilds it from `self.annotations` every time
-the menu opens or moves, the four built-ins first, then one `Tag` per
+the menu opens or moves, the built-ins first, then one `Tag` per
 distinct kind, alphabetical -- the same "just rebuild it, cheap at
 this corpus's size" reasoning `filter_membership` already uses. A kind
 nothing has tagged yet simply is not a menu option; there is no way to
@@ -2086,14 +2122,59 @@ the ceiling rather than always waiting it out.
 
 <!-- dankg:depends target=src/tui/app.md#run_and_event_loop quote="split an escape sequence's leading `ESC` byte from its" -->
 
+### An escape sequence that arrived all at once
+
+The two fixes above both treated a missing second byte as a timing
+problem. A reader then reported that arrow keys did nothing in a plain
+terminal, where `hjkl` worked fine. No timeout was involved. The bytes
+had already arrived.
+
+`read_key` read through `io::stdin()`, which keeps an 8KB `BufReader`
+of its own. `term::stdin_ready` polls the file descriptor. A terminal
+sends `ESC [ A` in one write. So the first one-byte read pulled all
+three bytes out of the descriptor and into that buffer, handed back the
+`ESC`, and left `[` and `A` where no `poll` could see them. `esc_ready`
+asked the kernel, which accurately reported an empty descriptor.
+`read_key` concluded the reader had pressed Esc alone. The two stranded
+bytes surfaced on the next keypress as `Char('[')` and `Char('A')`.
+
+Neither half was wrong by itself, which is why this survived two
+earlier passes over the same code. `read_key` reasoned correctly from
+the answers it was given. `stdin_ready` reported the descriptor
+honestly. The pairing was what failed. A pairing is not a thing either
+function's own tests can see.
+
+This is also why raising `ESC_TIMEOUT_MS` could never have fixed it,
+and why *An escape sequence tmux delivered in two pieces* above is a
+genuinely different bug rather than the same one recurring. There the
+bytes were still in flight and the ceiling really was too low. Here
+they had arrived before `esc_ready` was ever called. No timeout reaches
+a byte on the wrong side of a buffer.
+
+The fix removes the second buffer. `term::Stdin` reads fd 0 directly,
+through one more hand-declared `extern "C"` `read` rather than a crate
+(decision 1). `read` and `poll` now ask about the same bytes.
+
+Two tests, because the hazard is a pairing rather than a function. One
+models the fixed arrangement: one queue, a byte at a time, readiness
+reported from that same queue. An arrow delivered all at once resolves
+there. The other models a reader that buffers ahead of its own
+readiness probe and asserts the arrow is lost. Anything that pairs
+`read_key` with a buffered reader again therefore fails a test
+explaining why. The existing suite could not have caught this. It
+passes a `&[u8]` as the reader and stubs `esc_ready`. The two buffers
+never coexist in it.
+Found by hand, confirmed against a real pty.
+
 ## The tree and the cross-reference panel
 
 `dankg tui` rendered a Sugiyama graph layout, boxes and polylines on a
 character grid, until this pass replaced it with a nerdtree-style
 collapsible tree plus a persistent detail panel. The corpus's own graph
-is overwhelmingly a containment hierarchy -- on this repo's own
-self-hosted corpus, 496 `Contains` edges against 56 `Link` edges and a
-handful of `Produces`/`Reads` -- so a general-DAG layout was spending
+is overwhelmingly a containment hierarchy -- *Self-hosted corpus
+stats* counts that ratio rather than restating it here, having already
+watched the figure move twice -- so a general-DAG layout was
+spending
 its whole visual budget (crossing lines, wide ranks) on structure the
 data barely has. A tree matches its actual shape.
 
@@ -2173,12 +2254,24 @@ that failed to resolve, and `↻N` for one that resolved but has not
 actually run. `xdeps=` alone never triggers a run, so that last case
 is a real, expected state, not a corpus error.
 
+Decision 78 added a fifth and sixth glyph beside those: `⇢N` for the
+prose dependencies a section declares, and `⇠N` for the sections that
+lean on a claim it makes. They read as dashed arrows on purpose,
+against `⇒N`/`⇐N`'s solid ones. An eval chain is execution order. A
+prose dependency is a quoted claim. `check` treats the two with
+deliberately different severity.
+
 <!-- dankg:depends target=plans/dependency-surfacing.md#e-unresolved-but-correct----needs-to-run-not-broken quote="An `xdeps=` target, block- or `table:`-targeted, never does: it is checked, not run." -->
 
-Five matching panel rows (`PanelRow::DepOut`/`DepIn`/`FileDep`/
-`DepBroken`/`DepPending`) carry the same facts in full for the
-selected node. `DepOut`/`DepIn` are navigable exactly like
-`Outgoing`/`Backlink`; the rest are plain text, reusing `PlanError`'s
+Seven matching panel rows carry the same facts in full for the
+selected node: `PanelRow::DepOut`/`DepIn`, `Depends`/`DependedOnBy`,
+`FileDep`, `DepBroken` and `DepPending`. The first four are navigable
+exactly like `Outgoing`/`Backlink`. `enter` therefore jumps along a
+prose dependency the way it already jumps along a link. A `Depends` row also
+carries the marker's own `quote=`, which is the whole content of the
+relation: a row naming only the target section would say that some
+dependency exists without saying which claim it rests on. The rest are
+plain text, reusing `PlanError`'s
 and `eval::result`'s own existing wording rather than inventing new
 copy, so a broken or pending dependency reads the same in the TUI as
 it would from `dankg check`. `App::compute_dep_data` computes all of
@@ -2193,8 +2286,9 @@ private to
 `eval::result::verified_hash`/`block_index_for`.
 
 `f` opens a small filter-picker overlay rather than cycling in place:
-up/down move the menu's own cursor among `All`/`Blocks`/`Eval-chain`/
-`File-artifact` (`App::move_filter_menu_cursor`, never touching
+up/down move the menu's own cursor among `All`, one entry per node
+kind, `Eval-chain`, `Depends` and `File-artifact`
+(`App::move_filter_menu_cursor`, never touching
 `self.filter` itself), `enter` applies whichever it lands on
 (`App::confirm_filter_menu` -> `apply_filter`), `esc` closes it
 unapplied. Applying a `Filter` hides a non-matching row while keeping
@@ -2204,7 +2298,22 @@ a one-shot jump. `Eval-chain` settles dependency-surfacing.md §3's
 own open question in favor of "declares *or* is targeted": a block
 only ever named by another's `deps=`/`xdeps=`, with nothing of its
 own to declare, still matches -- otherwise the filter would hide the
-very leaves a reader turns it on to find.
+very leaves a reader turns it on to find. `Depends` reads the same
+way, over decision 78's own edges.
+
+The per-kind entries replaced a single `Blocks` variant with
+`Filter::Kind(NodeKind)`, reading its option list straight off
+`NodeKind::ALL`. A block was the only kind worth singling out when the
+menu was first built. A relation and an artifact are nodes a reader has
+the same reason to isolate. Deriving the list from the enum also means a
+fifth kind reaches the menu with no second list to update.
+
+A relation is the one kind that entry cannot read literally.
+`build_children` leaves relations out of the tree on purpose, since one
+is corpus-wide and parentless. Matching a row against
+`NodeKind::Relation` could therefore never keep one, leaving the entry
+to do nothing at all. It matches a node that *touches* a relation instead,
+which is exactly what the `⚭` badge already reports.
 
 Each `Filter` remembers its own last selected row independently
 (`App::filter_history`, keyed by variant), restored on returning to
@@ -2794,11 +2903,15 @@ of that line a real report will fall. A mechanism that gates a build on a
 signal this weak trains a reader to add `--no-verify`-shaped workarounds,
 or to stop reading its output at all, rather than to treat a report as
 worth a look. `dankg:depends` stays a `dankg check`-reported hint, one a
-reader chooses to act on, not a build gate. Nothing here creates a graph
-node or edge, unlike a written link: rendering a dependency in `dot`,
-`mermaid`, and `html`, and giving it a cache schema of its own, is a
-real, separable feature this decision deliberately leaves for whenever a
-real corpus actually asks for it. See *Open questions*.
+reader chooses to act on, not a build gate.
+
+That last part held. The part about the graph did not. This decision
+left the edge out as a separable feature, "for whenever a real corpus
+actually asks for it". It asked by accumulation rather than by request.
+271 markers against 73 written links made this the mechanism the corpus
+had adopted for cross-reference, and the only one the graph could not
+show. Decision 78 is the edge. It changes nothing here -- a stale quote
+is still advisory, for exactly the reason given above.
 
 # Tangle
 
@@ -3800,10 +3913,11 @@ database, not to whichever file's block happened to name it first.
 
 <!-- dankg:depends target=#slugs-and-node-identity quote="`NodeId` is `<file path relative to root, extension stripped>#<slug>`." -->
 
-Two new edge kinds join `Contains` and `Link`:
+Two new edge kinds join `Contains` and `Link` here. `Depends` and
+`EvalChain` came later again, under *Prose dependencies*:
 
 ```rust
-enum EdgeKind { Contains, Link, Produces, Reads }
+enum EdgeKind { Contains, Link, Produces, Reads, Depends, EvalChain }
 ```
 
 `Produces` runs from the block's node to the relation. `Reads` runs
@@ -4878,6 +4992,28 @@ in the act again.
 <!-- dankg:depends target=plans/tui-tmux-pane-plan.md#tui-editor-handoff-a-tmux-pane-not-a-context-switch quote="hand the same resolved editor command to a new,
 side-by-side pane instead" -->
 
+14. \[DONE\] `dankg weave` (`src/weave.md`, `src/render/typst.md`,
+    `src/render/html.md`). Typesetting one file as a document, the
+    corollary decision 25 named when it defined tangle "as opposed to
+    *weaving* them into typeset documentation". Numbered here, late and
+    retroactively, for a reason worth recording: weave grew as a
+    continuous stream rather than a phase. Decisions 41 through 68 are
+    almost all weave, and none of them closed anything. Every other
+    subsystem above is a numbered phase with a point at which it was
+    declared done. Weave had no such point. Each new feature was
+    therefore an addition to an open stream rather than a reopening of
+    a closed phase.
+
+    `DONE` here is a scope fence, not a claim that weave is finished in
+    some absolute sense. The feature set it closes over is
+    the one *Open questions (Weave)* already fences: corpus-wide weave
+    out of scope, no list of figures, no HTML syntax highlighting, one
+    artifact per block. Nothing about the code changes by writing this
+    down. What changes is that the next weave feature has to argue for
+    reopening a closed phase, the same argument every other subsystem
+    here already owes. `plans/plan-graph-edge-coverage.md`'s own
+    *Scope* section is where the reasoning was worked out.
+
 ## `dankg init`
 
 Every other command reads a corpus that already exists. `init` is
@@ -4925,17 +5061,32 @@ overwhelmingly a containment hierarchy, not a general DAG. This block
 checks that claim instead of restating a hand count. `dankg eval architecture.md --block corpus-edge-counts --yes` re-runs it and
 writes the current count back below.
 
+It now counts `Depends` as well, which is the whole point of *Prose
+dependencies*. The figure it reports was also developer-local until
+`CLAUDE.md` joined `.dankgignore`. That file is in `.gitignore`, so a
+clean checkout never had it. The nine containment edges it contributed
+therefore appeared only on a machine that did. A corpus-derived
+measurement is worth nothing unless the corpus is the same corpus
+everywhere. The CI step added beside this block is what caught the
+difference. The authored cross-reference this corpus carries was
+always there. Until those edges existed, the ratio below measured the
+graph's own blindness rather than the corpus. `EvalChain` is counted
+too and is zero here, because every named block under `src/` is a
+tangle block declaring no `deps=`.
+
 ```sh name=corpus-edge-counts
 json=$(cargo run --release --quiet -- graph . --format json 2>/dev/null)
 contains=$(printf '%s\n' "$json" | grep -c '"kind": "contains"')
 link=$(printf '%s\n' "$json" | grep -c '"kind": "link"')
-echo "$contains Contains edges against $link Link edges"
+depends=$(printf '%s\n' "$json" | grep -c '"kind": "depends"')
+chain=$(printf '%s\n' "$json" | grep -c '"kind": "eval-chain"')
+echo "$contains Contains edges against $link Link, $depends Depends, $chain EvalChain"
 ```
 
-<!-- dankg:result name=corpus-edge-counts hash=ae8fcf0de8ab4635 -->
+<!-- dankg:result name=corpus-edge-counts hash=739330e5b06a7148 -->
 
 ```
-928 Contains edges against 72 Link edges
+942 Contains edges against 73 Link, 272 Depends, 0 EvalChain
 ```
 
 # Open questions
@@ -4948,13 +5099,10 @@ echo "$contains Contains edges against $link Link edges"
 - Cross-file tangle, an eval-able-but-not-tangled escape hatch, and
   whether a language with no configured `[tangle.*] command` should still
   get a compile-check: see *Tangle*'s own *Open questions*.
-- Should `dankg:depends` (decision 32) ever become a graph edge -- drawn
-  in `dot`/`mermaid`/`html`, given its own cache schema bump -- rather
-  than a `check`-only report? Deferred on purpose until a real corpus
-  wants to *see* a prose dependency, not just be warned about one. A
-  marker that never resolves would need a placeholder-node treatment
-  much like a dangling link's own (decision 8), which is one more reason
-  this was left for a real need rather than spun up speculatively.
+- Should a marker's own `quote=` ever render on a drawn edge, rather than
+  in `--format json` alone? Decision 78 settled the field itself and left
+  this open, because neither dot nor mermaid labels an edge at all today.
+  A reader who wants the claim beside the line is the trigger.
 - Should a marker ever be allowed more than one `quote=`, for a section
   that leans on several claims from the same target at once? Today a
   section wanting that writes several markers. Whether that is a real

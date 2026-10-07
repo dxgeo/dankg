@@ -128,6 +128,22 @@ pub fn render(graph: &Graph, layout: &Layout) -> String {
             attrs.push("weight=2".to_string());
             attrs.push("color=\"#c0c0c0\"".to_string());
         }
+        // A prose dependency is dashed, the same distinction mermaid
+        // draws with a dotted arrow: `check` treats one as advisory
+        // where it treats an unresolved link as fatal (decision 32).
+        // The quote itself is never drawn. There is no room for a
+        // sentence on an edge, which is open question 2's own answer.
+        if edge.kind == EdgeKind::Depends {
+            attrs.push("style=dashed".to_string());
+            attrs.push("color=\"#8a6fbf\"".to_string());
+        }
+        // An eval chain is the one edge here that describes execution
+        // order rather than reference, so it gets the one arrowhead that
+        // reads as a pipeline.
+        if edge.kind == EdgeKind::EvalChain {
+            attrs.push("color=\"#3f7f5f\"".to_string());
+            attrs.push("arrowhead=vee".to_string());
+        }
         if !attrs.is_empty() {
             let _ = write!(out, " [{}]", attrs.join(", "));
         }

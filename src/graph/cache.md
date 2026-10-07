@@ -35,7 +35,7 @@ same file means.
 //! does not use the cache and does not want to. It reads every file it is
 //! given anyway.
 
-use super::build::{ParsedFile, RawLink, RawRead, Target};
+use super::build::{ParsedFile, RawDep, RawDepends, RawLink, RawRead, Target};
 use super::model::{Edge, EdgeKind, Node, NodeId, NodeKind};
 use crate::config;
 use crate::diag::{Diagnostic, Level};
@@ -46,15 +46,31 @@ use std::path::{Path, PathBuf};
 const MAGIC: &str = "!dankg-cache";
 /// Bumped whenever the record format changes, or whenever the same bytes
 /// would now build different nodes. An entry from another version is a miss,
-/// not an error. 2: a node row grew a `kind` field (block nodes). 3: a
-/// declared frontmatter `title` became the file's own top-level node
-/// (decision 62), so an unchanged file's node set changed underneath an
-/// entry that still hashes as fresh. 4: a `produces=file:` artifact
-/// became a node of its own (decision 69), which is the same trap
-/// again -- the file is untouched and its node set is not. 5: a row for
-/// each `reads=file:` a block declares (decision 76), which resolution
-/// now reads and an older entry does not carry.
-const VERSION: u32 = 5;
+/// not an error. Each note below opens on its own line on purpose. A
+/// `dankg:depends` quote is matched after whitespace normalization, which
+/// leaves a `///` prefix standing in the middle of any quote spanning a
+/// line break. A one-line note is therefore the only kind a plan can pin.
+/// 2: a node row grew a `kind` field (block nodes).
+/// 3: a declared frontmatter `title` became the file's own top-level node
+///    (decision 62), so an unchanged file's node set changed underneath
+///    an entry that still hashes as fresh.
+/// 4: a `produces=file:` artifact became a node of its own (decision 69),
+///    which is the same trap again -- the file is untouched and its node
+///    set is not.
+/// 5: a row for each `reads=file:` a block declares (decision 76), which
+///    resolution now reads and an older entry does not carry.
+/// 6: an edge row grew a `quote` field.
+/// 7: a `depends`/`dep` row joined `link` and `read` as a relation
+///    recorded raw and resolved later. This is a second bump for one
+///    plan. It is the trap this comment exists to warn about rather
+///    than an exception to it. Version 6 shipped the field and the two
+///    `EdgeKind` variants with nothing creating either. An entry
+///    written by that build therefore decodes as fresh, carries no
+///    `depends` row, and serves a corpus whose prose dependencies have
+///    silently vanished. A stale fixture entry at 6 is exactly what hid
+///    a real bug from the local test run until CI, on a clean checkout,
+///    found it.
+const VERSION: u32 = 7;
 /// Separates the items of a list field. `escape` guarantees it never survives
 /// inside one, so splitting on it is exact.
 const UNIT: char = '\u{1f}';
@@ -277,6 +293,7 @@ fn encode(stamp: &Stamp, file: &ParsedFile, diags: &[Diagnostic]) -> String {
                 edge.kind.as_str().to_string(),
                 edge.line.to_string(),
                 flag(edge.reciprocated),
+                escape(&edge.quote),
             ],
         );
     }
@@ -306,6 +323,31 @@ fn encode(stamp: &Stamp, file: &ParsedFile, diags: &[Diagnostic]) -> String {
                 escape(&read.from.slug),
                 escape(&read.path),
                 read.line.to_string(),
+            ],
+        );
+    }
+    for marker in &file.depends {
+        row(
+            &mut out,
+            "depends",
+            &[
+                escape(&marker.from.file),
+                escape(&marker.from.slug),
+                escape(&marker.target),
+                escape(&marker.quote),
+                marker.line.to_string(),
+            ],
+        );
+    }
+    for dep in &file.deps {
+        row(
+            &mut out,
+            "dep",
+            &[
+                escape(&dep.from.file),
+                escape(&dep.from.slug),
+                escape(&dep.target),
+                dep.line.to_string(),
             ],
         );
     }
@@ -362,6 +404,8 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
     let mut containment = Vec::new();
     let mut links = Vec::new();
     let mut reads = Vec::new();
+    let mut depends = Vec::new();
+    let mut deps = Vec::new();
     let mut reported = Vec::new();
 
     for line in lines {
@@ -388,12 +432,13 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
                 resolved: unflag(f[11])?,
                 kind: NodeKind::parse(f[12])?,
             }),
-            "edge" if f.len() == 7 => containment.push(Edge {
+            "edge" if f.len() == 8 => containment.push(Edge {
                 from: NodeId::new(unescape(f[0]), unescape(f[1])),
                 to: NodeId::new(unescape(f[2]), unescape(f[3])),
                 kind: EdgeKind::parse(f[4])?,
                 line: f[5].parse().ok()?,
                 reciprocated: unflag(f[6])?,
+                quote: unescape(f[7]),
             }),
             "link" if f.len() == 5 => links.push(RawLink {
                 from: NodeId::new(unescape(f[0]), unescape(f[1])),
@@ -409,6 +454,17 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
                 path: unescape(f[2]),
                 line: f[3].parse().ok()?,
             }),
+            "depends" if f.len() == 5 => depends.push(RawDepends {
+                from: NodeId::new(unescape(f[0]), unescape(f[1])),
+                target: unescape(f[2]),
+                quote: unescape(f[3]),
+                line: f[4].parse().ok()?,
+            }),
+            "dep" if f.len() == 4 => deps.push(RawDep {
+                from: NodeId::new(unescape(f[0]), unescape(f[1])),
+                target: unescape(f[2]),
+                line: f[3].parse().ok()?,
+            }),
             "diag" if f.len() == 4 => reported.push(Diagnostic {
                 level: Level::parse(f[0])?,
                 file: unescape(f[1]),
@@ -419,7 +475,7 @@ fn decode(text: &str, stamp: &Stamp) -> Option<(ParsedFile, Vec<Diagnostic>)> {
         }
     }
 
-    Some((ParsedFile { path: path?, key, nodes, containment, links, reads, aliases }, reported))
+    Some((ParsedFile { path: path?, key, nodes, containment, links, reads, depends, deps, aliases }, reported))
 }
 ```
 
@@ -594,6 +650,40 @@ mod tests {
         let text = encode(&stamp(), &file, &[]);
         let (decoded, _) = decode(&text, &stamp()).expect("entry is fresh");
         assert_eq!(decoded.reads, file.reads);
+    }
+
+    /// This plan's own round trip, and the reason `VERSION` went to 6. An
+    /// entry written before these rows existed decodes to a node set that
+    /// is right and an edge set that is short, which is exactly the trap
+    /// a content hash cannot see: the file is untouched.
+    ///
+    /// The `quote=` is the part worth asserting on. It is the one field on
+    /// `Edge` that carries text rather than a number or a flag, so it is
+    /// the one that `escape`/`unescape` can lose.
+    #[test]
+    fn a_depends_marker_and_an_eval_chain_survive_a_round_trip() {
+        let src = "# One\n\n<!-- dankg:depends target=b.md#two quote=\"a\tquoted\u{1f}claim\" -->\n\n```python name=setup\nx = 1\n```\n\n```python name=report deps=setup xdeps=../c.md#other\nprint(x)\n```\n";
+        let mut d = Diags::new("notes/a.md");
+        let doc = Document::parse(src, &mut d);
+        let file = build::build("notes/a.md", &doc, src.lines().count() as u32, &mut d);
+        assert_eq!(file.depends.len(), 1, "the fixture declares one: {:?}", file.depends);
+        assert_eq!(file.deps.len(), 2, "a `deps=` and an `xdeps=`: {:?}", file.deps);
+        assert!(file.depends[0].quote.contains('\t'), "the fixture exercises escaping");
+
+        let text = encode(&stamp(), &file, &[]);
+        let (decoded, _) = decode(&text, &stamp()).expect("entry is fresh");
+        assert_eq!(decoded.depends, file.depends);
+        assert_eq!(decoded.deps, file.deps);
+    }
+
+    /// An entry from the version before these rows is a miss, not a
+    /// silently short edge set. `another_version_is_a_miss_not_a_failure`
+    /// covers the mechanism; this pins the specific predecessor, since
+    /// `VERSION` 5 is what a reader who built `main` has on disk.
+    #[test]
+    fn a_version_5_entry_is_rejected_rather_than_read_short() {
+        let text = encode(&stamp(), &parsed(), &[]).replacen(&format!("\t{VERSION}\n"), "\t5\n", 1);
+        assert!(decode(&text, &stamp()).is_none());
     }
 
     #[test]

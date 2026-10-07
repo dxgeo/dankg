@@ -10,6 +10,7 @@
 //! never fails its exit code on what they find.
 
 mod binary {
+    use std::fs;
     use std::process::Command;
 
     fn run(args: &[&str]) -> (String, String, bool) {
@@ -87,5 +88,45 @@ mod binary {
         // a stale eval result does.
         let (_, _, ok) = run(&["check", "tests/data/depends-corpus"]);
         assert!(ok, "advisory-stale prose dependencies must not fail `dankg check`");
+    }
+
+    /// Decision 78 gave an unresolvable marker target decision 8's
+    /// placeholder, and an unresolved node is otherwise fatal here. That
+    /// turned `unresolved.md`'s advisory report into a failing build,
+    /// which is exactly what decision 32 promises never happens.
+    ///
+    /// The placeholder is still drawn. Only the exit code ignores it,
+    /// and only while nothing but a marker reaches it.
+    #[test]
+    fn a_placeholder_only_a_marker_reaches_is_drawn_but_never_fatal() {
+        let (_, stderr, ok) = run(&["check", "tests/data/depends-corpus"]);
+        assert!(ok, "a marker's own placeholder must not fail the build: {stderr}");
+        assert!(
+            stderr.contains("depends on `missing.md#nowhere`, which names no section"),
+            "it is still reported, just not fatal: {stderr}"
+        );
+        assert!(
+            !stderr.contains("unresolved of"),
+            "and it is not counted among the fatal unresolved nodes: {stderr}"
+        );
+    }
+
+    /// The other half of that scoping. A written link to the same
+    /// unwritten section is a broken reference whatever else points
+    /// there, so it still fails.
+    #[test]
+    fn a_written_link_to_the_same_unwritten_section_still_fails() {
+        let dir = std::env::temp_dir().join(format!("dankg-depends-fatal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("a.md"),
+            "# One\n\n<!-- dankg:depends target=#gone quote=\"x\" -->\n\n[go](#gone)\n",
+        )
+        .unwrap();
+        let path = dir.to_string_lossy().into_owned();
+        let (_, stderr, ok) = run(&["check", &path]);
+        assert!(!ok, "a dangling written link is still fatal: {stderr}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

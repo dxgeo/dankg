@@ -199,7 +199,11 @@ pub fn layout(graph: &Graph) -> Layout {
                     // Reads deserve their own weight is left undecided
                     // there. Inheriting Link's is the conservative
                     // default until a real corpus asks for better.
-                    EdgeKind::Link | EdgeKind::Produces | EdgeKind::Reads => LINK_WEIGHT,
+                    EdgeKind::Link
+                    | EdgeKind::Produces
+                    | EdgeKind::Reads
+                    | EdgeKind::Depends
+                    | EdgeKind::EvalChain => LINK_WEIGHT,
                 },
             )
         })

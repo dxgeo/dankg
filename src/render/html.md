@@ -165,6 +165,8 @@ fn header(out: &mut String, view: &Graph, index: &Graph, page: &Page<'_>) {
         "<span class=\"legend\">\
          <span><i class=\"contains\"></i>contains</span>\
          <span><i></i>link</span>\
+         <span><i class=\"depends\"></i>depends</span>\
+         <span><i class=\"eval-chain\"></i>eval chain</span>\
          <span><i class=\"dangling\"></i>unresolved</span>\
          </span>\n",
     );

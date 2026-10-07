@@ -401,7 +401,9 @@ mod binary {
         // Declarations only: `n0["Ideas"]`, not the edge lines that also start
         // with an identifier.
         let count = |out: &str| out.lines().filter(|l| l.contains("[\"")).count();
-        assert_eq!(count(&near), 2, "ideas.md has two headings and no hops: {near}");
+        // Two headings and the `summary` block they contain. No hops: the
+        // block's own `xdeps=` reaches project.md, which depth 0 excludes.
+        assert_eq!(count(&near), 3, "ideas.md's own nodes and no hops: {near}");
         assert!(count(&whole) > count(&near), "--all draws more than depth 0");
     }
 
@@ -410,7 +412,7 @@ mod binary {
         let (_, stderr, _) =
             run(&["graph", "tests/data/corpus/notes/ideas.md", "--format", "dot", "--depth", "0"]);
         assert!(stderr.contains("indexed: 3 file(s)"), "{stderr}");
-        assert!(stderr.contains("drawn: 2 nodes"), "{stderr}");
+        assert!(stderr.contains("drawn: 3 nodes"), "{stderr}");
     }
 
     #[test]

@@ -47,7 +47,7 @@ use crate::config::{Config, Keymap, Kind};
 use crate::depends;
 use crate::diag::Diags;
 use crate::eval::{files::Files, plan, result};
-use crate::graph::{index, query, resolve, view, Graph, NodeId, NodeKind};
+use crate::graph::{index, query, resolve, view, EdgeKind, Graph, NodeId, NodeKind};
 use crate::md::Document;
 use crate::tag;
 use std::collections::{HashMap, HashSet};
@@ -112,18 +112,28 @@ enum Focus {
 /// (dependency-surfacing.md, §3). `All` prunes nothing. Every other
 /// variant hides a non-matching row while keeping its ancestors
 /// visible, the same "hide, not dim" mental model `/`-search's own
-/// ancestor-reveal already trained. `Tag` is the one variant not fixed
-/// at compile time (eval-custom-plan.md's node-classification design):
-/// it names a `kind=` some `tag:` line has actually set this session,
-/// so `Filter` can no longer be `Copy` -- `App::filter_options` is
-/// where its full, current option list actually lives now, not a
-/// constant here. `Hash` is still for `App::filter_history`, keyed by
-/// variant.
+/// ancestor-reveal already trained.
+///
+/// `Kind` covers every node type through one variant rather than one
+/// variant each. It was `Blocks` while a block was the only kind worth
+/// singling out. A relation and an artifact are nodes a reader has the
+/// same reason to isolate. Three more hand-written variants would have
+/// been three more places to update when a fifth kind arrives. The
+/// option list comes from `NodeKind::ALL` instead, so it cannot fall
+/// out of step with the enum.
+///
+/// `Tag` is the one variant not fixed at compile time
+/// (eval-custom-plan.md's node-classification design). It names a
+/// `kind=` some `tag:` line has actually set this session, which is
+/// what stops `Filter` being `Copy`. `App::filter_options` is where the full,
+/// current option list actually lives now, not a constant here. `Hash`
+/// is still for `App::filter_history`, keyed by variant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Filter {
     All,
-    Blocks,
+    Kind(NodeKind),
     EvalChain,
+    Depends,
     FileArtifact,
     Tag(String),
 }
@@ -132,8 +142,9 @@ impl Filter {
     fn label(&self) -> String {
         match self {
             Filter::All => "all".to_string(),
-            Filter::Blocks => "blocks".to_string(),
+            Filter::Kind(kind) => kind.as_str().to_string(),
             Filter::EvalChain => "eval-chain".to_string(),
+            Filter::Depends => "depends".to_string(),
             Filter::FileArtifact => "file-artifact".to_string(),
             Filter::Tag(kind) => format!("tag:{kind}"),
         }
@@ -176,6 +187,8 @@ enum PanelRow {
     Relation { text: String },
     DepOut { target: NodeId, title: String },
     DepIn { target: NodeId, title: String },
+    Depends { target: NodeId, title: String },
+    DependedOnBy { target: NodeId, title: String },
     FileDep { text: String },
     DepBroken { text: String },
     DepPending { text: String },
@@ -187,7 +200,9 @@ impl PanelRow {
             PanelRow::Outgoing { target, .. }
             | PanelRow::Backlink { target, .. }
             | PanelRow::DepOut { target, .. }
-            | PanelRow::DepIn { target, .. } => Some(target),
+            | PanelRow::DepIn { target, .. }
+            | PanelRow::Depends { target, .. }
+            | PanelRow::DependedOnBy { target, .. } => Some(target),
             PanelRow::Relation { .. } | PanelRow::FileDep { .. } | PanelRow::DepBroken { .. } | PanelRow::DepPending { .. } => None,
         }
     }
@@ -458,7 +473,12 @@ fn event_loop(app: &mut App, raw: &mut Option<term::RawMode>, out: &mut impl Wri
     loop {
         let key = loop {
             if input::decode(&pending).is_some() || term::stdin_ready(RESIZE_POLL_MS) {
-                break input::read_key(io::stdin(), &mut pending, esc_timeout_ms, |ms| term::stdin_ready(ms))?;
+                // `term::Stdin`, never `io::stdin()`: the latter
+                // buffers internally while `stdin_ready` polls the
+                // descriptor, which strands the tail of every escape
+                // sequence a terminal sends in one write. See
+                // `term::Stdin`'s own doc comment.
+                break input::read_key(term::Stdin, &mut pending, esc_timeout_ms, |ms| term::stdin_ready(ms))?;
             }
             let mut dirty = term::take_resized();
             app.sweep_tick += 1;
@@ -1066,6 +1086,8 @@ fn render(app: &mut App, out: &mut impl Write) -> io::Result<()> {
             PanelRow::Relation { text } => draw::panel_line("", text, panel_cols),
             PanelRow::DepOut { title, .. } => draw::panel_line("⇒ ", title, panel_cols),
             PanelRow::DepIn { title, .. } => draw::panel_line("⇐ ", title, panel_cols),
+            PanelRow::Depends { title, .. } => draw::panel_line("⇢ ", title, panel_cols),
+            PanelRow::DependedOnBy { title, .. } => draw::panel_line("⇠ ", title, panel_cols),
             PanelRow::FileDep { text } => draw::panel_line("", text, panel_cols),
             PanelRow::DepBroken { text } => draw::panel_line("✗ ", text, panel_cols),
             PanelRow::DepPending { text } => draw::panel_line("↻ ", text, panel_cols),
@@ -1318,18 +1340,32 @@ fn compute_tags(root: &Path, corpus_paths: &[String], index: &Graph, config: &Co
     out
 }
 
-/// "∅ ⇒1 ⇐1 ✗1 ↻1 ▤ →2 ←1 ⚭": whether the node itself is unresolved
-/// (a dangling link's own placeholder, never real content), then
-/// resolved `deps=`/`xdeps=` out and in, broken and not-yet-run
-/// entries, a declared file artifact, then the existing outgoing/
-/// backlink/relation-touch summary, unchanged (dependency-
-/// surfacing.md §B-§E). A node's own classified `kind` icon is not
+/// One panel row's text for a prose dependency: the target section's
+/// own title, then the claim being leaned on. The quote is the content
+/// of the relation. A row without it would say only that some
+/// dependency exists. An empty quote is not a shape a marker can take.
+/// It is handled anyway, rather than printing a bare dash.
+fn with_quote(title: &str, quote: &str) -> String {
+    if quote.is_empty() {
+        return title.to_string();
+    }
+    format!("{title} -- \"{quote}\"")
+}
+
+/// "∅ ⇒1 ⇐1 ✗1 ↻1 ⇢2 ⇠1 ▤ →2 ←1 ⚭": whether the node itself is
+/// unresolved (a dangling link's own placeholder, never real content),
+/// then resolved `deps=`/`xdeps=` out and in, broken and not-yet-run
+/// entries, prose dependencies declared and received (decision 78), a
+/// declared file artifact, then the existing outgoing/backlink/
+/// relation-touch summary, unchanged (dependency-surfacing.md §B-§E). A node's own classified `kind` icon is not
 /// part of this badge -- `push_row` reads it separately, straight off
 /// `TreeRow::tag`. Zero-valued pieces are omitted, never printed as
 /// `⇒0`. The four dep-glyphs are a first cut, not a settled choice
 /// (§7).
 fn badge_for(id: &NodeId, resolved: bool, links: &query::NodeLinks, deps: &DepData) -> String {
     let mut parts = Vec::new();
+    let dep_quotes = links.depends.len();
+    let quoted_by = links.depended_on_by.len();
     if !resolved {
         // Leading, not trailing -- an unresolved node is a placeholder
         // invented to receive a dangling link (`graph::resolve::
@@ -1353,6 +1389,12 @@ fn badge_for(id: &NodeId, resolved: bool, links: &query::NodeLinks, deps: &DepDa
     let pending = count(&deps.dep_pending);
     if pending > 0 {
         parts.push(format!("↻{pending}"));
+    }
+    if dep_quotes > 0 {
+        parts.push(format!("⇢{dep_quotes}"));
+    }
+    if quoted_by > 0 {
+        parts.push(format!("⇠{quoted_by}"));
     }
     if deps.file_deps.contains_key(id) {
         parts.push("▤".to_string());
@@ -1417,7 +1459,22 @@ impl App {
     fn matches_filter(&self, id: &NodeId) -> bool {
         match &self.filter {
             Filter::All => true,
-            Filter::Blocks => self.index.node(id).is_some_and(|n| n.kind == NodeKind::Block),
+            // A relation is the one kind this cannot read literally.
+            // `build_children` leaves relations out of the tree on
+            // purpose: one is corpus-wide and parentless, leaving it no
+            // place in a file's own hierarchy. Matching a row against
+            // `NodeKind::Relation` could therefore never keep one. The
+            // menu entry would do nothing at all. It matches a node
+            // that *touches* a relation instead, which is exactly what
+            // the tree already reports with its own `⚭` badge.
+            Filter::Kind(NodeKind::Relation) => self.index.edges.iter().any(|e| {
+                matches!(e.kind, EdgeKind::Produces | EdgeKind::Reads)
+                    && (&e.from == id || &e.to == id)
+                    && [&e.from, &e.to]
+                        .iter()
+                        .any(|end| self.index.node(end).is_some_and(|n| n.kind == NodeKind::Relation))
+            }),
+            Filter::Kind(kind) => self.index.node(id).is_some_and(|n| n.kind == *kind),
             // "declares or is targeted" (§3's leaning): a block that
             // only ever gets named by others' `deps=`/`xdeps=` -- a
             // shared `setup`, say -- still belongs in its own filter.
@@ -1427,23 +1484,40 @@ impl App {
                     || self.deps.dep_broken.contains_key(id)
                     || self.deps.dep_pending.contains_key(id)
             }
+            // "declares or is targeted" again, for the same reason.
+            // A section nobody has quoted yet, which quotes three
+            // others, belongs here as much as the section they all
+            // quote. Read straight off `index.edges` rather than a
+            // precomputed set. One pass per node is the same "just
+            // rebuild it" trade `visible_rows` already takes. A filter
+            // change is not a per-frame cost.
+            Filter::Depends => self
+                .index
+                .edges
+                .iter()
+                .any(|e| e.kind == EdgeKind::Depends && (&e.from == id || &e.to == id)),
             Filter::FileArtifact => self.deps.file_deps.contains_key(id),
             Filter::Tag(kind) => self.annotations.get(id).is_some_and(|a| a.kind.as_deref() == Some(kind.as_str())),
         }
     }
 
-    /// `Filter`'s full, current option list: the four built-ins, fixed
-    /// order, then one `Filter::Tag` per distinct `kind=` some `tag:`
-    /// line has actually set this session, alphabetical. Unlike the
-    /// built-ins, this can grow while the TUI runs -- a command emits a
-    /// `tag:` line with a kind never seen before -- which is exactly
-    /// why the filter menu can no longer cycle through a fixed
-    /// constant the way it did before node classification existed.
+    /// `Filter`'s full, current option list, in fixed order: `All`,
+    /// then one `Filter::Kind` per node type straight off
+    /// `NodeKind::ALL`, then the three cross-reference filters, then
+    /// one `Filter::Tag` per distinct `kind=` some `tag:` line has
+    /// actually set this session, alphabetical.
+    ///
+    /// Only the tag tail can grow while the TUI runs -- a command emits
+    /// a `tag:` line with a kind never seen before -- which is why the
+    /// filter menu can no longer cycle through a fixed constant the way
+    /// it did before node classification existed.
     fn filter_options(&self) -> Vec<Filter> {
         let mut kinds: Vec<&str> = self.annotations.values().filter_map(|a| a.kind.as_deref()).collect();
         kinds.sort_unstable();
         kinds.dedup();
-        let mut options = vec![Filter::All, Filter::Blocks, Filter::EvalChain, Filter::FileArtifact];
+        let mut options = vec![Filter::All];
+        options.extend(NodeKind::ALL.into_iter().map(Filter::Kind));
+        options.extend([Filter::EvalChain, Filter::Depends, Filter::FileArtifact]);
         options.extend(kinds.into_iter().map(|k| Filter::Tag(k.to_string())));
         options
     }
@@ -1507,6 +1581,24 @@ impl App {
         }
         for source in self.deps.dep_in.get(&self.selected).into_iter().flatten() {
             rows.push(PanelRow::DepIn { target: source.clone(), title: title_of(source) });
+        }
+        // The quote rides on the row rather than getting one of its
+        // own. It is the whole content of a prose dependency -- which
+        // claim is being leaned on -- so splitting it onto a second,
+        // non-navigable line would put the answer one row away from the
+        // question. `draw::panel_line` truncates to the pane width, the
+        // same as every other row here.
+        for (target, quote) in links.depends.iter() {
+            rows.push(PanelRow::Depends {
+                target: target.clone(),
+                title: with_quote(&title_of(target), quote),
+            });
+        }
+        for (source, quote) in links.depended_on_by.iter() {
+            rows.push(PanelRow::DependedOnBy {
+                target: source.clone(),
+                title: with_quote(&title_of(source), quote),
+            });
         }
         for text in self.deps.file_deps.get(&self.selected).into_iter().flatten() {
             rows.push(PanelRow::FileDep { text: text.clone() });
@@ -3663,9 +3755,21 @@ mod tests {
     }
 
     #[test]
-    fn filter_options_is_just_the_four_built_ins_with_no_tags_set() {
+    fn filter_options_is_just_the_built_ins_with_no_tags_set() {
         let a = app(&[("a.md", "# One\n")]);
-        assert_eq!(a.filter_options(), vec![Filter::All, Filter::Blocks, Filter::EvalChain, Filter::FileArtifact]);
+        assert_eq!(
+            a.filter_options(),
+            vec![
+                Filter::All,
+                Filter::Kind(NodeKind::Heading),
+                Filter::Kind(NodeKind::Block),
+                Filter::Kind(NodeKind::Artifact),
+                Filter::Kind(NodeKind::Relation),
+                Filter::EvalChain,
+                Filter::Depends,
+                Filter::FileArtifact
+            ]
+        );
     }
 
     #[test]
@@ -3682,8 +3786,12 @@ mod tests {
             a.filter_options(),
             vec![
                 Filter::All,
-                Filter::Blocks,
+                Filter::Kind(NodeKind::Heading),
+                Filter::Kind(NodeKind::Block),
+                Filter::Kind(NodeKind::Artifact),
+                Filter::Kind(NodeKind::Relation),
                 Filter::EvalChain,
+                Filter::Depends,
                 Filter::FileArtifact,
                 Filter::Tag("alpha".to_string()),
                 Filter::Tag("zeta".to_string()),
@@ -3703,7 +3811,7 @@ mod tests {
     fn applying_a_filter_never_touches_expanded() {
         let mut a = app_with_hidden_child();
         let expanded_before = a.expanded.clone();
-        a.apply_filter(Filter::Blocks);
+        a.apply_filter(Filter::Kind(NodeKind::Block));
         assert_eq!(a.expanded, expanded_before, "a filter is a standing choice, not tree-shape state");
     }
 
@@ -3715,7 +3823,7 @@ mod tests {
         // back to.
         let mut a = app_with_hidden_child();
         let selected_before = a.selected.clone();
-        a.apply_filter(Filter::Blocks);
+        a.apply_filter(Filter::Kind(NodeKind::Block));
         assert_eq!(a.selected, selected_before);
     }
 
@@ -3727,7 +3835,7 @@ mod tests {
         // a `self.selected` that visible_rows no longer produces.
         let mut a = app(&[("a.md", "# One\n\n## Two\n\n```sh name=x\n:\n```\n\n## Three\n")]);
         a.selected = a.index.nodes.iter().find(|n| n.id.slug == "three").unwrap().id.clone();
-        a.apply_filter(Filter::Blocks); // Three has no block descendant
+        a.apply_filter(Filter::Kind(NodeKind::Block)); // Three has no block descendant
         assert_ne!(a.selected.slug, "three", "no longer pointed at a hidden row");
         assert!(a.visible_rows().iter().any(|r| r.id == a.selected), "reselected onto something visible");
         assert_eq!(a.selected.slug, "one", "One is the nearest surviving ancestor of the old selection");
@@ -3744,7 +3852,7 @@ mod tests {
         // surviving ancestor in that file's own chain to fall back to.
         let mut a = app(&[("a.md", "# NoBlocks\n"), ("b.md", "# HasBlock\n\n```sh name=x\n:\n```\n")]);
         a.selected = a.index.nodes.iter().find(|n| n.id.slug == "noblocks").unwrap().id.clone();
-        a.apply_filter(Filter::Blocks);
+        a.apply_filter(Filter::Kind(NodeKind::Block));
         // Falls back to the first matching node anywhere, in `index.nodes`'
         // own order -- b's containing heading (an ancestor of the match)
         // comes before the block itself in that order.
@@ -3760,7 +3868,7 @@ mod tests {
         let mut a = app(&[("a.md", "# NoBlocks\n"), ("b.md", "# HasBlock\n\n```sh name=x\n:\n```\n")]);
         a.selected = a.index.nodes.iter().find(|n| n.id.slug == "noblocks").unwrap().id.clone();
         let original = a.selected.clone();
-        a.apply_filter(Filter::Blocks);
+        a.apply_filter(Filter::Kind(NodeKind::Block));
         assert_ne!(a.selected, original, "genuinely relocated, not just left in place");
         a.apply_filter(Filter::EvalChain); // no manual move under Blocks
         a.apply_filter(Filter::All); // no manual move under EvalChain either
@@ -3771,7 +3879,7 @@ mod tests {
     fn navigating_under_a_filter_makes_the_next_filter_change_stay_put() {
         let mut a = app(&[("a.md", "# One\n\n```sh name=setup\n:\n```\n\n```sh name=top deps=setup\n:\n```\n")]);
         let original = a.selected.clone();
-        a.apply_filter(Filter::Blocks);
+        a.apply_filter(Filter::Kind(NodeKind::Block));
         a.down(); // manual navigation -- moves onto a different block row
         let moved_to = a.selected.clone();
         assert_ne!(moved_to, original);
@@ -3796,7 +3904,9 @@ mod tests {
         a.selected = setup.clone();
         a.apply_filter(Filter::FileArtifact); // records All's position as setup; setup is already valid here, so it stays
         assert_eq!(a.selected, setup);
-        a.apply_filter(Filter::Blocks); // records FileArtifact's position as setup; setup is valid under Blocks too, so it stays
+        // Records FileArtifact's position as setup. setup is valid
+        // under the block filter too. It therefore stays.
+        a.apply_filter(Filter::Kind(NodeKind::Block));
         assert_eq!(a.selected, setup);
 
         a.selected = other.clone(); // manual move, will be recorded under Blocks
@@ -3829,7 +3939,7 @@ mod tests {
         let mut a = app(&[("a.md", "# One\n")]);
         a.open_filter_menu(); // cursor starts on All
         a.move_filter_menu_cursor(1);
-        assert_eq!(a.filter_menu, Some(Filter::Blocks));
+        assert_eq!(a.filter_menu, Some(Filter::Kind(NodeKind::Heading)));
         assert_eq!(a.filter, Filter::All, "the cursor moving never touches the active filter");
         a.move_filter_menu_cursor(-1);
         a.move_filter_menu_cursor(-1); // past the start: wraps to the last variant
@@ -3840,7 +3950,7 @@ mod tests {
     fn esc_closes_the_filter_menu_without_applying_its_cursor() {
         let mut a = app(&[("a.md", "# One\n")]);
         a.open_filter_menu();
-        a.move_filter_menu_cursor(1); // cursor now on Blocks
+        a.move_filter_menu_cursor(1); // cursor now on the first node kind
         a.cancel_filter_menu();
         assert_eq!(a.filter_menu, None);
         assert_eq!(a.filter, Filter::All, "cancelling never applies the cursor's own filter");
@@ -3850,10 +3960,10 @@ mod tests {
     fn enter_applies_the_filter_menus_cursor_and_closes_it() {
         let mut a = app(&[("a.md", "# One\n\n```sh name=x\n:\n```\n")]);
         a.open_filter_menu();
-        a.move_filter_menu_cursor(1); // Blocks
+        a.move_filter_menu_cursor(2); // past Heading, onto Block
         a.confirm_filter_menu();
         assert_eq!(a.filter_menu, None);
-        assert_eq!(a.filter, Filter::Blocks);
+        assert_eq!(a.filter, Filter::Kind(NodeKind::Block));
     }
 
     #[test]
@@ -3872,7 +3982,7 @@ mod tests {
     #[test]
     fn blocks_filter_hides_headings_but_keeps_a_blocks_own_ancestor() {
         let mut a = app(&[("a.md", "# One\n\n## Two\n\n```sh name=x\n:\n```\n\n## Three\n")]);
-        a.filter = Filter::Blocks;
+        a.filter = Filter::Kind(NodeKind::Block);
         let ids = a.visible_rows().into_iter().map(|r| r.id.slug).collect::<Vec<_>>();
         assert!(ids.contains(&"x".to_string()), "the block itself stays: {ids:?}");
         assert!(ids.contains(&"two".to_string()), "its containing heading stays too, as an ancestor: {ids:?}");
@@ -4981,6 +5091,122 @@ mod tests {
         let out = String::from_utf8(sink).unwrap();
         assert!(out.contains("/"), "{out:?}");
         assert!(!out.contains("from: One"), "the search prompt should win the shared line: {out:?}");
+    }
+
+    /// One corpus for every prose-dependency case below. `One` leans on
+    /// a claim `Two` makes. Unlike `DepData`, this needs no file on
+    /// disk: the edge is in the graph `from_graph` was handed.
+    fn depends_app() -> App {
+        app(&[
+            (
+                "a.md",
+                "# One\n\n<!-- dankg:depends target=b.md#two quote=\"a claim\" -->\n",
+            ),
+            ("b.md", "# Two\n\nIt states a claim here.\n"),
+        ])
+    }
+
+    #[test]
+    fn the_panel_shows_a_prose_dependency_with_its_quote_and_navigates_it() {
+        let mut a = depends_app();
+        a.selected = NodeId::new("a", "one");
+        let rows = a.panel_rows();
+        let row = rows
+            .iter()
+            .find(|r| matches!(r, PanelRow::Depends { .. }))
+            .expect("the declaring section gets a row");
+        let PanelRow::Depends { title, target } = row else { unreachable!() };
+        assert_eq!(target, &NodeId::new("b", "two"));
+        assert!(title.contains("Two"), "the target's own title: {title}");
+        assert!(title.contains("a claim"), "and the claim leaned on: {title}");
+        assert!(row.target().is_some(), "a prose dependency is navigable");
+    }
+
+    /// The direction that matters for editing. A reader about to rewrite
+    /// `Two` wants to know `One` quoted it.
+    #[test]
+    fn the_panel_shows_who_leans_on_the_selected_section() {
+        let mut a = depends_app();
+        a.selected = NodeId::new("b", "two");
+        let rows = a.panel_rows();
+        let row = rows
+            .iter()
+            .find(|r| matches!(r, PanelRow::DependedOnBy { .. }))
+            .expect("the quoted section gets a row too");
+        let PanelRow::DependedOnBy { title, target } = row else { unreachable!() };
+        assert_eq!(target, &NodeId::new("a", "one"));
+        assert!(title.contains("One") && title.contains("a claim"), "{title}");
+    }
+
+    #[test]
+    fn the_tree_badge_counts_prose_dependencies_in_both_directions() {
+        let a = depends_app();
+        let rows = a.visible_rows();
+        let one = rows.iter().find(|r| r.id == NodeId::new("a", "one")).unwrap();
+        let two = rows.iter().find(|r| r.id == NodeId::new("b", "two")).unwrap();
+        assert!(one.badge.contains("⇢1"), "declared: {:?}", one.badge);
+        assert!(two.badge.contains("⇠1"), "received: {:?}", two.badge);
+    }
+
+    /// "declares or is targeted": both ends survive the filter. A
+    /// section with no marker at either end does not.
+    #[test]
+    fn the_depends_filter_keeps_both_ends_and_drops_everything_else() {
+        let mut a = app(&[
+            (
+                "a.md",
+                "# One\n\n<!-- dankg:depends target=b.md#two quote=\"a claim\" -->\n\n# Lonely\n",
+            ),
+            ("b.md", "# Two\n\nIt states a claim here.\n"),
+        ]);
+        a.apply_filter(Filter::Depends);
+        let visible = ids(&a.visible_rows());
+        assert!(visible.contains(&"a#one".to_string()), "{visible:?}");
+        assert!(visible.contains(&"b#two".to_string()), "{visible:?}");
+        assert!(!visible.contains(&"a#lonely".to_string()), "{visible:?}");
+    }
+
+    /// Every node kind isolates, not just `Block`. One corpus carrying
+    /// all four: a heading, a named block under it, the file that block
+    /// writes (an artifact, decision 69), and the relation a recorded
+    /// `produces=` names (decision 36).
+    #[test]
+    fn every_node_kind_is_its_own_filter() {
+        let mut a = app(&[(
+            "a.md",
+            "# One\n\n```sql db=warehouse name=load produces=file:out.csv\n:\n```\n\n<!-- dankg:result name=load hash=0000000000000001 produces=orders -->\n\n```\nok\n```\n",
+        )]);
+        let kinds_present: Vec<NodeKind> = a.index.nodes.iter().map(|n| n.kind).collect();
+        for kind in NodeKind::ALL {
+            assert!(kinds_present.contains(&kind), "the fixture carries a {kind:?}");
+            a.apply_filter(Filter::Kind(kind));
+            let visible = ids(&a.visible_rows());
+            assert!(!visible.is_empty(), "{kind:?} isolates something");
+        }
+
+        // Each of the three kinds the tree can draw keeps its own rows.
+        for (kind, wanted) in
+            [(NodeKind::Heading, "a#one"), (NodeKind::Block, "a#load"), (NodeKind::Artifact, "a#out")]
+        {
+            a.apply_filter(Filter::Kind(kind));
+            assert!(ids(&a.visible_rows()).contains(&wanted.to_string()), "{kind:?}");
+        }
+
+        // A relation is never a row. Its filter keeps the block that
+        // touches one instead. See `matches_filter`'s own arm.
+        a.apply_filter(Filter::Kind(NodeKind::Relation));
+        let visible = ids(&a.visible_rows());
+        assert!(visible.contains(&"a#load".to_string()), "{visible:?}");
+        assert!(
+            !visible.iter().any(|id| id.starts_with("db:")),
+            "a relation itself is still not a tree row: {visible:?}"
+        );
+    }
+
+    #[test]
+    fn a_marker_with_no_quote_leaves_the_row_at_its_title() {
+        assert_eq!(with_quote("Two", ""), "Two");
+        assert_eq!(with_quote("Two", "a claim"), "Two -- \"a claim\"");
     }
 }
 ```
