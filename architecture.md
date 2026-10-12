@@ -1071,6 +1071,14 @@ Cache `VERSION` 5 to 7, and `render::json`'s `SCHEMA_VERSION` 2 to 3. Both new k
 
 **A placeholder must not fail the build.** Giving an unresolvable target decision 8's placeholder had a consequence this decision did not anticipate. An unresolved node is otherwise fatal to `dankg check`. A marker naming a section nobody had written yet therefore failed a build that the bare `check` report is deliberately allowed not to fail. That is decision 32 broken by a side effect rather than by argument. `check_cmd` now ignores a placeholder that *only* a `Depends` edge reaches. A written link to the same unwritten section still fails: a broken reference stays broken whatever else also points there, and one unwritten section is one shared node.
 
+## Decision 80: A GFM task-list marker is not escaped
+
+`fmt` leaves a leading `[ ]`, `[x]`, or `[X]` alone when whitespace follows it, at the one position a list item's own text begins. Every other bracket pair on the line is still escaped.
+
+**Rationale:** The escaper escapes `[` and `]` unconditionally. A bare `]` would otherwise close a real link early. A task list is outside the parsed subset. Its marker therefore arrives as ordinary `Text` and gets the ordinary treatment. `- [ ] x` came back as `- \[ \] x`, a literal bracket pair where every GFM reader had a working checkbox. Found on a plan document whose checkboxes `fmt` had silently turned into text, by a reader who ran it against a scratch copy first rather than the real file. The trailing-whitespace requirement is GFM's own. It is also what makes the exemption safe. A `[` that cannot be followed by `(` never opens an inline link. This parser resolves no reference links at all to match a bare `[x]` against either, since `md/inline.rs` leaves a link reference definition as literal text. The marker is therefore inert on re-read in either position, which is why the fix needs no notion of "inside a list item" to be correct.
+
+**`fmt` taking an explicit file list while `check` takes a directory is a different thing, not a gap.** It reads like one from the outside. `dankg fmt --check .` reports `Is a directory` where `dankg check .` walks the corpus. The asymmetry is deliberate and it stays. `fmt` writes in place (decision 15). A target it discovered for itself would be a file it could rewrite without being asked. `check` only ever reports. No decision records this rule on its own; `CLAUDE.md` is where it is written down.
+
 ## Block nodes
 
 A named, top-level code block is a node too (decision 20). It is scoped to

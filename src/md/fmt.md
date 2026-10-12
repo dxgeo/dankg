@@ -418,6 +418,28 @@ delimiter run is live. Sharing it here, rather than re-deriving the
 rule, is what keeps the escaper from ever disagreeing with the parser
 about which character would actually become emphasis on the next read.
 
+One construct the escaping got wrong -- and the shape of the fix. A
+GFM task-list marker is outside the parsed subset. `- [ ] x`
+therefore reaches the writer as a list item holding the ordinary text
+`[ ] x`. The bracket rule escaped both halves. The item came back as
+`- \[ \] x`. Every GFM reader showed a working checkbox before that
+round trip and a literal bracket pair after it. The report came from
+a reader who ran `fmt` against a scratch copy of a plan document
+rather than the real file. That is the only reason its checkboxes did
+not quietly become text in the committed version.
+
+`task_list_marker` is the exemption. It is deliberately the narrowest
+one that works. The marker has to sit at a line start. Whitespace has
+to follow it. Both conditions are GFM's own. The second is also what
+makes leaving the brackets alone safe. A bracket pair with whitespace
+after it can never be followed by the `(` an inline link needs. This
+parser resolves no reference links either. No bare `[x]` can match a
+definition elsewhere in the document. The marker is inert on re-read
+wherever it appears. That is why the fix needs no notion of "inside a
+list item". The writer has none to offer. `list` renders an item's
+blocks through the same `blocks` path every other container uses. The
+`Writer` that escapes the text is built fresh per inline run.
+
 ```rust name=writer_text path=md/fmt.rs
 impl Writer {
     fn text(&mut self, t: &str, next: char) {
@@ -428,8 +450,14 @@ impl Writer {
         let mut start = 0;
 
         if self.line_start {
+            // A task-list marker opens a list item's own text. Escaping its
+            // brackets is what turned `- [ ] x` into `- \[ \] x`, a literal
+            // bracket pair where every GFM reader had a working checkbox.
+            if let Some(n) = task_list_marker(&chars, next) {
+                self.out.extend(&chars[..n]);
+                start = n;
             // At the start of a line these would open a block, not a word.
-            if matches!(chars[0], '#' | '>' | '-' | '+' | '*' | '~' | '<') {
+            } else if matches!(chars[0], '#' | '>' | '-' | '+' | '*' | '~' | '<') {
                 self.out.push('\\');
                 self.out.push(chars[0]);
                 start = 1;
@@ -571,6 +599,25 @@ fn lead_char(i: &Inline) -> char {
         Inline::Citation { narrative: false, .. } => '[',
         Inline::SoftBreak | Inline::HardBreak => ' ',
     }
+}
+
+/// The length of a leading GFM task-list marker -- `[ ]`, `[x]`, or `[X]`
+/// followed by whitespace -- or `None` for anything else.
+///
+/// The trailing whitespace is what GFM itself requires, and it is also what
+/// makes leaving the brackets unescaped safe: a `[` that cannot be followed
+/// by `(` can never open an inline link on the next read, and this parser
+/// has no reference links at all to resolve one against (`md/inline.rs`
+/// leaves a link reference definition as literal text).
+fn task_list_marker(chars: &[char], next: char) -> Option<usize> {
+    if chars.len() < 3 || chars[0] != '[' || chars[2] != ']' {
+        return None;
+    }
+    if !matches!(chars[1], ' ' | 'x' | 'X') {
+        return None;
+    }
+    let after = chars.get(3).copied().unwrap_or(next);
+    if after.is_whitespace() { Some(3) } else { None }
 }
 
 /// A leading run of digits followed by `.` or `)`: an ordered list marker if it
@@ -727,6 +774,27 @@ mod tests {
         assert_eq!(stable("\\# not a heading\n"), "\\# not a heading\n");
         assert_eq!(stable("the year\n1986\\. it was\n"), "the year\n1986\\. it was\n");
         assert_eq!(stable("a \\[bracket\\]\n"), "a \\[bracket\\]\n");
+    }
+
+    #[test]
+    fn a_task_list_marker_survives_instead_of_being_escaped() {
+        // Escaping these turned every checkbox in a plan document into a
+        // literal `\[ \]`. The marker is left alone; a bracket pair anywhere
+        // else on the line is still escaped.
+        assert_eq!(stable("- [ ] todo\n"), "- [ ] todo\n");
+        assert_eq!(stable("- [x] done\n"), "- [x] done\n");
+        assert_eq!(stable("- [X] done\n"), "- [X] done\n");
+        assert_eq!(stable("1. [ ] todo\n"), "1. [ ] todo\n");
+        assert_eq!(stable("- [ ] a \\[b\\] c\n"), "- [ ] a \\[b\\] c\n");
+    }
+
+    #[test]
+    fn only_a_real_task_list_marker_is_left_alone() {
+        // No trailing space is not a marker, and must stay escaped so it
+        // cannot pair with a following `(` and become an inline link.
+        assert_eq!(stable("- \\[ \\](x)\n"), "- \\[ \\](x)\n");
+        assert_eq!(stable("- \\[y\\] no\n"), "- \\[y\\] no\n");
+        assert_eq!(stable("- \\[\\] empty\n"), "- \\[\\] empty\n");
     }
 
     #[test]
