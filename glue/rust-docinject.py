@@ -13,7 +13,14 @@ own code do.
 Usage, in `.dankg/config`:
 
     [tangle.rust]
-    glue = python3 /path/to/glue/rust-docinject.py {dir} [source-root]
+    glue = python3 /path/to/glue/rust-docinject.py {dir} [source-root] \
+               [--doc-base <url>]
+
+`--doc-base` is what a link into the design record itself resolves
+against -- a corpus `.md` this tangle run never produced has no module
+path to point at. Given one, such a link becomes a reference-style link
+to `<url>/<root-relative path>#<fragment>`; omitted, the link is dropped
+and its label kept as plain text. See `rewrite_links`.
 
 `source-root` is the same escape hatch `rust-doclint.py` already needed,
 for the same reason: a corpus-wide tangle's manifest `source` field is
@@ -65,6 +72,7 @@ not survive a cross-tangle-file boundary unmodified.
 """
 
 import json
+import posixpath
 import re
 import sys
 from pathlib import Path
@@ -78,7 +86,7 @@ MANIFEST_NAME = ".dankg-tangle-manifest.json"
 # in particular this does not know about fences or code spans, so a
 # literal `[x](y#z)` shown as an *example* inside a code span would be
 # rewritten too. None of this repo's own literate sources do that.
-_LINK_RE = re.compile(r"\[([^\]]+)\]\(([\w./-]*)#([\w-]+)\)")
+_LINK_RE = re.compile(r"\[([^\]]+)\]\(([\w./-]*)(?:#([\w-]+))?\)")
 
 
 def markdown_paragraphs(md_src: str) -> list[str]:
@@ -90,9 +98,26 @@ def markdown_paragraphs(md_src: str) -> list[str]:
     paragraphs = []
     current: list[str] = []
     in_fence = False
+    in_comment = False
     fence_marker = ""
     for line in md_src.splitlines():
         stripped = line.strip()
+        if in_comment:
+            # A `dankg:depends` marker is corpus metadata, not prose, and
+            # spans as many lines as its `quote=` needs. Copying one into a
+            # `///` put raw marker syntax in rustdoc output -- found by
+            # reading the first wrapped run's own over-long lines, every one
+            # of which turned out to be a leaked `target=`.
+            if "-->" in stripped:
+                in_comment = False
+            continue
+        if stripped.startswith("<!--"):
+            if current:
+                paragraphs.append(" ".join(current))
+                current = []
+            if "-->" not in stripped:
+                in_comment = True
+            continue
         if stripped.startswith("```") or stripped.startswith("~~~"):
             if not in_fence:
                 in_fence = True
@@ -156,45 +181,194 @@ def has_doc_comment(content: str) -> bool:
     return any(s.startswith("//!") or s.startswith("///") for s in (l.strip() for l in content.splitlines()))
 
 
+def module_path_for(out_path: str) -> str | None:
+    """`crate::...` module path for one tangled output file, or `None` when
+    the file is not addressable from the library crate's own docs at all.
+
+    `mod.rs` and `lib.rs` do not contribute a path segment: `layout/mod.rs`
+    is `crate::layout`, not `crate::layout::mod`. `mod` is a *keyword*, so
+    the naive spelling is not merely ugly, it is an invalid path, and
+    `architecture.md`'s planned
+    `#![deny(rustdoc::broken_intra_doc_links)]` would make one a build
+    failure rather than a warning. `main.rs` is a separate binary crate,
+    which a library doc comment cannot link into on any spelling, so it
+    resolves to nothing and its links are left exactly as written."""
+    if not out_path.endswith(".rs"):
+        return None  # a `path=` block can land on Cargo.toml -- no module
+    segments = out_path[: -len(".rs")].split("/")
+    if segments[-1] == "main":
+        return None
+    if segments[-1] in ("mod", "lib"):
+        segments.pop()
+    return "::".join(["crate", *segments])
+
+
+def resolve_source(this_source: str, filepart: str) -> str:
+    """A link's own target, as the manifest's `source` field spells it.
+
+    Prose writes a path relative to the file it sits in (`mermaid.md`,
+    `../layout/mod.md`); the manifest keys `source` relative to the tangle
+    root (`src/render/mermaid.md`). Looking the written form up directly
+    missed every cross-file link silently -- `mermaid.md` is simply not a
+    key. An empty `filepart` is a same-file link and already *is* the
+    key."""
+    if not filepart:
+        return this_source
+    joined = posixpath.join(posixpath.dirname(this_source), filepart)
+    return posixpath.normpath(joined)
+
+
+def external_url(doc_base: str, path: str, fragment: str | None) -> str:
+    """A corpus file's own URL under `doc_base`, for a link this tangle run
+    cannot answer with a module path."""
+    url = f"{doc_base.rstrip('/')}/{path}"
+    return f"{url}#{fragment}" if fragment else url
+
+
 def build_name_table(manifest: dict) -> dict[str, dict[str, str]]:
     """`source .md filename -> {block name -> intra-doc path}`, so a link
     inside one file's prose can be resolved against any file this same
     tangle run produced, not just its own."""
     table: dict[str, dict[str, str]] = {}
     for entry in manifest.get("files", []):
-        mod_path = entry["path"]
-        if mod_path.endswith(".rs"):
-            mod_path = mod_path[: -len(".rs")]
-        mod_path = mod_path.replace("/", "::")
+        mod_path = module_path_for(entry["path"])
+        if mod_path is None:
+            continue
         names = table.setdefault(entry["source"], {})
         for b in entry.get("blocks", []):
-            names[b["name"]] = f"crate::{mod_path}::{b['name']}"
+            names[b["name"]] = f"{mod_path}::{b['name']}"
     return table
 
 
-def rewrite_links(text: str, this_source: str, name_table: dict[str, dict[str, str]]) -> str:
+def build_module_table(manifest: dict) -> dict[str, str]:
+    """`source .md filename -> that file's own module path`, for a link
+    that names a whole module rather than one block. The dominant style in
+    this corpus's own prose is exactly that: `[`render::mermaid`](mermaid.md)`
+    with no `#fragment` at all, which the block table cannot answer.
+
+    First output wins. One source can tangle to several files (`hash.md`
+    writes `Cargo.toml` as well as `hash.rs`), and only one of them can be
+    what a bare file link means."""
+    table: dict[str, str] = {}
+    for entry in manifest.get("files", []):
+        mod_path = module_path_for(entry["path"])
+        if mod_path is not None:
+            table.setdefault(entry["source"], mod_path)
+    return table
+
+
+def rewrite_links(
+    text: str,
+    this_source: str,
+    name_table: dict[str, dict[str, str]],
+    module_table: dict[str, str] | None = None,
+    doc_base: str | None = None,
+    source_root: Path | None = None,
+    refs: dict[str, str] | None = None,
+) -> str:
+    """Rewrites a DanKG link for a reader who has only the built docs.
+
+    A `#fragment` names one block and resolves through `name_table`; a bare
+    file link names a whole module and resolves through `module_table`.
+    Either becomes a rustdoc intra-doc link, which `cargo doc` resolves
+    through the compiler's own name resolution.
+
+    A link into a corpus file this tangle run never produced -- the design
+    record itself, `architecture.md` -- has no module to point at. Left
+    alone it renders as a relative `href` that 404s in any built docs,
+    which is the reader this whole script exists for. So:
+
+    * with `doc_base`, it becomes a *reference-style* link: `[label]` here,
+      and `label -> url` recorded in `refs` for the caller to emit as a
+      trailing definition. This is std's own idiom for an external design
+      document (`[RFC]: https://github.com/rust-lang/rfcs/blob/...`), and
+      it keeps a long URL out of the middle of a sentence.
+    * without one, the link is dropped and its label kept as plain text. A
+      reader loses the pointer, which beats following a dead one.
+
+    Both paths require the target to be a `.md` file that actually exists
+    under `source_root`. Prose here *discusses* link syntax, so a doc
+    comment can contain `[*a*](x)` or a `file.md#name` illustration, and
+    neither names a real file. Those are left exactly as written."""
+
     def repl(match: re.Match) -> str:
         label, filepart, name = match.group(1), match.group(2), match.group(3)
-        source = filepart if filepart else this_source
-        target = name_table.get(source, {}).get(name)
-        if target is None:
-            return match.group(0)  # unresolved -- leave exactly as written
-        return f"[{label}]({target})"
+        if not filepart and not name:
+            return match.group(0)  # `[text]()` names nothing at all
+        source = resolve_source(this_source, filepart)
+        if name:
+            target = name_table.get(source, {}).get(name)
+        else:
+            target = (module_table or {}).get(source)
+        if target is not None:
+            return f"[{label}]({target})"
+
+        # Not something this run tangled. Only a real corpus `.md` qualifies.
+        if not source.endswith(".md"):
+            return match.group(0)
+        if source_root is None or not (source_root / source).exists():
+            return match.group(0)
+        if doc_base is None:
+            return label  # de-linked, label kept
+        url = external_url(doc_base, source, name)
+        if refs is None:
+            return f"[{label}]({url})"
+        if refs.setdefault(label, url) != url:
+            return f"[{label}]({url})"  # same label, two targets -- inline it
+        return f"[{label}]"
 
     return _LINK_RE.sub(repl, text)
 
 
-def doc_lines(paragraphs: list[str]) -> list[str]:
+_ATOM_RE = re.compile(r"(?:``[^`]*``|`[^`]*`|\[[^\]]*\]\([^)]*\)|[^\s])+")
+
+DOC_WIDTH = 76
+
+
+def wrap_doc(text: str, width: int = DOC_WIDTH) -> list[str]:
+    """Greedy wrap that treats a `code span`, or a `[text](link)` whose
+    target `rewrite_links` just rewrote, as one atomic token and never
+    breaks inside one. A naive word wrap splits a span that itself
+    contains a space, the same hazard `dankg fmt` hits on prose and the
+    reason CLAUDE.md forbids it there. An atom longer than `width` gets
+    its own line and overflows, since the alternative is corrupting it.
+    `width` budgets the text alone, so a `/// ` prefix lands the line at
+    80 columns."""
+    lines: list[str] = []
+    current = ""
+    for atom in _ATOM_RE.findall(text):
+        if not current:
+            current = atom
+        elif len(current) + 1 + len(atom) <= width:
+            current += " " + atom
+        else:
+            lines.append(current)
+            current = atom
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def doc_lines(paragraphs: list[str], refs: dict[str, str] | None = None) -> list[str]:
+    """Doc-comment lines for one block. `refs` becomes a trailing paragraph
+    of link reference definitions, one per line and never wrapped -- a
+    definition's own destination has to stay on its line to read as one."""
     out: list[str] = []
     for i, paragraph in enumerate(paragraphs):
         if i:
             out.append("///")
-        out.append(f"/// {paragraph}")
+        out.extend(f"/// {line}" for line in wrap_doc(paragraph))
+    if refs:
+        out.append("///")
+        out.extend(f"/// [{label}]: {url}" for label, url in refs.items())
     return out
 
 
 def plan_injections(
-    manifest: dict, source_root: Path, name_table: dict[str, dict[str, str]]
+    manifest: dict,
+    source_root: Path,
+    name_table: dict[str, dict[str, str]],
+    doc_base: str | None = None,
 ) -> dict[str, list[tuple[str, str]]]:
     """`out_path -> [(block's own raw content, doc comment text), ...]`, in
     the document order each output file's own blocks will need them
@@ -205,6 +379,8 @@ def plan_injections(
     for entry in manifest.get("files", []):
         for b in entry.get("blocks", []):
             by_source.setdefault(entry["source"], []).append((b, entry["path"]))
+
+    module_table = build_module_table(manifest)
 
     injections: dict[str, list[tuple[str, str]]] = {}
     for source, blocks in by_source.items():
@@ -232,12 +408,51 @@ def plan_injections(
             content = block_content(source_lines, b["line"], b["end_line"])
             if has_doc_comment(content) or not paragraphs:
                 continue
+            if targets_mod_declaration(content):
+                continue  # see `targets_mod_declaration`
 
-            rewritten = [rewrite_links(p, source, name_table) for p in paragraphs]
-            comment = "\n".join(doc_lines(rewritten)) + "\n"
+            refs: dict[str, str] = {}
+            rewritten = [
+                rewrite_links(
+                    p, source, name_table, module_table, doc_base, source_root, refs
+                )
+                for p in paragraphs
+            ]
+            comment = "\n".join(doc_lines(rewritten, refs)) + "\n"
             injections.setdefault(out_path, []).append((content, comment))
 
     return injections
+
+
+_MOD_RE = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;")
+
+
+def targets_mod_declaration(content: str) -> bool:
+    """Whether the item an injected comment would attach to is a `mod`
+    declaration. It must then write nothing at all.
+
+    Rust *merges* a `///` on `mod foo;` with the inner `//!` docs inside
+    `foo.rs` itself, and rustdoc then resolves that merged doc's intra-doc
+    links in the *parent* module's scope. `graph/build.md`'s own
+    `[`super::resolve`]` resolves correctly as `graph::resolve` while it
+    stays attached to `graph::build`. Injecting a `///` onto
+    `graph/mod.md`'s `pub mod build;` re-scoped it to `dankg::resolve`,
+    which does not exist, and `cargo doc` reported exactly that: "no item
+    named `resolve` in module `dankg`". Nothing in the injected comment
+    mentions `resolve` at all, which is what made it hard to place --
+    reverting one file at a time is what found it.
+
+    Not cosmetic. `architecture.md`'s own plan is a
+    `#![deny(rustdoc::broken_intra_doc_links)]` crate attribute, which
+    turns a merged-scope break into a hard build failure rather than a
+    warning. This is the same class as `leading_skip_offset`'s `use`: an
+    item an injected comment must not land on."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//") or stripped.startswith("#["):
+            continue
+        return bool(_MOD_RE.match(stripped))
+    return False
 
 
 def leading_skip_offset(content: str) -> int:
@@ -288,18 +503,46 @@ def apply_injections(out_dir: Path, out_path: str, items: list[tuple[str, str]])
     return True
 
 
+def parse_args(argv: list[str]) -> tuple[Path, Path, str | None]:
+    """`(out_dir, source_root, doc_base)`. `--doc-base` is a flag rather
+    than a third positional, so it stays unambiguous next to the optional
+    `source-root` that already reads as one."""
+    doc_base = None
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--doc-base":
+            if i + 1 >= len(argv):
+                raise ValueError("--doc-base needs a URL")
+            doc_base = argv[i + 1]
+            i += 2
+            continue
+        if argv[i].startswith("--doc-base="):
+            doc_base = argv[i].split("=", 1)[1]
+            i += 1
+            continue
+        rest.append(argv[i])
+        i += 1
+    if len(rest) not in (1, 2):
+        raise ValueError("wrong number of paths")
+    return Path(rest[0]), Path(rest[1]) if len(rest) == 2 else Path("."), doc_base
+
+
 def main() -> None:
-    if len(sys.argv) not in (2, 3):
-        sys.exit(f"usage: {sys.argv[0]} <tangled-directory> [source-root]")
-    out_dir = Path(sys.argv[1])
-    source_root = Path(sys.argv[2]) if len(sys.argv) == 3 else Path(".")
+    try:
+        out_dir, source_root, doc_base = parse_args(sys.argv[1:])
+    except ValueError:
+        sys.exit(
+            f"usage: {sys.argv[0]} <tangled-directory> [source-root] "
+            "[--doc-base <url>]"
+        )
     manifest_path = out_dir / MANIFEST_NAME
     if not manifest_path.exists():
         return  # no file -> source mapping without it; nothing to do
 
     manifest = json.loads(manifest_path.read_text())
     name_table = build_name_table(manifest)
-    injections = plan_injections(manifest, source_root, name_table)
+    injections = plan_injections(manifest, source_root, name_table, doc_base)
 
     for out_path, items in injections.items():
         if apply_injections(out_dir, out_path, items):

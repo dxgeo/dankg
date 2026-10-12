@@ -15,6 +15,8 @@ import json
 import sys
 import tempfile
 import unittest
+
+BASE_FOR_DOC = "https://github.com/dxgeo/dankg/blob/main"
 from pathlib import Path
 
 GLUE_DIR = Path(__file__).parent
@@ -263,6 +265,89 @@ class DocinjectFormatting(unittest.TestCase):
             ["/// one", "///", "/// two"],
         )
 
+    def test_a_long_paragraph_wraps_at_eighty_columns(self):
+        words = " ".join("word" for _ in range(60))
+        lines = docinject.doc_lines([words])
+        self.assertGreater(len(lines), 1)
+        for line in lines:
+            self.assertTrue(line.startswith("/// "))
+            self.assertLessEqual(len(line), 80)
+
+    def test_never_breaks_inside_a_code_span_containing_a_space(self):
+        """CLAUDE.md's own rule: a naive word wrap splits `[tui] depth`
+        across the break, which a span-atomic wrap must not do."""
+        filler = " ".join("xxxxxxxx" for _ in range(9))
+        lines = docinject.wrap_doc(f"{filler} `[tui] depth` tail")
+        self.assertGreater(len(lines), 1)
+        joined = "\n".join(lines)
+        self.assertIn("`[tui] depth`", joined)
+        for line in lines:
+            self.assertEqual(line.count("`") % 2, 0, line)
+
+    def test_a_rewritten_intra_doc_link_stays_on_one_line(self):
+        filler = " ".join("xxxxxxxx" for _ in range(9))
+        link = "[make greeting](crate::producer::greeting::make_greeting)"
+        lines = docinject.wrap_doc(f"{filler} {link} tail")
+        self.assertIn(link, "\n".join(lines))
+        self.assertTrue(any(link in line for line in lines))
+
+    def test_punctuation_after_a_code_span_stays_attached_to_it(self):
+        """First real run detached the comma, emitting "`data/table.rs` ,".
+        A span and whatever trails it with no space between are one atom."""
+        self.assertEqual(
+            docinject.wrap_doc("Readers: `a.rs`, `b.rs`, and `c.rs`."),
+            ["Readers: `a.rs`, `b.rs`, and `c.rs`."],
+        )
+
+    def test_an_atom_longer_than_the_width_overflows_on_its_own_line(self):
+        giant = "`" + "y" * 120 + "`"
+        lines = docinject.wrap_doc(f"head {giant} tail")
+        self.assertIn(giant, lines)
+        self.assertEqual(lines[0], "head")
+
+
+class DocinjectModBackoff(unittest.TestCase):
+    def test_a_mod_declaration_block_gets_no_comment(self):
+        """A `///` on `pub mod build;` merges with build.rs's own `//!` and
+        re-scopes its intra-doc links to the parent module, breaking
+        `[`super::resolve`]`. Found via `cargo doc` on the injected tree."""
+        self.assertTrue(docinject.targets_mod_declaration("pub mod build;\npub mod cache;\n"))
+        self.assertTrue(docinject.targets_mod_declaration("mod term;\n"))
+        self.assertTrue(docinject.targets_mod_declaration("pub(crate) mod term;\n"))
+
+    def test_a_use_or_fn_block_still_gets_one(self):
+        self.assertFalse(docinject.targets_mod_declaration("pub use self::x::Y;\n"))
+        self.assertFalse(docinject.targets_mod_declaration("fn one() {}\n"))
+
+    def test_attributes_and_comments_are_looked_past(self):
+        self.assertTrue(
+            docinject.targets_mod_declaration("// a note\n#[cfg(unix)]\npub mod term;\n")
+        )
+
+
+class DocinjectHtmlComments(unittest.TestCase):
+    def test_a_depends_marker_is_not_prose(self):
+        """A multi-line `dankg:depends` marker leaked into 14 injected
+        `///` lines before this skip existed."""
+        md = (
+            "Real prose here.\n"
+            "\n"
+            "<!-- dankg:depends target=../a.md#x\n"
+            'quote="some quoted clause" -->\n'
+            "\n"
+            "More real prose.\n"
+        )
+        self.assertEqual(
+            docinject.markdown_paragraphs(md),
+            ["Real prose here.", "More real prose."],
+        )
+
+    def test_a_single_line_comment_is_skipped_too(self):
+        md = "Before.\n\n<!-- just a note -->\n\nAfter.\n"
+        self.assertEqual(
+            docinject.markdown_paragraphs(md), ["Before.", "After."]
+        )
+
 
 class DocinjectNameTable(unittest.TestCase):
     def _manifest(self):
@@ -304,6 +389,246 @@ class DocinjectNameTable(unittest.TestCase):
         table = docinject.build_name_table(self._manifest())
         original = "See [it](nowhere.md#nothing)."
         self.assertEqual(docinject.rewrite_links(original, "consumer.md", table), original)
+
+
+class DocinjectModulePaths(unittest.TestCase):
+    def test_mod_rs_contributes_no_segment(self):
+        """`crate::layout::mod` is not a path -- `mod` is a keyword."""
+        self.assertEqual(docinject.module_path_for("layout/mod.rs"), "crate::layout")
+
+    def test_lib_rs_is_the_crate_root(self):
+        self.assertEqual(docinject.module_path_for("lib.rs"), "crate")
+
+    def test_main_rs_is_a_separate_binary_and_resolves_to_nothing(self):
+        self.assertIsNone(docinject.module_path_for("main.rs"))
+
+    def test_a_non_rust_output_resolves_to_nothing(self):
+        self.assertIsNone(docinject.module_path_for("Cargo.toml"))
+
+    def test_an_ordinary_module_keeps_every_segment(self):
+        self.assertEqual(
+            docinject.module_path_for("graph/cache.rs"), "crate::graph::cache"
+        )
+
+
+class DocinjectSourceResolution(unittest.TestCase):
+    def test_a_sibling_link_resolves_against_the_linking_files_directory(self):
+        """Prose writes `mermaid.md`; the manifest keys
+        `src/render/mermaid.md`. Looking the written form up directly missed
+        every cross-file link."""
+        self.assertEqual(
+            docinject.resolve_source("src/render/dot.md", "mermaid.md"),
+            "src/render/mermaid.md",
+        )
+
+    def test_a_parent_relative_link_is_normalized(self):
+        self.assertEqual(
+            docinject.resolve_source("src/render/dot.md", "../layout/mod.md"),
+            "src/layout/mod.md",
+        )
+
+    def test_an_empty_filepart_is_the_linking_file_itself(self):
+        self.assertEqual(
+            docinject.resolve_source("src/render/dot.md", ""), "src/render/dot.md"
+        )
+
+    def test_a_flat_source_needs_no_directory(self):
+        self.assertEqual(docinject.resolve_source("consumer.md", "producer.md"), "producer.md")
+
+
+class DocinjectModuleLinks(unittest.TestCase):
+    def _manifest(self):
+        return {
+            "files": [
+                {"path": "render/dot.rs", "source": "src/render/dot.md", "blocks": []},
+                {
+                    "path": "render/mermaid.rs",
+                    "source": "src/render/mermaid.md",
+                    "blocks": [{"name": "render", "line": 5, "end_line": 8}],
+                },
+                {"path": "layout/mod.rs", "source": "src/layout/mod.md", "blocks": []},
+            ]
+        }
+
+    def _tables(self):
+        m = self._manifest()
+        return docinject.build_name_table(m), docinject.build_module_table(m)
+
+    def test_a_fragmentless_sibling_link_becomes_a_module_path(self):
+        names, mods = self._tables()
+        self.assertEqual(
+            docinject.rewrite_links(
+                "[`render::mermaid`](mermaid.md) renders it.",
+                "src/render/dot.md",
+                names,
+                mods,
+            ),
+            "[`render::mermaid`](crate::render::mermaid) renders it.",
+        )
+
+    def test_a_fragmentless_mod_link_drops_the_mod_segment(self):
+        names, mods = self._tables()
+        self.assertEqual(
+            docinject.rewrite_links(
+                "See [`crate::layout`](../layout/mod.md).",
+                "src/render/dot.md",
+                names,
+                mods,
+            ),
+            "See [`crate::layout`](crate::layout).",
+        )
+
+    def test_a_cross_file_fragment_link_now_resolves(self):
+        """Layer 3: this missed before `resolve_source` existed."""
+        names, mods = self._tables()
+        self.assertEqual(
+            docinject.rewrite_links(
+                "See [it](mermaid.md#render).", "src/render/dot.md", names, mods
+            ),
+            "See [it](crate::render::mermaid::render).",
+        )
+
+    def test_a_link_into_a_file_this_run_never_tangled_is_left_verbatim(self):
+        """Layer 2, deliberately unfixed: `architecture.md` has no module to
+        point at, so the link stays exactly as the prose wrote it."""
+        names, mods = self._tables()
+        original = "See [decision 1](../../architecture.md#decision-1-dependency-policy)."
+        self.assertEqual(
+            docinject.rewrite_links(original, "src/render/dot.md", names, mods), original
+        )
+
+    def test_a_bare_non_md_target_is_left_verbatim(self):
+        names, mods = self._tables()
+        original = "`[*a*](x)` is legal markdown."
+        self.assertEqual(
+            docinject.rewrite_links(original, "src/render/dot.md", names, mods), original
+        )
+
+
+class DocinjectExternalLinks(unittest.TestCase):
+    """Layer 2: a link into a corpus file this run never tangled."""
+
+    BASE = "https://github.com/dxgeo/dankg/blob/main"
+
+    def _fixture(self, d):
+        root = Path(d)
+        (root / "src" / "render").mkdir(parents=True)
+        (root / "architecture.md").write_text("# design record\n")
+        (root / "src" / "render" / "dot.md").write_text("# dot\n")
+        return root
+
+    def test_with_a_doc_base_it_becomes_a_reference_style_link(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._fixture(d)
+            refs = {}
+            out = docinject.rewrite_links(
+                "See [decision 1](../../architecture.md#decision-1-dependency-policy).",
+                "src/render/dot.md",
+                {},
+                {},
+                self.BASE,
+                root,
+                refs,
+            )
+            self.assertEqual(out, "See [decision 1].")
+            self.assertEqual(
+                refs,
+                {
+                    "decision 1": f"{self.BASE}/architecture.md"
+                    "#decision-1-dependency-policy"
+                },
+            )
+
+    def test_without_one_the_link_is_dropped_and_the_label_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._fixture(d)
+            out = docinject.rewrite_links(
+                "See [decision 1](../../architecture.md#decision-1-dependency-policy).",
+                "src/render/dot.md",
+                {},
+                {},
+                None,
+                root,
+                {},
+            )
+            self.assertEqual(out, "See decision 1.")
+
+    def test_a_md_target_that_does_not_exist_is_left_verbatim(self):
+        """Prose here discusses link syntax, so `file.md#name` appears as an
+        illustration and names no real file."""
+        with tempfile.TemporaryDirectory() as d:
+            root = self._fixture(d)
+            original = "`[text](file.md#name)` is the shape."
+            self.assertEqual(
+                docinject.rewrite_links(
+                    original, "src/render/dot.md", {}, {}, self.BASE, root, {}
+                ),
+                original,
+            )
+
+    def test_a_non_md_target_is_left_verbatim(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._fixture(d)
+            original = "`[*a*](x)` is legal markdown."
+            self.assertEqual(
+                docinject.rewrite_links(
+                    original, "src/render/dot.md", {}, {}, self.BASE, root, {}
+                ),
+                original,
+            )
+
+    def test_one_label_with_two_targets_falls_back_to_inline(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._fixture(d)
+            (root / "other.md").write_text("# other\n")
+            refs = {}
+            text = (
+                "[see](../../architecture.md#a) and [see](../../other.md#b)."
+            )
+            out = docinject.rewrite_links(
+                text, "src/render/dot.md", {}, {}, self.BASE, root, refs
+            )
+            self.assertEqual(out, f"[see] and [see]({self.BASE}/other.md#b).")
+            self.assertEqual(refs, {"see": f"{self.BASE}/architecture.md#a"})
+
+    def test_definitions_are_emitted_as_a_trailing_unwrapped_paragraph(self):
+        refs = {"decision 1": f"{BASE_FOR_DOC}/architecture.md#decision-1-dependency-policy"}
+        lines = docinject.doc_lines(["See [decision 1] for the policy."], refs)
+        self.assertEqual(lines[0], "/// See [decision 1] for the policy.")
+        self.assertEqual(lines[1], "///")
+        self.assertEqual(
+            lines[2],
+            "/// [decision 1]: "
+            f"{BASE_FOR_DOC}/architecture.md#decision-1-dependency-policy",
+        )
+
+    def test_no_refs_means_no_trailing_paragraph(self):
+        self.assertEqual(docinject.doc_lines(["plain"], {}), ["/// plain"])
+
+
+class DocinjectArgParsing(unittest.TestCase):
+    def test_doc_base_is_parsed_out_of_the_positionals(self):
+        out_dir, root, base = docinject.parse_args(
+            ["out", "src-root", "--doc-base", "https://example.test/blob/main"]
+        )
+        self.assertEqual((str(out_dir), str(root)), ("out", "src-root"))
+        self.assertEqual(base, "https://example.test/blob/main")
+
+    def test_the_equals_spelling_works_too(self):
+        _, _, base = docinject.parse_args(["out", "--doc-base=https://example.test"])
+        self.assertEqual(base, "https://example.test")
+
+    def test_omitting_it_leaves_the_old_two_argument_shape(self):
+        out_dir, root, base = docinject.parse_args(["out"])
+        self.assertEqual((str(out_dir), str(root), base), ("out", ".", None))
+
+    def test_a_bare_doc_base_with_no_url_is_a_usage_error(self):
+        with self.assertRaises(ValueError):
+            docinject.parse_args(["out", "--doc-base"])
+
+    def test_too_many_paths_is_a_usage_error(self):
+        with self.assertRaises(ValueError):
+            docinject.parse_args(["a", "b", "c"])
 
 
 class DocinjectWindowing(unittest.TestCase):
