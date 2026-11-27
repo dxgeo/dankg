@@ -13,12 +13,12 @@ outline, which any markdown parser derives for free. Those 72 link edges
 were the whole of what the graph knew about authored cross-reference.
 
 The plan has now landed. The figure below is therefore the one after it
-rather than the one that motivated it: the same block reports 272
-`Depends` edges beside the 73 links. The marker still pins prose to the
+rather than the one that motivated it. The same block now reports
+`Depends` edges beside the links. The marker still pins prose to the
 block that measures it. The next drift therefore trips `dankg check`
 rather than sitting here unnoticed.
 
-<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="943 Contains edges against 73 Link, 272 Depends, 0 EvalChain" -->
+<!-- dankg:depends target=../architecture.md#self-hosted-corpus-stats quote="964 Contains edges against 75 Link, 280 Depends, 0 EvalChain" -->
 
 The same corpus carries over 250 `dankg:depends` markers. `dankg check`
 prints the exact count on every run. No exact number is typed here for
