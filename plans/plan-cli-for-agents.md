@@ -343,8 +343,9 @@ have no such reader. They default to JSON.
 
 ## What this explicitly does not do
 
-- Build the GUI, or extend the TUI. `plan-gui-frontend.md` and the two
-  TUI plans are closed as not pursued, separately from this plan.
+- Build the GUI, or extend the TUI. `plan-gui-frontend.md` is not
+  pursued. Both TUI plans already shipped, and the TUI stays frozen as
+  they left it.
 - Change `graph --format json`. Its shape and its version stay as they
   ship.
 - Add `dankg serve`. `backend-protocol-plan.md` still owns it.

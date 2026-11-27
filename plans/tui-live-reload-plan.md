@@ -1,5 +1,12 @@
 # TUI live reload: no watcher, no lost expansion
 
+Status: implemented. Milestone 12 in `architecture.md` is the record
+as built. The sweep, the coalesced reload and `diff_expansion` all
+shipped. The editor round trip preserves expansion too, which this
+plan did not propose. The TUI is now frozen as it ships
+([A CLI an agent can read](plan-cli-for-agents.md)). The open
+questions below are therefore left open.
+
 ## Context
 
 Today the TUI only reloads on purpose: pressing `r`, returning from the

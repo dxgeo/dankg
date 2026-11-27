@@ -1,5 +1,12 @@
 # TUI editor handoff: a tmux pane, not a context switch
 
+Status: implemented in full, all seven phases. Milestone 13 in
+`architecture.md` is the record as built. Testing the pane route
+inside tmux also found a bug outside this plan's scope. The Esc
+timeout was too short for tmux's own added latency, which broke every
+arrow key. The TUI is now frozen as it ships
+([A CLI an agent can read](plan-cli-for-agents.md)).
+
 ## Context
 
 Today `enter`'s editor handoff (*TUI editor*, `tui/editor.md`) is a
