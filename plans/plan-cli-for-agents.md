@@ -3,16 +3,14 @@
 ## Context
 
 The main readers of dankg's output are now agents and scripts, not a
-person at a terminal. That settles a question the GUI plan left open.
-`plan-gui-frontend.md` built five views. A reader found two of them
-useful: blast radius and the file graph. Both answer a question rather
-than draw a picture. An agent asks the same questions. It asks
-them from a shell.
+person at a terminal. A GUI prototype drew this corpus five ways
+before that was clear. A reader found two of the views useful: blast
+radius and the file graph. Both answer a question rather than draw a
+picture. An agent asks the same questions. It asks them from a shell.
 
 So this plan stops work on the GUI and the TUI, and puts that effort
-into the CLI instead. The GUI plan keeps its findings and is not
-pursued. The TUI stays as it ships, frozen. Neither is deleted by this
-plan.
+into the CLI instead. The GUI prototype and its plan were never merged.
+Both are deleted. The TUI stays as it ships, frozen.
 
 The README already promises this reader:
 
@@ -85,7 +83,7 @@ print("%d nodes, %d edges, %d KB of JSON" % (
 <!-- dankg:result name=cli-plan-dump-size hash=7df744f159add183 -->
 
 ```
-1053 nodes, 1316 edges, 502 KB of JSON
+1054 nodes, 1319 edges, 503 KB of JSON
 ```
 
 An agent pays for that dump in context, once per question. It also
@@ -250,28 +248,76 @@ both directions and of every kind. It wraps `links_for` and adds the
 two relations that function leaves out: the containment parent and
 children, and `eval-chain`. Each `depends` edge carries its quote.
 
-### `dankg impact`: what can go stale if this node changes
+### `dankg blast-radius`: what an edit reaches
 
-`dankg impact <ref>` answers the question an agent asks before an
-edit. The answer is every place that `dankg check` could report once
-this node's text changes:
+`dankg blast-radius <ref> [--depth N]` answers "what breaks if I edit
+this?" It is the prototype's blast radius view, printed instead of
+drawn. The command takes the view's name, because blast radius is the
+term this record already uses for it.
 
-- each `depends` marker targeting this node, or any of its ancestors,
-  whose quote sits inside this node's own span
+The view drew two sides. The command prints the same two lists:
+
+- `dependents`: what leans on this node
+- `dependencies`: what this node leans on
+
+Both lists follow `depends` edges transitively, as the view did. Each
+entry carries `hop`, its distance from the node. `--depth` caps the
+walk. With no `--depth`, the walk runs to the end. A whole blast radius
+is small enough to print:
+
+```sh name=cli-plan-blast-radius-size
+# spawned in this file's own directory, per decision 49
+../target/release/dankg graph .. --format json 2>/dev/null | python3 -c '
+import sys, json, collections, statistics
+g = json.load(sys.stdin)
+out = collections.defaultdict(set); inn = collections.defaultdict(set)
+nodes = set()
+for e in g["edges"]:
+    if e["kind"] == "depends":
+        out[e["from"]].add(e["to"]); inn[e["to"]].add(e["from"])
+        nodes |= {e["from"], e["to"]}
+def radius(u):
+    seen = {u}
+    for m in (out, inn):
+        q = [u]
+        while q:
+            for v in m[q.pop()]:
+                if v not in seen:
+                    seen.add(v); q.append(v)
+    return len(seen)
+sizes = sorted(radius(u) for u in nodes)
+print("depends DAG: %d sections" % len(nodes))
+print("blast radius: median %d, p90 %d, max %d sections" % (
+    statistics.median(sizes), sizes[int(len(sizes) * 0.9)], sizes[-1]))
+'
+```
+
+<!-- dankg:result name=cli-plan-blast-radius-size hash=a85c1d422b4a7b37 -->
+
+```
+depends DAG: 257 sections
+blast radius: median 3, p90 9, max 36 sections
+```
+
+`dependents` also lists three things the view never drew:
+
+- each `depends` marker targeting an ancestor of this node, whose
+  quote sits inside this node's own span
 - each `link` targeting this node, since renaming its heading breaks
   the link
 - for a block, every block downstream of it through `eval-chain` and
-  `reads`, followed transitively
+  `reads`
 
 The ancestor walk is the case the review found the `jq` recipe misses.
 The quote filter keeps it honest. An ancestor's marker is listed only
 when its quote actually lies under the node being asked about.
 
-Prose dependencies are not followed transitively. A quote of a quote
-breaks only when the middle section's own text changes. That is a
-second edit, and a second question. Eval blocks are followed
-transitively, because a re-run result is new input for everything
-downstream of it.
+Each dependent also carries `breaks`. It is true when `dankg check`
+would report that entry once this node's text changes. A `depends` or
+`link` entry at hop 1 breaks. One further out does not. A quote of a
+quote breaks only when the middle section's own text changes, which is
+a second edit. A downstream block breaks at every hop. A re-run result
+is new input for everything downstream of it.
 
 ### `dankg find`: a title to a node
 
@@ -281,7 +327,7 @@ above for a caller that knows a section's name but not its id.
 
 ### JSON is a contract, pinned by tests
 
-`node`, `impact` and `find` print JSON by default, the same default
+`node`, `blast-radius` and `find` print JSON by default, the same default
 `graph` already has. `--format text` gives a person a readable form.
 
 Each JSON output carries its own `version`, starting at 1. `graph`'s
@@ -333,7 +379,7 @@ have no such reader. They default to JSON.
 
 5. The reference resolver, with `dankg node` as its first caller.
 
-6. `dankg impact`, with a test built from one of the real
+6. `dankg blast-radius`, with a test built from one of the real
    ancestor-quote cases above.
 
 7. `dankg find`.
@@ -343,8 +389,8 @@ have no such reader. They default to JSON.
 
 ## What this explicitly does not do
 
-- Build the GUI, or extend the TUI. `plan-gui-frontend.md` is not
-  pursued. Both TUI plans already shipped, and the TUI stays frozen as
+- Build the GUI, or extend the TUI. The GUI prototype is deleted
+  unmerged. Both TUI plans already shipped. The TUI stays frozen as
   they left it.
 - Change `graph --format json`. Its shape and its version stay as they
   ship.
@@ -357,8 +403,8 @@ have no such reader. They default to JSON.
 
 ## Open questions
 
-1. Whether `impact` should list `link` edges from an ancestor, the
-   way it lists ancestor quotes. A link to a parent does not break when
+1. Whether `blast-radius` should list `link` edges from an ancestor,
+   the way it lists ancestor quotes. A link to a parent does not break when
    a subsection changes. It is left out unless a real case argues
    otherwise.
 
@@ -369,14 +415,18 @@ have no such reader. They default to JSON.
 3. Whether `find` should match on body text as well as titles. That
    would make it a search tool, which `grep` already is.
 
+4. Whether the file graph earns a command. It was the prototype's
+   other useful view. `graph` could aggregate to one node per file
+   behind a flag. No agent question needs it yet.
+
 ## Critical files
 
 - `src/cli.md`: the new `--format` flags and the three new verbs.
 - `src/main.md`: `check_cmd` split into collect and render, the exit
   code mapping, and `index_report`'s JSON form.
 - `src/eval/session.md`: `list`'s JSON form.
-- `src/graph/query.md`: the reference resolver, `impact`, and `find`,
-  beside `links_for`.
+- `src/graph/query.md`: the reference resolver, `blast-radius`, and
+  `find`, beside `links_for`.
 - `src/depends.md`: `resolve_target` and `section_text`, reused for
   the ancestor walk.
 - `src/render/json.md`: the encoder the new outputs reuse.
@@ -389,7 +439,7 @@ have no such reader. They default to JSON.
   shape test per JSON output.
 - `check`'s text output diffed against today's binary on this corpus
   and on every fixture corpus under `tests/data`. It must be identical.
-- `impact` run on each ancestor-quote case above, listing
-  the marker the `jq` recipe misses.
+- `blast-radius` run on each ancestor-quote case above, listing the
+  marker the `jq` recipe misses.
 - One of the `agent_tests/` pilots re-run with the new commands in
   place of the recipes, compared on command count and output size.
