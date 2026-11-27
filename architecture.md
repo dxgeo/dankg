@@ -5094,7 +5094,7 @@ echo "$contains Contains edges against $link Link, $depends Depends, $chain Eval
 <!-- dankg:result name=corpus-edge-counts hash=739330e5b06a7148 -->
 
 ```
-942 Contains edges against 73 Link, 272 Depends, 0 EvalChain
+943 Contains edges against 73 Link, 272 Depends, 0 EvalChain
 ```
 
 # Open questions
